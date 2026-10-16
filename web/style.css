@@ -324,6 +324,35 @@ details.runs summary::-webkit-details-marker { display: none; }
 .research-create input, .research-create textarea { border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px 11px; outline: none; background: var(--panel); resize: vertical; }
 .research-create input:focus, .research-create textarea:focus { border-color: var(--accent); }
 
+/* ---------- research tabs: code, experiments, writing ---------- */
+.rtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-top: 16px; }
+.rtabs .tab { padding: 8px 14px; }
+.tab-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.repo-add { margin-top: 14px; }
+.repo-add select, .repo-map select, .exp-form select { border: 1px solid var(--line-strong); border-radius: 8px; padding: 4px 8px; background: var(--panel); }
+.suggest { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.repo { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; margin-top: 10px; }
+.repo-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.repo-map { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.repo-map select { max-width: 360px; }
+.table-wrap { overflow-x: auto; }
+.cmap { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cmap th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
+.cmap td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.cmap pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--bg); padding: 8px; border-radius: 6px; margin: 6px 0 0; }
+.exp-add { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.exp-add textarea, .exp-form input, .exp-form textarea, .writing-form textarea { border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px 11px; background: var(--panel); outline: none; resize: vertical; font: inherit; line-height: 1.55; }
+.exp-add textarea:focus, .exp-form input:focus, .exp-form textarea:focus, .writing-form textarea:focus { border-color: var(--accent); }
+.writing-form textarea { width: 100%; font: 13.5px/1.6 var(--mono); }
+.exp-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; background: var(--panel); }
+.exp-card.abandoned { opacity: .7; border-style: dashed; }
+.exp-form { display: flex; flex-direction: column; gap: 8px; }
+.exp-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.exp-row { display: grid; grid-template-columns: 40px 1fr; gap: 8px; font-size: 13.5px; margin: 3px 0; }
+.exp-card pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--bg); padding: 8px; border-radius: 6px; max-height: 220px; overflow: auto; }
+.exp-acts { display: flex; gap: 4px; margin-top: 6px; }
+
 /* ---------- thoughts ---------- */
 .thought-gist { font-size: 20px; font-weight: 650; line-height: 1.45; margin: 14px 0 4px; display: flex; gap: 8px; align-items: baseline; }
 .thought-gist .btn { flex: none; }

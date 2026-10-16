@@ -11,7 +11,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import cursor_api, inbox, pipeline, rules, store
+from . import cursor_api, export, inbox, pipeline, repos, rules, store
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 ROUTES = []
@@ -307,6 +307,105 @@ def research_unlink(q, body, rid):
 @route("POST", "/api/research/([^/]+)/draft")
 def research_draft(q, body, rid):
     return {"run_id": cursor_api.draft_research(rid)}
+
+
+# ---------- research: code repos (read-only), experiments, writing ----------
+
+def _sync_repo(repo_id, fresh):
+    repo = store.get_repo(repo_id)
+    try:
+        sha = repos.clone(repo["url"], repo["path"]) if fresh else repos.pull(repo["path"])
+        store.update_repo(repo_id, status="ready", head=sha, pulled_at=store.now(), error=None)
+    except Exception as e:
+        store.update_repo(repo_id, status="error" if fresh else "ready", error=str(e)[:400])
+
+
+@route("POST", "/api/research/([^/]+)/repos")
+def research_repo_add(q, body, rid):
+    url = repos.normalize(body.get("url") or "")
+    repo_id, _ = store.add_repo(url, repos.local_dir(store.home(), url))
+    store.link_repo(rid, repo_id, body.get("role") or "baseline")
+    if store.get_repo(repo_id)["status"] != "ready":
+        store.update_repo(repo_id, status="cloning", error=None)
+        bg(_sync_repo, repo_id, True)
+    return _research(rid)
+
+
+@route("POST", "/api/research/([^/]+)/repos/([^/]+)/unlink")
+def research_repo_unlink(q, body, rid, repo_id):
+    store.unlink_repo(rid, repo_id)
+    return _research(rid)
+
+
+@route("GET", "/api/repos/([^/]+)")
+def repo_get(q, body, repo_id):
+    repo = store.get_repo(repo_id)
+    if not repo:
+        raise rules.Rejected("仓库不存在")
+    return {**repo, "commits": repos.log(repo["path"], 10) if repo["status"] == "ready" else []}
+
+
+@route("POST", "/api/repos/([^/]+)/pull")
+def repo_pull(q, body, repo_id):
+    bg(_sync_repo, repo_id, store.get_repo(repo_id)["status"] == "error")
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/codemap")
+def research_codemap(q, body, rid):
+    return {"run_id": cursor_api.code_map(rid, body["repo_id"], body["paper_id"])}
+
+
+@route("POST", "/api/research/([^/]+)/experiments")
+def experiment_add(q, body, rid):
+    eid = store.add_experiment(rid, body.get("raw"), "user", body.get("title"))
+    if cursor_api.status()["enabled"] and (body.get("raw") or "").strip():
+        cursor_api.structure_experiment(eid)
+    return _research(rid)
+
+
+@route("POST", "/api/experiments/([^/]+)")
+def experiment_update(q, body, eid):
+    fields = {k: body[k] for k in ("title", "target", "setup", "results", "conclusion", "conclusion_text", "status") if k in body}
+    store.update_experiment(eid, "user", body.get("base_rev"), **fields)
+    return store.get_experiment(eid)
+
+
+@route("DELETE", "/api/experiments/([^/]+)")
+def experiment_delete(q, body, eid):
+    store.delete_experiment(eid)
+    return {"ok": True}
+
+
+@route("POST", "/api/experiments/([^/]+)/structure")
+def experiment_structure(q, body, eid):
+    return {"run_id": cursor_api.structure_experiment(eid)}
+
+
+@route("POST", "/api/research/([^/]+)/writing")
+def writing_update(q, body, rid):
+    sections = {k: (body[k] or "").strip() or None for k in ("abstract", "introduction") if k in body}
+    store.update_writing(rid, body.get("base_rev"), "user", **sections)
+    return _research(rid)
+
+
+@route("POST", "/api/research/([^/]+)/writing/proposal")
+def writing_proposal(q, body, rid):
+    if body.get("action") == "discard":
+        store.discard_writing(rid)
+    else:
+        store.accept_writing(rid, body.get("base_rev"))
+    return _research(rid)
+
+
+@route("POST", "/api/research/([^/]+)/writing/draft")
+def writing_draft(q, body, rid):
+    return {"run_id": cursor_api.draft_writing(rid, (body.get("instruction") or "").strip() or None)}
+
+
+@route("GET", "/api/research/([^/]+)/export")
+def writing_export(q, body, rid):
+    return export.research_export(rid)
 
 
 @route("POST", "/api/threads")

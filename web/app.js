@@ -20,7 +20,7 @@ const post = (u, b = {}) => api('POST', u, b);
 const S = {
   view: 'inbox', arg: null, state: null, list: [], sel: null, detail: null,
   open: new Set(['VLM', 'VLA', 'WAM']), images: [], reader: null, threads: {},
-  picker: null, scope: 'library', thoughts: [], search: null, seen: {}, scopeTitles: {},
+  picker: null, scope: 'library', thoughts: [], search: null, seen: {}, scopeTitles: {}, researchTab: {},
 };
 
 const VIEWS = {
@@ -342,7 +342,7 @@ function researchItem(x) {
     <div class="item-meta">${stageChip(x.stage)}${elementsChip(x.elements_done)}${x.has_proposal ? '<span class="chip violet">修改稿待确认</span>' : ''}<time>${ago(x.updated_at)}</time></div>
     <div class="item-title">${esc(x.title)}</div>
     ${x.summary ? `<div class="item-tldr">${esc(x.summary)}</div>` : ''}
-    <div class="item-tags">${x.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${x.link_count ? `<span class="chip">${x.link_count} 份素材</span>` : ''}</div>
+    <div class="item-tags">${x.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${x.link_count ? `<span class="chip">${x.link_count} 份素材</span>` : ''}${x.exp_count ? `<span class="chip">实验 ${x.exp_count}</span>` : ''}${x.repo_count ? `<span class="chip">仓库 ${x.repo_count}</span>` : ''}</div>
   </div>`;
 }
 
@@ -418,25 +418,161 @@ const FIELDS = [
 ];
 const ELEMENTS = FIELDS.slice(0, 3);
 
+const CONCLUSION = { supports: ['支持', 'chip green'], refutes: ['反驳', 'chip red'], inconclusive: ['不确定', 'chip'] };
+const EXP_STATUS = { planned: '计划中', running: '进行中', done: '完成', abandoned: '放弃' };
+const runsOf = (x, kind) => x.runs.filter((r) => r.kind === kind);
+const liveRun = (runs) => runs.find((r) => live(r.status));
+
 function researchDetail(x) {
-  const run = x.runs.find((r) => live(r.status));
+  const run = liveRun(runsOf(x, 'draft'));
   const canDraft = agentOn() && !run;
-  let h = `<div class="src-bar">${stageChip(x.stage)}${elementsChip(x.elements_done)}
+  const exps = x.experiments, by = (c) => exps.filter((e) => e.conclusion === c).length;
+  const progress = [
+    exps.length ? `<span class="chip" title="实验记录">实验 ${exps.length}${exps.length ? `（支持 ${by('supports')} · 反驳 ${by('refutes')}）` : ''}</span>` : '',
+    x.repos.length ? `<span class="chip">仓库 ${x.repos.length}</span>` : '',
+    x.writing.abstract || x.writing.introduction ? '<span class="chip">有草稿</span>' : '',
+  ].join('');
+  let h = `<div class="src-bar">${stageChip(x.stage)}${elementsChip(x.elements_done)}${progress}
     <span>${x.stage === 'established' ? `${ago(x.established_at)}确立` : `更新于 ${ago(x.updated_at)}`}</span><span class="grow"></span>
     <button class="btn sm" data-action="research-discuss" data-id="${x.id}" title="和 agent 一起推敲；它的调整会作为修改稿交给你确认">在讨论里推进</button>
-    <button class="btn sm" data-action="research-draft" data-id="${x.id}" ${canDraft ? '' : 'disabled'} title="${agentOn() ? '让 agent 根据素材起草三要素，作为修改稿交给你确认' : '需要先连接 agent'}">${run ? '<span class="spin"></span>起草中' : '让 agent 起草'}</button>
-    <button class="btn sm" data-action="research-edit" data-id="${x.id}">${S.editResearch === x.id ? '取消编辑' : '编辑'}</button>
     <button class="btn sm ghost" data-action="research-delete" data-id="${x.id}">删除</button></div>`;
-  if (S.editResearch === x.id) return h + researchForm(x) + materialsBlock(x);
+  if (S.editResearch === x.id) return h + researchForm(x);
   h += `<h1 class="research-title">${esc(x.title)}</h1>${x.summary ? `<div class="research-summary">${inline(x.summary)}</div>` : ''}${topicsRow(x, 'research')}`;
+  const tab = S.researchTab[x.id] || 'overview';
+  const tabs = [['overview', '概览'], ['materials', '素材', x.links.length], ['code', '代码', x.repos.length], ['experiments', '实验', exps.length], ['writing', '写作']];
+  h += `<div class="rtabs">${tabs.map(([k, label, n]) => `<button class="tab ${tab === k ? 'on' : ''}" data-action="research-tab" data-id="${x.id}" data-tab="${k}">${label}${n ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</div>`;
+  if (tab === 'materials') return h + materialsBlock(x);
+  if (tab === 'code') return h + codeTab(x);
+  if (tab === 'experiments') return h + experimentsTab(x);
+  if (tab === 'writing') return h + writingTab(x);
+  h += `<div class="tab-acts"><button class="btn sm" data-action="research-draft" data-id="${x.id}" ${canDraft ? '' : 'disabled'} title="${agentOn() ? '让 agent 根据素材起草三要素，作为修改稿交给你确认' : '需要先连接 agent'}">${run ? '<span class="spin"></span>起草中' : '让 agent 起草三要素'}</button>
+    <button class="btn sm" data-action="research-edit" data-id="${x.id}">编辑</button></div>`;
   if (run) h += '<div class="card-wait"><span class="spin"></span>Agent 正在起草：读素材、查库里的相关工作。写好后会作为修改稿等你确认…</div>';
   if (x.proposal) h += proposalBlock(x);
   h += `<div class="elements">${ELEMENTS.map(([k, label, hint]) => `<div class="element ${x.body?.[k] ? '' : 'empty'}"><h3>${label}</h3>${x.body?.[k]
     ? md(x.body[k]) : `<div class="hint">${hint}</div><button class="btn sm ghost" data-action="research-edit" data-id="${x.id}">补上</button>`}</div>`).join('')}
     ${x.body?.notes ? `<div class="element"><h3>其他</h3>${md(x.body.notes)}</div>` : ''}</div>`;
-  h += establishBar(x) + materialsBlock(x);
-  if (x.runs.length) h += `<details class="runs" ${run ? 'open' : ''}><summary>agent 起草记录 · ${x.runs.length} 次 <span class="hint">（调优：改 librarian/research.md）</span></summary>${x.runs.map((r) => runCard(r, '起草')).join('')}</details>`;
+  h += establishBar(x);
+  const drafts = runsOf(x, 'draft');
+  if (drafts.length) h += `<details class="runs" ${run ? 'open' : ''}><summary>agent 起草记录 · ${drafts.length} 次 <span class="hint">（调优：改 librarian/research.md）</span></summary>${drafts.map((r) => runCard(r, '起草')).join('')}</details>`;
   return h;
+}
+
+function runsBlock2(runs, label, spec) {
+  if (!runs.length) return '';
+  return `<details class="runs" ${liveRun(runs) ? 'open' : ''}><summary>${label}记录 · ${runs.length} 次 <span class="hint">（调优：改 ${spec}）</span></summary>${runs.map((r) => runCard(r, label)).join('')}</details>`;
+}
+
+// ---------- research: code (read-only) ----------
+
+function codeTab(x) {
+  const linked = new Set(x.repos.map((r) => r.url.toLowerCase()));
+  const official = x.links.filter((l) => l.kind === 'paper' && l.code && !linked.has(l.code.replace(/\/$/, '').replace(/\.git$/, '').toLowerCase()));
+  const papers = x.links.filter((l) => l.kind === 'paper' && !l.missing);
+  const run = liveRun(runsOf(x, 'codemap'));
+  let h = `<form class="add-line repo-add" data-form="repo-add" data-id="${x.id}"><input placeholder="关联代码仓库：GitHub 链接、git 地址或本机路径">
+      <select name="role"><option value="baseline">baseline</option><option value="own">自己的</option></select><button class="btn sm primary">关联</button></form>
+    <p class="hint">只读：克隆到 ~/paper2brain-data/repos，只拉取，从不修改、提交或推送。私有仓库用这台 Mac 的 SSH 凭据。</p>`;
+  if (official.length) h += `<div class="suggest">素材里的论文有官方代码：${official.map((l) => `<button class="btn sm" data-action="repo-official" data-id="${x.id}" data-url="${esc(l.code)}">关联 ${esc(l.code.replace(/^https?:\/\/(www\.)?github\.com\//, ''))}</button>`).join('')}</div>`;
+  if (run) h += '<div class="card-wait"><span class="spin"></span>Agent 正在读代码、做方法—代码对照…</div>';
+  h += x.repos.map((r) => {
+    const st = r.status === 'cloning' ? '<span class="chip violet"><span class="spin"></span>克隆中</span>' : r.status === 'error' ? '<span class="chip red">出错</span>' : `<span class="chip green">就绪</span><span class="hint">${(r.head || '').slice(0, 7)} · ${ago(r.pulled_at)}拉取</span>`;
+    return `<div class="repo"><div class="repo-head"><b class="mono">${esc(r.name)}</b><span class="chip">${r.role === 'own' ? '自己的' : 'baseline'}</span>${st}<span class="grow"></span>
+      ${r.url.startsWith('http') ? `<a class="btn sm ghost" href="${esc(r.url)}" target="_blank">打开 ↗</a>` : ''}
+      <button class="btn sm ghost" data-action="repo-commits" data-id="${r.id}" ${r.status === 'ready' ? '' : 'disabled'}>最近提交</button>
+      <button class="btn sm ghost" data-action="repo-pull" data-id="${r.id}">拉取最新</button>
+      <button class="btn sm ghost" data-action="repo-unlink" data-id="${x.id}" data-repo="${r.id}">移除</button></div>
+      ${r.status === 'error' ? `<div class="hint" style="color:var(--red)">${esc(r.error || '')}</div>` : ''}
+      ${r.status === 'ready' && papers.length ? `<div class="repo-map"><span class="hint">方法—代码对照：</span><select data-map-paper="${r.id}">${papers.map((p) => `<option value="${esc(p.ref)}">${esc(short(p.label, 60))}</option>`).join('')}</select>
+        <button class="btn sm" data-action="codemap" data-id="${x.id}" data-repo="${r.id}" ${agentOn() && !run ? '' : 'disabled'}>让 agent 对照</button></div>` : ''}</div>`;
+  }).join('') || '<div class="hint" style="margin-top:12px">还没有关联代码。关联 baseline 的官方代码后，agent 可以把论文里的每个组件对到具体代码，并找出论文没写的实现细节。</div>';
+  for (const m of x.code_maps) {
+    const repo = x.repos.find((r) => r.id === m.repo_id), paper = x.links.find((l) => l.ref === m.paper_id);
+    h += `<div class="block"><div class="block-title">方法—代码对照：${esc(short(paper?.label || m.paper_id, 50))} ↔ ${esc(repo?.name || '')} @ ${m.commit_sha.slice(0, 7)}<span class="line"></span><span class="hint">${ago(m.created_at)}</span></div>
+      <table class="cmap"><thead><tr><th>组件</th><th>代码</th><th>说明</th></tr></thead><tbody>${m.rows.map((r) => {
+        const url = repo && repo.url.startsWith('https://github.com/') ? `${repo.url}/blob/${m.commit_sha}/${r.file}${r.line ? `#L${r.line}` : ''}` : null;
+        const loc = `${r.file}${r.line ? `:${r.line}` : ''}`;
+        return `<tr><td><b>${esc(r.component)}</b>${r.page ? ` ${cite(m.paper_id, r.page, r.paper_quote)}` : ''}${r.symbol ? `<div class="hint mono">${esc(r.symbol)}</div>` : ''}</td>
+          <td>${url ? `<a class="mono" href="${esc(url)}" target="_blank">${esc(loc)}</a>` : `<span class="mono">${esc(loc)}</span>`}${r.snippet ? `<details><summary class="hint">代码</summary><pre>${esc(r.snippet)}</pre></details>` : ''}</td>
+          <td>${inline(r.note || '')}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
+  }
+  return h + runsBlock2(runsOf(x, 'codemap'), '对照', 'librarian/code.md');
+}
+
+// ---------- research: experiments ----------
+
+function experimentsTab(x) {
+  const exps = x.experiments;
+  let h = `<form class="exp-add" data-form="exp-add" data-id="${x.id}">
+      <textarea rows="3" placeholder="贴实验结果：评测日志、终端输出、wandb 汇总，或者一句话“LIBERO 跑完了 92.3，比 baseline 高 4 个点”"></textarea>
+      <div style="display:flex;gap:8px;align-items:center"><button class="btn primary sm">记下</button>
+      <span class="hint">${agentOn() ? 'agent 会整理成结构化记录，数字必须出自你贴的原文；结论和三要素冲突时会提交修改稿。' : '连接 agent 后会自动整理；现在可以先记下，再手动编辑。'}</span></div></form>`;
+  if (!exps.length) return h + '<div class="hint" style="margin-top:12px">还没有实验。每条实验记下验证了三要素的哪一点、结果和结论；失败和放弃的也记，避免以后重踩。</div>';
+  const metrics = [...new Set(exps.flatMap((e) => (e.results || []).map((r) => r.name)))].slice(0, 8);
+  if (metrics.length) {
+    h += `<div class="block"><div class="block-title">结果汇总<span class="line"></span></div><div class="table-wrap"><table class="cmap"><thead><tr><th>实验</th>${metrics.map((m) => `<th>${esc(m)}</th>`).join('')}<th>结论</th></tr></thead><tbody>
+      ${exps.filter((e) => (e.results || []).length).map((e) => `<tr><td>${esc(e.title || firstLine(e.raw))}</td>${metrics.map((m) => `<td class="mono">${esc((e.results.find((r) => r.name === m) || {}).value || '')}</td>`).join('')}
+        <td>${e.conclusion ? `<span class="${CONCLUSION[e.conclusion][1]}">${CONCLUSION[e.conclusion][0]}</span>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`;
+  }
+  h += `<div class="block"><div class="block-title">实验记录<span class="line"></span></div>${exps.map((e) => experimentCard(e)).join('')}</div>`;
+  return h;
+}
+
+function experimentCard(e) {
+  const run = liveRun(e.runs);
+  if (S.editExp === e.id) {
+    return `<form class="exp-card exp-form" data-form="exp-edit" data-id="${e.id}" data-rev="${e.revision}">
+      <input name="title" value="${esc(e.title || '')}" placeholder="做了什么">
+      <input name="target" value="${esc(e.target || '')}" placeholder="验证三要素里的哪一点">
+      <textarea name="setup" rows="2" placeholder="设置：配置、数据、平台、commit">${esc(e.setup || '')}</textarea>
+      <textarea name="results" rows="3" placeholder="结果，每行一个：指标: 数值">${esc((e.results || []).map((r) => `${r.name}: ${r.value}`).join('\n'))}</textarea>
+      <div style="display:flex;gap:8px"><select name="status">${Object.entries(EXP_STATUS).map(([k, l]) => `<option value="${k}" ${e.status === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <select name="conclusion"><option value="">结论未定</option>${Object.entries(CONCLUSION).map(([k, [l]]) => `<option value="${k}" ${e.conclusion === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <textarea name="conclusion_text" rows="2" placeholder="一句话：对研究意味着什么">${esc(e.conclusion_text || '')}</textarea>
+      <div style="display:flex;gap:8px"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" data-action="exp-edit" data-id="${e.id}">取消</button></div></form>`;
+  }
+  return `<div class="exp-card ${e.status === 'abandoned' ? 'abandoned' : ''}"><div class="exp-head"><b>${esc(e.title || short(firstLine(e.raw), 60) || '未命名实验')}</b>
+      <span class="chip">${EXP_STATUS[e.status]}</span>${e.conclusion ? `<span class="${CONCLUSION[e.conclusion][1]}">${CONCLUSION[e.conclusion][0]}</span>` : ''}
+      ${run ? '<span class="chip violet"><span class="spin"></span>agent 整理中</span>' : ''}<span class="grow"></span><span class="hint">${ago(e.created_at)}</span></div>
+    ${e.target ? `<div class="exp-row"><span class="hint">验证</span>${inline(e.target)}</div>` : ''}
+    ${e.setup ? `<div class="exp-row"><span class="hint">设置</span>${inline(e.setup)}</div>` : ''}
+    ${(e.results || []).length ? `<div class="exp-row"><span class="hint">结果</span><span>${e.results.map((r) => `${esc(r.name)} <b class="mono">${esc(r.value)}</b>${r.note ? `<span class="hint">（${esc(r.note)}）</span>` : ''}`).join('；')}</span></div>` : ''}
+    ${e.conclusion_text ? `<div class="exp-row"><span class="hint">结论</span>${inline(e.conclusion_text)}</div>` : ''}
+    ${e.raw ? `<details><summary class="hint">原始结果</summary><pre>${esc(e.raw)}</pre></details>` : ''}
+    <div class="exp-acts"><button class="btn sm ghost" data-action="exp-edit" data-id="${e.id}">编辑</button>
+      <button class="btn sm ghost" data-action="exp-structure" data-id="${e.id}" ${agentOn() && !run && e.raw ? '' : 'disabled'}>让 agent 整理</button>
+      <button class="btn sm ghost" data-action="exp-delete" data-id="${e.id}">删除</button></div>
+    ${e.runs.length && !run && e.runs[0].status === 'ERROR' ? `<div class="hint" style="color:var(--red)">agent 整理出错：${esc(e.runs[0].error || '')}</div>` : ''}</div>`;
+}
+
+// ---------- research: writing ----------
+
+const SECTIONS = [['abstract', '摘要', 'Abstract：背景、问题、核心洞见、主要结果（带数字）、意义'], ['introduction', '引言', 'Introduction：背景 → 问题 → 现有不足（引用）→ 洞见与方法 → 结果 → 贡献']];
+
+function writingTab(x) {
+  const w = x.writing, run = liveRun(runsOf(x, 'writing'));
+  let h = `<p class="hint" style="margin-top:12px">完整论文在 Overleaf 写；这里用 Markdown 打磨摘要和引言，和 agent 反复迭代。引用写成 [arxiv:2410.24164]，导出时转成 \\cite。</p>
+    <form class="add-line" data-form="writing-draft" data-id="${x.id}"><input placeholder="给 agent 的要求（可选）：比如“引言更强调 sim2real 的数据瓶颈”" ${agentOn() && !run ? '' : 'disabled'}>
+      <button class="btn sm primary" ${agentOn() && !run ? '' : 'disabled'}>${run ? '<span class="spin"></span>写作中' : w.abstract || w.introduction ? '让 agent 改写' : '让 agent 起草'}</button></form>
+    <div class="tab-acts"><button class="btn sm" data-action="research-discuss" data-id="${x.id}">在讨论里迭代</button>
+      <button class="btn sm" data-action="export-latex" data-id="${x.id}" ${w.abstract || w.introduction ? '' : 'disabled'}>复制 LaTeX</button>
+      <button class="btn sm" data-action="export-bib" data-id="${x.id}" ${w.abstract || w.introduction ? '' : 'disabled'}>下载 BibTeX</button></div>`;
+  if (run) h += '<div class="card-wait"><span class="spin"></span>Agent 正在写：读三要素、实验记录和相关论文。写好后会作为修改稿等你确认…</div>';
+  if (w.proposal) {
+    const p = w.proposal;
+    h += `<div class="proposal"><div class="proposal-head"><b>Agent 提交的写作修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动草稿</span></div>
+      ${p.note ? `<div class="hint" style="margin-bottom:6px">${esc(p.note)}</div>` : ''}
+      ${SECTIONS.filter(([k]) => p[k]).map(([k, l]) => `<div class="pr-row"><div class="pr-label">${l} ${w[k] ? '<span class="chip">修改</span>' : '<span class="chip green">新增</span>'}</div><div class="pr-new">${md(p[k])}</div></div>`).join('')}
+      <div class="proposal-acts"><button class="btn primary" data-action="writing-proposal" data-id="${x.id}" data-op="accept" data-rev="${w.revision}">采用</button>
+        <button class="btn" data-action="research-discuss" data-id="${x.id}">继续调整（去讨论）</button>
+        <button class="btn ghost" data-action="writing-proposal" data-id="${x.id}" data-op="discard">放弃</button></div></div>`;
+  }
+  h += SECTIONS.map(([k, label, hint]) => S.editWriting === k
+    ? `<form class="element writing-form" data-form="writing-edit" data-id="${x.id}" data-section="${k}" data-rev="${w.revision}"><h3>${label}</h3>
+        <textarea rows="12">${esc(w[k] || '')}</textarea><div style="display:flex;gap:8px;margin-top:8px"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" data-action="writing-edit" data-section="${k}">取消</button></div></form>`
+    : `<div class="element ${w[k] ? '' : 'empty'}"><h3>${label}<button class="btn sm ghost" data-action="writing-edit" data-section="${k}" style="float:right">编辑</button></h3>${w[k] ? md(w[k]) : `<div class="hint">${hint}</div>`}</div>`).join('');
+  return h + runsBlock2(runsOf(x, 'writing'), '写作', 'librarian/writing.md');
 }
 
 function establishBar(x) {
@@ -1146,6 +1282,43 @@ const actions = {
       afterResearch(el.dataset.id, `已作为素材加入「${el.querySelector('.pick-title').textContent}」`);
     } catch (e) { fail(e); }
   },
+  'research-tab': (el) => { S.researchTab[el.dataset.id] = el.dataset.tab; renderDetail(); },
+  'repo-official': (el) => researchPost(`${enc(el.dataset.id)}/repos`, { url: el.dataset.url, role: 'baseline' }, '已关联，正在克隆'),
+  'repo-pull': async (el) => { await post(`/api/repos/${enc(el.dataset.id)}/pull`).catch(fail); toast('正在拉取'); setTimeout(() => loadDetail(true), 1500); },
+  'repo-unlink': (el) => researchPost(`${enc(el.dataset.id)}/repos/${enc(el.dataset.repo)}/unlink`, {}, '已移除（本地克隆保留）'),
+  'repo-commits': async (el) => {
+    const r = await get(`/api/repos/${enc(el.dataset.id)}`).catch(fail);
+    if (!r) return;
+    modal(`<h3>${esc(r.name)} · 最近提交</h3>${r.commits.map((c) => `<div class="source"><span class="source-kind mono">${c.sha.slice(0, 7)}</span><span class="source-label">${esc(c.subject)}<span class="hint">　${esc(c.author)}</span></span><time>${ago(c.date)}</time></div>`).join('')}
+      <div style="text-align:right;margin-top:10px"><button class="btn" data-action="close-modal">关闭</button></div>`);
+  },
+  codemap: (el) => {
+    const paper = document.querySelector(`select[data-map-paper="${CSS.escape(el.dataset.repo)}"]`).value;
+    researchPost(`${enc(el.dataset.id)}/codemap`, { repo_id: el.dataset.repo, paper_id: paper }, '已交给 agent 读代码，完成后对照表会出现在这里');
+  },
+  'exp-edit': (el) => { S.editExp = S.editExp === el.dataset.id ? null : el.dataset.id; renderDetail(); },
+  'exp-structure': async (el) => { await post(`/api/experiments/${enc(el.dataset.id)}/structure`).catch(fail); toast('已交给 agent 整理'); loadDetail(true); },
+  'exp-delete': async (el) => {
+    if (!confirm('删除这条实验记录？')) return;
+    await api('DELETE', `/api/experiments/${enc(el.dataset.id)}`).catch(fail);
+    loadDetail(true);
+  },
+  'writing-edit': (el) => { S.editWriting = S.editWriting === el.dataset.section ? null : el.dataset.section; renderDetail(); $('.writing-form textarea')?.focus(); },
+  'writing-proposal': (el) => researchPost(`${enc(el.dataset.id)}/writing/proposal`, { action: el.dataset.op, base_rev: +el.dataset.rev || undefined },
+    el.dataset.op === 'discard' ? '已放弃修改稿' : '已采用修改稿'),
+  'export-latex': async (el) => {
+    const out = await get(`/api/research/${enc(el.dataset.id)}/export`).catch(fail);
+    if (!out) return;
+    try { await navigator.clipboard.writeText(out.latex); toast('LaTeX 已复制，贴到 Overleaf 即可'); }
+    catch { modal(`<h3>LaTeX</h3><pre>${esc(out.latex)}</pre><div style="text-align:right"><button class="btn" data-action="close-modal">关闭</button></div>`); }
+  },
+  'export-bib': async (el) => {
+    const out = await get(`/api/research/${enc(el.dataset.id)}/export`).catch(fail);
+    if (!out) return;
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([out.bib], { type: 'text/plain' })), download: 'references.bib' });
+    a.click();
+    toast(out.bib ? 'BibTeX 已下载' : '草稿里还没有引用');
+  },
   'research-edit': (el) => { S.editResearch = S.editResearch === el.dataset.id ? null : el.dataset.id; renderDetail(); $('.research-form textarea[name="problem"]')?.focus(); },
   'research-draft': async (el) => {
     try { await post(`/api/research/${enc(el.dataset.id)}/draft`); toast('已交给 agent 起草，写好后会作为修改稿等你确认'); loadDetail(true); }
@@ -1263,6 +1436,37 @@ async function submitResearchForm(form) {
     const c = S.pickerCtx;
     const x = await post('/api/research', { title, summary: f.get('summary'), topics: c.topics || [], links: c.links || [] });
     afterResearch(x.id, '已开新研究（构思中）');
+  } else if (kind === 'repo-add') {
+    const url = form.querySelector('input').value.trim();
+    if (!url) return;
+    await post(`/api/research/${enc(form.dataset.id)}/repos`, { url, role: f.get('role') });
+    toast('已关联，正在克隆');
+    loadDetail(true);
+  } else if (kind === 'exp-add') {
+    const raw = form.querySelector('textarea').value.trim();
+    if (!raw) return;
+    await post(`/api/research/${enc(form.dataset.id)}/experiments`, { raw });
+    form.querySelector('textarea').value = '';
+    toast(agentOn() ? '已记下，agent 正在整理' : '已记下');
+    loadDetail(true);
+  } else if (kind === 'exp-edit') {
+    const results = (f.get('results') || '').split('\n').map((l) => l.split(/[:：]/)).filter((p) => p.length >= 2 && p[0].trim())
+      .map(([name, ...v]) => ({ name: name.trim(), value: v.join(':').trim() }));
+    await post(`/api/experiments/${enc(form.dataset.id)}`, { title: f.get('title'), target: f.get('target'), setup: f.get('setup'), results,
+      status: f.get('status'), conclusion: f.get('conclusion') || null, conclusion_text: f.get('conclusion_text'), base_rev: +form.dataset.rev });
+    S.editExp = null;
+    toast('已保存');
+    loadDetail(true);
+  } else if (kind === 'writing-edit') {
+    await post(`/api/research/${enc(form.dataset.id)}/writing`, { [form.dataset.section]: form.querySelector('textarea').value, base_rev: +form.dataset.rev });
+    S.editWriting = null;
+    toast('已保存');
+    loadDetail(true);
+  } else if (kind === 'writing-draft') {
+    await post(`/api/research/${enc(form.dataset.id)}/writing/draft`, { instruction: form.querySelector('input').value });
+    form.querySelector('input').value = '';
+    toast('已交给 agent，写好后会作为修改稿等你确认');
+    loadDetail(true);
   } else if (kind === 'research-edit') {
     const body = Object.fromEntries(FIELDS.map(([k]) => [k, (f.get(k) || '').trim() || null]));
     await post(`/api/research/${enc(form.dataset.id)}`, { title: f.get('title'), summary: f.get('summary'), body, base_rev: +form.dataset.rev });
@@ -1276,7 +1480,7 @@ document.addEventListener('submit', async (e) => {
   const form = e.target.closest('[data-form]');
   if (!form) return;
   e.preventDefault();
-  if (form.dataset.form.startsWith('research-')) {
+  if (/^(research|repo|exp|writing)-/.test(form.dataset.form)) {
     try { await submitResearchForm(form); } catch (err) { fail(err); if (/已被修改/.test(err.message)) loadDetail(true); }
     return;
   }
@@ -1369,7 +1573,7 @@ async function refresh(force) {
       if ((force || changed('list', list)) && !typingInList) { S.list = list; renderBody(); }
     }
     // the agent and the iPhone change things behind our back; loadDetail only re-renders when the data changed
-    if (S.sel && !editing && !S.picker && !S.editResearch && !S.editGist && !document.querySelector('.modal-bg')) await loadDetail(force);
+    if (S.sel && !editing && !S.picker && !S.editResearch && !S.editGist && !S.editExp && !S.editWriting && !document.querySelector('.modal-bg')) await loadDetail(force);
     if (S.reader) {
       const p = await get(`/api/papers/${enc(S.reader.pid)}`);
       if (force || changed('reader', p)) {

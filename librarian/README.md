@@ -33,6 +33,10 @@
 ./p2b research add --title "..." --summary "..." [--paper <id>] [--thread <id>] [--topic "VLA"]
 ./p2b research link <研究 id> paper|thought|thread|capture <id>
 ./p2b research propose <研究 id> --file /tmp/research.json --base-rev N   # 修改稿，用户确认后才生效
+./p2b repo <仓库 id>                    # 只读代码仓库：本地路径、commit、最近提交（见 librarian/code.md）
+./p2b codemap put --research <id> --repo <id> --paper <id> --file /tmp/map.json
+./p2b experiment show|put <实验 id> ...  # 见 librarian/experiment.md
+./p2b writing show|propose <研究 id> ... # 摘要与引言草稿，见 librarian/writing.md
 ./p2b papers [--topic "VLA"] [--unsorted]
 ./p2b thoughts
 ./p2b search "关键词"

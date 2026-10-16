@@ -180,6 +180,102 @@ def validate_research_draft(draft, known_papers):
     return out, sorted(p for p in cited if p)
 
 
+_NUM = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?")
+
+
+def _numbers(text):
+    return {float(n) for n in _NUM.findall((text or "").replace(",", ""))}
+
+
+def validate_experiment(draft, raw):
+    """The agent's structured version of a pasted result. Every number it reports must appear in the raw input,
+    so a figure can never be invented on the way from the log to the results table."""
+    if not isinstance(draft, dict):
+        raise Rejected("实验记录必须是 JSON 对象")
+    errors = []
+    out = {"title": _text(draft, "title", errors), "target": _text(draft, "target", errors, required=False),
+           "setup": _text(draft, "setup", errors, required=False),
+           "conclusion_text": _text(draft, "conclusion_text", errors, required=False)}
+    if draft.get("status", "done") not in ("planned", "running", "done", "abandoned"):
+        errors.append("status 只能是 planned / running / done / abandoned")
+    if draft.get("conclusion") not in (None, "supports", "refutes", "inconclusive"):
+        errors.append("conclusion 只能是 supports / refutes / inconclusive 或 null")
+    out["status"], out["conclusion"] = draft.get("status", "done"), draft.get("conclusion")
+    results = draft.get("results") or []
+    if not isinstance(results, list):
+        errors.append("results 必须是数组 [{name, value, note}]")
+        results = []
+    seen = _numbers(raw)
+    out["results"] = []
+    for i, r in enumerate(results, 1):
+        if not isinstance(r, dict) or not str(r.get("name", "")).strip() or r.get("value") in (None, ""):
+            errors.append(f"results 第 {i} 条需要 name 和 value")
+            continue
+        missing = [n for n in _numbers(str(r["value"])) if n not in seen]
+        if missing:
+            errors.append(f"results 第 {i} 条（{r['name']}）的数字 {missing} 在原始结果里找不到")
+        out["results"].append({"name": str(r["name"]).strip(), "value": str(r["value"]).strip(), "note": (r.get("note") or "").strip() or None})
+    allowed = seen | {n for r in out["results"] for n in _numbers(r["value"])}
+    extra = [n for n in _numbers(out["conclusion_text"]) if n not in allowed]
+    if extra:
+        errors.append(f"结论里的数字 {extra} 在原始结果里找不到")
+    if errors:
+        raise Rejected("实验记录未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+def _code_norm(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def validate_code_map(rows, pages, read_file):
+    """Method–code map rows: each paper quote verbatim in the paper, each code snippet verbatim in the file at the
+    pinned commit (whitespace-insensitive). Line numbers are recomputed from where the snippet actually is."""
+    if not isinstance(rows, list) or not rows:
+        raise Rejected("对照表至少要有一行：[{component, paper_quote, page, file, snippet, note}]")
+    errors, out = [], []
+    for i, r in enumerate(rows, 1):
+        if not isinstance(r, dict) or not _text(r, "component", [], True) or not _text(r, "file", [], True):
+            errors.append(f"第 {i} 行需要 component 和 file")
+            continue
+        row = {"component": r["component"].strip(), "file": r["file"].strip().lstrip("./"),
+               "symbol": (r.get("symbol") or "").strip() or None, "note": (r.get("note") or "").strip() or None}
+        if r.get("paper_quote"):
+            fixed, cite_errors = verify_citations([{"quote": r["paper_quote"], "page": r.get("page")}], pages)
+            errors += [f"第 {i} 行：{e}" for e in cite_errors]
+            if fixed:
+                row.update(paper_quote=fixed[0]["quote"], page=fixed[0]["page"])
+        snippet = (r.get("snippet") or "").strip()
+        content = read_file(row["file"])
+        if content is None:
+            errors.append(f"第 {i} 行：文件 {row['file']} 在这个 commit 里不存在")
+        elif len(_code_norm(snippet)) < 10:
+            errors.append(f"第 {i} 行：snippet 太短，请从文件里逐字摘一段（至少 10 个字符）")
+        elif _code_norm(snippet) not in _code_norm(content):
+            errors.append(f"第 {i} 行：snippet 在 {row['file']} 里找不到（要逐字摘录）")
+        else:
+            first = _code_norm(next((ln for ln in snippet.splitlines() if ln.strip()), ""))
+            row["line"] = next((n for n, ln in enumerate(content.splitlines(), 1) if first in _code_norm(ln)), None)
+            row["snippet"] = snippet
+        out.append(row)
+    if errors:
+        raise Rejected("方法—代码对照未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+def validate_writing_draft(draft, known_papers):
+    if not isinstance(draft, dict) or not any(isinstance(draft.get(k), str) and draft[k].strip() for k in ("abstract", "introduction")):
+        raise Rejected("写作修改稿需要 abstract 或 introduction（Markdown 字符串）")
+    out = {k: draft[k].strip() for k in ("abstract", "introduction") if isinstance(draft.get(k), str) and draft[k].strip()}
+    cited = {parse_pid(m) for v in out.values() for m in _PAPER_CITE.findall(v)}
+    missing = sorted(p for p in cited if p and p not in known_papers)
+    if missing:
+        raise Rejected(f"写作修改稿引用了库里没有的论文：{missing}（先用 ./p2b fetch 入库，或去掉引用）")
+    if draft.get("note"):
+        out["note"] = str(draft["note"]).strip()
+    return out
+
+
 def check_link(existing, by):
     """The user's word on a capture–paper link is final: the agent may neither re-add a link the user removed
     nor change one the user confirmed."""

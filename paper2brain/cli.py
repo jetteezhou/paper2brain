@@ -6,7 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import pipeline, rules, sources, store
+from . import pipeline, repos, rules, sources, store
 
 
 def to_pid(s):
@@ -76,6 +76,37 @@ def run(args):
         return {"id": store.add_thought(args.text, "agent", args.capture, args.paper and to_pid(args.paper), args.gist)}
     if cmd == "note":
         return {"id": store.add_note(args.text, "agent", args.paper and to_pid(args.paper), args.topic, args.thread)}
+    if cmd == "repo":
+        repo = store.get_repo(args.id)
+        if not repo:
+            raise rules.Rejected("仓库不存在")
+        return {**repo, "recent_commits": repos.log(repo["path"], 8) if repo["status"] == "ready" else []}
+    if cmd == "codemap":
+        repo, pid = store.get_repo(args.repo), to_pid(args.paper)
+        if not repo or repo["status"] != "ready":
+            raise rules.Rejected("仓库还没克隆好")
+        commit = repos.head(repo["path"])
+        rows = rules.validate_code_map(_read_json(args.file), store.pages(pid), repos.reader(repo["path"], commit))
+        store.put_code_map(args.research, repo["id"], pid, commit, rows, "agent")
+        return {"accepted": True, "commit": commit, "rows": len(rows)}
+    if cmd == "experiment":
+        if args.action == "add":
+            return {"id": store.add_experiment(args.research, args.raw, "agent", args.title)}
+        e = store.get_experiment(args.id)
+        if not e:
+            raise rules.Rejected("实验不存在")
+        if args.action == "show":
+            e.pop("runs")
+            return e
+        draft = rules.validate_experiment(_read_json(args.file), e["raw"])
+        rev = store.update_experiment(args.id, "agent", args.base_rev, **draft)
+        return {"accepted": True, "revision": rev}
+    if cmd == "writing":
+        if args.action == "show":
+            return store.get_writing(args.id)
+        draft = rules.validate_writing_draft(_read_json(args.file), store.paper_ids())
+        store.propose_writing(args.id, draft, "agent", args.base_rev)
+        return {"proposed": True, "note": "写作修改稿已交给用户确认；采用前不会改动草稿"}
     if cmd == "research":
         if args.action == "list":
             return store.list_research("" if args.unsorted else (args.topic[0] if args.topic else None))
@@ -176,6 +207,27 @@ def parser():
     s.add_argument("--paper")
     s.add_argument("--topic")
     s.add_argument("--thread")
+
+    sub.add_parser("repo", help="代码仓库（只读）：本地路径、当前 commit、最近提交").add_argument("id")
+    s = sub.add_parser("codemap", help="提交方法—代码对照（论文引用和代码片段都逐字核对）")
+    s.add_argument("action", choices=["put"])
+    s.add_argument("--research", required=True)
+    s.add_argument("--repo", required=True)
+    s.add_argument("--paper", required=True)
+    s.add_argument("--file", required=True)
+    s = sub.add_parser("experiment", help="实验记录：add / show / put 提交整理结果（数字须出自原始结果）")
+    s.add_argument("action", choices=["add", "show", "put"])
+    s.add_argument("id", nargs="?")
+    s.add_argument("--research")
+    s.add_argument("--raw", default="")
+    s.add_argument("--title")
+    s.add_argument("--file")
+    s.add_argument("--base-rev", type=int)
+    s = sub.add_parser("writing", help="研究的摘要与引言草稿：show / propose 提交修改稿待用户确认")
+    s.add_argument("action", choices=["show", "propose"])
+    s.add_argument("id", help="研究 id")
+    s.add_argument("--file")
+    s.add_argument("--base-rev", type=int)
 
     s = sub.add_parser("research", help="研究：list / add 新建（构思中）/ show / link 关联素材 / propose 提交修改稿待用户确认")
     s.add_argument("action", choices=["list", "add", "show", "link", "propose"])

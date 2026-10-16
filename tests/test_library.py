@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 os.environ["P2B_HOME"] = tempfile.mkdtemp(prefix="p2b-test-")
 
@@ -182,6 +183,68 @@ class Store(unittest.TestCase):
         t = store.get_thought(tid)
         self.assertEqual((t["text"], t["gist"], t["gist_by"], t["paper"]["id"]),
                          ("和 diffusion policy 对比一下", "比较两种动作生成头", "user", "arxiv:2410.24164"))
+
+    def test_experiment_numbers_must_come_from_raw(self):
+        raw = "eval libero_spatial: success=0.923 (n=500)\nbaseline pi0: 0.884"
+        ok = rules.validate_experiment({"title": "t", "results": [{"name": "LIBERO-Spatial", "value": "0.923"}],
+                                        "conclusion": "supports", "conclusion_text": "比 0.884 高"}, raw)
+        self.assertEqual(ok["results"][0]["value"], "0.923")
+        with self.assertRaisesRegex(rules.Rejected, r"\[0\.95\]"):
+            rules.validate_experiment({"title": "t", "results": [{"name": "x", "value": "0.95"}]}, raw)
+        with self.assertRaisesRegex(rules.Rejected, "结论里的数字"):
+            rules.validate_experiment({"title": "t", "conclusion_text": "提升 12.5 个点"}, raw)
+
+    def test_code_map_snippets_are_verbatim(self):
+        files = {"src/policy.py": "import torch\n\ndef chunk(actions, horizon=50):\n    return actions.unfold(0, horizon, 1)\n"}
+        rows = [{"component": "action chunk", "paper_quote": "frequencies of up to 50 Hz", "page": 2,
+                 "file": "./src/policy.py", "snippet": "def chunk(actions,   horizon=50):", "note": "论文没写 horizon"}]
+        ok = rules.validate_code_map(rows, PAGES, files.get)
+        self.assertEqual((ok[0]["file"], ok[0]["line"]), ("src/policy.py", 3))
+        with self.assertRaisesRegex(rules.Rejected, "找不到"):
+            rules.validate_code_map([{**rows[0], "snippet": "def chunk(actions, horizon=16):"}], PAGES, files.get)
+        with self.assertRaisesRegex(rules.Rejected, "不存在"):
+            rules.validate_code_map([{**rows[0], "file": "nope.py"}], PAGES, files.get)
+
+    def test_writing_proposal_waits_for_user(self):
+        rid = store.add_research("w", "user")
+        store.update_writing(rid, 0, abstract="我写的摘要")
+        draft = rules.validate_writing_draft({"introduction": "引言 [arxiv:2410.24164 p.3]"}, store.paper_ids())
+        store.propose_writing(rid, draft, "agent", 1)
+        self.assertEqual(store.get_writing(rid)["abstract"], "我写的摘要")
+        store.accept_writing(rid)
+        w = store.get_writing(rid)
+        self.assertEqual((w["abstract"], w["introduction"], w["proposal"]), ("我写的摘要", "引言 [arxiv:2410.24164 p.3]", None))
+
+    def test_repo_clone_is_read_only(self):
+        import subprocess
+        from paper2brain import repos
+        src = Path(tempfile.mkdtemp()) / "src"
+        src.mkdir()
+        subprocess.run(["git", "init", "-q", str(src)], check=True)
+        (src / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(src), "-c", "user.email=t@t", "-c", "user.name=t", "add", "."], check=True)
+        subprocess.run(["git", "-C", str(src), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], check=True)
+        self.assertEqual(repos.normalize("git@github.com:Physical-Intelligence/openpi.git"), "https://github.com/Physical-Intelligence/openpi")
+        dst = Path(tempfile.mkdtemp()) / "dst"
+        subprocess.run(["git", "clone", "-q", str(src), str(dst)], check=True)
+        sha = repos.clone("https://example.invalid/never", dst)
+        self.assertEqual(repos.reader(dst, sha)("a.py"), "x = 1\n")
+        self.assertIsNone(repos.reader(dst, sha)("missing.py"))
+        push = subprocess.run(["git", "-C", str(dst), "remote", "get-url", "--push", "origin"], capture_output=True, text=True).stdout
+        self.assertIn("DISABLED", push)
+
+    def test_latex_export_turns_citations_into_cite(self):
+        from paper2brain import export
+        store.upsert_paper("arxiv:2410.24164", "π0: A Vision-Language-Action Flow Model", ["Kevin Black", "Noah Brown"], None, "2024-10-31")
+        rid = store.add_research("e", "user")
+        store.update_writing(rid, 0, abstract="We build on **flow matching** [arxiv:2410.24164 p.3].",
+                             introduction="- first [arxiv:2410.24164]\n- 50% of cases")
+        out = export.research_export(rid)
+        self.assertIn(r"\textbf{flow matching}~\cite{black2024vision}.", out["latex"])
+        self.assertIn(r"\begin{itemize}", out["latex"])
+        self.assertIn(r"50\% of cases", out["latex"])
+        self.assertIn("@article{black2024vision,", out["bib"])
+        self.assertIn("eprint = {2410.24164}", out["bib"])
 
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}

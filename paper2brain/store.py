@@ -16,7 +16,7 @@ TOPIC_TREE = [
     ("WAM", ["世界模型", "表征研究", "WAN base", "V-JEPA"]),
 ]
 TRIAGE = ("inbox", "deep", "archived", "ignored")
-JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal"}
+JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows"}
 RESEARCH_ELEMENTS = ("problem", "method", "validation")
 RESEARCH_FIELDS = RESEARCH_ELEMENTS + ("notes",)
 LINK_KINDS = ("paper", "thought", "message", "thread", "capture", "note")
@@ -75,6 +75,23 @@ CREATE TABLE IF NOT EXISTS research_links (
   research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE, kind TEXT NOT NULL, ref TEXT NOT NULL,
   by TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (research_id, kind, ref));
 CREATE INDEX IF NOT EXISTS research_links_ref ON research_links(kind, ref);
+CREATE TABLE IF NOT EXISTS repos (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, url TEXT NOT NULL UNIQUE, name TEXT NOT NULL, path TEXT NOT NULL,
+  status TEXT NOT NULL, head TEXT, pulled_at TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS research_repos (
+  research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE, repo_id TEXT NOT NULL REFERENCES repos(id),
+  role TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (research_id, repo_id));
+CREATE TABLE IF NOT EXISTS code_maps (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE,
+  repo_id TEXT NOT NULL REFERENCES repos(id), paper_id TEXT REFERENCES papers(id), commit_sha TEXT NOT NULL, rows TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS experiments (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE, title TEXT, target TEXT, setup TEXT,
+  results TEXT, conclusion TEXT, conclusion_text TEXT, status TEXT NOT NULL DEFAULT 'done', raw TEXT NOT NULL DEFAULT '',
+  by TEXT NOT NULL, edited_by TEXT, revision INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS writing (
+  research_id TEXT PRIMARY KEY REFERENCES research(id) ON DELETE CASCADE, abstract TEXT, introduction TEXT,
+  proposal TEXT, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT, edited_by TEXT);
 CREATE INDEX IF NOT EXISTS captures_triage ON captures(triage, created_at);
 CREATE INDEX IF NOT EXISTS cp_paper ON capture_papers(paper_id);
 CREATE INDEX IF NOT EXISTS runs_ref ON runs(ref, created_at);
@@ -800,8 +817,9 @@ def delete_research(rid):
 def _resolve_link(c, kind, ref):
     """What a material looks like in the research's list; None when it has been deleted since."""
     if kind == "paper":
-        r = c.execute("SELECT title FROM papers WHERE id=?", (ref,)).fetchone()
-        return r and {"label": r["title"]}
+        r = c.execute("SELECT title, card FROM papers WHERE id=?", (ref,)).fetchone()
+        code = ((json.loads(r["card"]) if r["card"] else {}).get("resources") or {}).get("code") if r else None
+        return r and {"label": r["title"], "code": code}
     if kind == "thought":
         r = c.execute(
             "SELECT t.text, t.created_at, t.capture_id, coalesce(t.paper_id, (SELECT cp.paper_id FROM capture_papers cp "
@@ -843,13 +861,16 @@ def get_research(rid):
             x["links"].append({"kind": r["kind"], "ref": r["ref"], "by": r["by"], "missing": info is None, **(info or {})})
         x["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (rid,)))
     x["elements_done"] = _elements_done(x["body"])
+    x.update(research_extras(rid))
     return x
 
 
 def list_research(topic=None):
     """topic=None: all; '': without a topic; a path includes its children. Established first."""
     sql = "SELECT x.id, x.title, x.summary, x.stage, x.by, x.updated_at, x.created_at, x.body, x.proposal IS NOT NULL AS has_proposal, " \
-          "(SELECT count(*) FROM research_links l WHERE l.research_id=x.id) AS link_count FROM research x "
+          "(SELECT count(*) FROM research_links l WHERE l.research_id=x.id) AS link_count, " \
+          "(SELECT count(*) FROM experiments e WHERE e.research_id=x.id) AS exp_count, " \
+          "(SELECT count(*) FROM research_repos rr WHERE rr.research_id=x.id) AS repo_count FROM research x "
     args = ()
     if topic == "":
         sql += "WHERE NOT EXISTS (SELECT 1 FROM research_topics t WHERE t.research_id=x.id) "
@@ -863,6 +884,167 @@ def list_research(topic=None):
             x["topics"] = [r["topic"] for r in c.execute("SELECT topic FROM research_topics WHERE research_id=? ORDER BY topic", (x["id"],))]
             x["elements_done"] = _elements_done(x.pop("body"))
     return out
+
+
+# ---------- research: code, experiments, writing ----------
+
+EXPERIMENT_STATUS = ("planned", "running", "done", "abandoned")
+CONCLUSIONS = ("supports", "refutes", "inconclusive")
+
+
+def add_repo(url, path):
+    """One checkout per repository, shared by every research that links it."""
+    with tx() as c:
+        r = c.execute("SELECT id FROM repos WHERE url=?", (url,)).fetchone()
+        if r:
+            return r["id"], False
+        rid = new_id()
+        name = "/".join(url.rstrip("/").split("/")[-2:])
+        c.execute("INSERT INTO repos (id, created_at, url, name, path, status) VALUES (?,?,?,?,?,?)",
+                  (rid, now(), url, name, str(path), "cloning"))
+        return rid, True
+
+
+def update_repo(repo_id, **fields):
+    cols = ", ".join(f"{k}=?" for k in fields)
+    with tx() as c:
+        c.execute(f"UPDATE repos SET {cols} WHERE id=?", (*fields.values(), repo_id))
+
+
+def get_repo(repo_id):
+    with tx() as c:
+        return _row(c.execute("SELECT * FROM repos WHERE id=?", (repo_id,)).fetchone())
+
+
+def link_repo(rid, repo_id, role):
+    if role not in ("own", "baseline"):
+        raise rules.Rejected("仓库角色只能是 own（自己的）或 baseline")
+    with tx() as c:
+        c.execute("INSERT OR REPLACE INTO research_repos VALUES (?,?,?,?)", (rid, repo_id, role, now()))
+        c.execute("UPDATE research SET updated_at=? WHERE id=?", (now(), rid))
+
+
+def unlink_repo(rid, repo_id):
+    with tx() as c:
+        c.execute("DELETE FROM research_repos WHERE research_id=? AND repo_id=?", (rid, repo_id))
+
+
+def put_code_map(rid, repo_id, paper_id, commit, rows, by):
+    """One method–code map per (research, repo, paper); a new one replaces the old."""
+    with tx() as c:
+        c.execute("DELETE FROM code_maps WHERE research_id=? AND repo_id=? AND paper_id=?", (rid, repo_id, paper_id))
+        c.execute("INSERT INTO code_maps VALUES (?,?,?,?,?,?,?)",
+                  (new_id(), now(), rid, repo_id, paper_id, commit, json.dumps(rows, ensure_ascii=False)))
+        _event(c, by, "codemap.put", rid, repo=repo_id, paper=paper_id)
+
+
+def add_experiment(rid, raw, by, title=None):
+    if not (raw or "").strip() and not (title or "").strip():
+        raise rules.Rejected("实验记录至少要有原始结果或标题")
+    eid = new_id()
+    with tx() as c:
+        if not c.execute("SELECT 1 FROM research WHERE id=?", (rid,)).fetchone():
+            raise rules.Rejected("研究不存在")
+        c.execute("INSERT INTO experiments (id, created_at, updated_at, research_id, title, raw, by) VALUES (?,?,?,?,?,?,?)",
+                  (eid, now(), now(), rid, (title or "").strip() or None, (raw or "").strip(), by))
+        c.execute("UPDATE research SET updated_at=? WHERE id=?", (now(), rid))
+        _event(c, by, "experiment.add", eid)
+    return eid
+
+
+def update_experiment(eid, by, base_rev=None, **fields):
+    """title / target / setup / results / conclusion / conclusion_text / status. The agent structures only what the
+    user has not edited since (revision guard)."""
+    if "status" in fields and fields["status"] not in EXPERIMENT_STATUS:
+        raise rules.Rejected(f"未知状态：{fields['status']}")
+    if fields.get("conclusion") not in (None, *CONCLUSIONS):
+        raise rules.Rejected(f"结论只能是 {CONCLUSIONS}")
+    if "results" in fields:
+        fields["results"] = json.dumps(fields["results"] or [], ensure_ascii=False)
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM experiments WHERE id=?", (eid,)).fetchone()
+        if not cur:
+            raise rules.Rejected("实验不存在")
+        rules.check_revision(cur["revision"], base_rev)
+        cols = ", ".join(f"{k}=?" for k in fields)
+        c.execute(f"UPDATE experiments SET {cols}, updated_at=?, edited_by=?, revision=revision+1 WHERE id=?",
+                  (*fields.values(), now(), by, eid))
+        return cur["revision"] + 1
+
+
+def delete_experiment(eid):
+    with tx() as c:
+        c.execute("DELETE FROM experiments WHERE id=?", (eid,))
+
+
+def get_experiment(eid):
+    with tx() as c:
+        e = _row(c.execute("SELECT * FROM experiments WHERE id=?", (eid,)).fetchone())
+        if e:
+            e["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (eid,)))
+    return e
+
+
+def get_writing(rid):
+    with tx() as c:
+        w = _row(c.execute("SELECT * FROM writing WHERE research_id=?", (rid,)).fetchone())
+    return w or {"research_id": rid, "abstract": None, "introduction": None, "proposal": None, "revision": 0,
+                 "updated_at": None, "edited_by": None}
+
+
+def update_writing(rid, base_rev=None, by="user", **sections):
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM writing WHERE research_id=?", (rid,)).fetchone()
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        if not cur:
+            c.execute("INSERT INTO writing (research_id, revision) VALUES (?, 0)", (rid,))
+        cols = ", ".join(f"{k}=?" for k in sections)
+        c.execute(f"UPDATE writing SET {cols}, updated_at=?, edited_by=?, revision=revision+1 WHERE research_id=?",
+                  (*sections.values(), now(), by, rid))
+        return (cur["revision"] if cur else 0) + 1
+
+
+def propose_writing(rid, draft, by, base_rev=None):
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM writing WHERE research_id=?", (rid,)).fetchone()
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        if not cur:
+            c.execute("INSERT INTO writing (research_id, revision) VALUES (?, 0)", (rid,))
+        c.execute("UPDATE writing SET proposal=? WHERE research_id=?",
+                  (json.dumps({**draft, "by": by, "at": now()}, ensure_ascii=False), rid))
+
+
+def accept_writing(rid, base_rev=None):
+    w = get_writing(rid)
+    if not w["proposal"]:
+        raise rules.Rejected("没有待确认的写作修改稿")
+    p = w["proposal"]
+    update_writing(rid, base_rev, "agent", **{k: p[k] for k in ("abstract", "introduction") if p.get(k)})
+    with tx() as c:
+        c.execute("UPDATE writing SET proposal=NULL WHERE research_id=?", (rid,))
+
+
+def discard_writing(rid):
+    with tx() as c:
+        c.execute("UPDATE writing SET proposal=NULL WHERE research_id=?", (rid,))
+
+
+def research_extras(rid):
+    """Repos, method–code maps, experiments and writing of a research, for its page and for the agent."""
+    with tx() as c:
+        repos = _rows(c.execute(
+            "SELECT r.*, rr.role FROM research_repos rr JOIN repos r ON r.id=rr.repo_id WHERE rr.research_id=? ORDER BY rr.at", (rid,)))
+        maps = _rows(c.execute("SELECT * FROM code_maps WHERE research_id=? ORDER BY created_at DESC", (rid,)))
+        exps = _rows(c.execute("SELECT * FROM experiments WHERE research_id=? ORDER BY created_at DESC", (rid,)))
+        ids = [e["id"] for e in exps]
+        runs = {}
+        if ids:
+            q = ",".join("?" * len(ids))
+            for r in _rows(c.execute(f"SELECT * FROM runs WHERE ref IN ({q}) ORDER BY created_at DESC", ids)):
+                runs.setdefault(r["ref"], []).append(r)
+    for e in exps:
+        e["runs"] = runs.get(e["id"], [])
+    return {"repos": repos, "code_maps": maps, "experiments": exps, "writing": get_writing(rid)}
 
 
 # ---------- agent runs ----------

@@ -262,7 +262,8 @@ def scope_text(scope):
         return (
             f"研究《{x['title'] if x else ''}》（{ref}）。先运行 `./p2b research show {ref}` 看三要素和素材，再读相关论文；"
             f"和用户一起把研究问题、研究方法、验证方案推敲清楚。用户要求调整时，按 librarian/research.md 用 propose 提交修改稿，"
-            f"由用户确认；不要声称研究已确立。"
+            f"由用户确认；不要声称研究已确立。问到实现细节时读关联的代码仓库（librarian/code.md，只读）；"
+            f"讨论摘要或引言时按 librarian/writing.md 提交写作修改稿。"
         )
     return "整个论文库。用 `./p2b search` 和 `./p2b papers` 检索。"
 
@@ -306,6 +307,35 @@ def distill_pending():
     text = f"先读 librarian/README.md 和 librarian/thought.md，按“提炼想法”一节处理这些想法：{' '.join(ids)}"
     start_async("distill", "thoughts", text, name="提炼想法", agent_id=store.kv_get(DISTILL_AGENT) or None,
                 on_agent=lambda aid: store.kv_set(DISTILL_AGENT, aid))
+
+
+def structure_experiment(eid):
+    e = store.get_experiment(eid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/experiment.md，整理实验 {eid}（属于研究 {e['research_id']}），"
+        f"用 ./p2b experiment put {eid} --base-rev {e['revision']} 提交，直到校验通过。"
+    )
+    return start_async("experiment", eid, text, name=f"整理实验：{(e['title'] or e['raw'])[:40]}")
+
+
+def code_map(rid, repo_id, pid):
+    repo, paper = store.get_repo(repo_id), store.get_paper(pid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/code.md，为研究 {rid} 做论文 {pid}《{paper['title']}》"
+        f"和代码仓库 {repo['name']}（仓库 id {repo_id}，本地路径 {repo['path']}）的方法—代码对照，"
+        f"用 ./p2b codemap put 提交，直到校验通过。仓库只读，不要修改任何文件。"
+    )
+    return start_async("codemap", rid, text, name=f"方法—代码对照：{repo['name']}")
+
+
+def draft_writing(rid, instruction=None):
+    w, x = store.get_writing(rid), store.get_research(rid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/writing.md，为研究 {rid}《{x['title']}》起草或修改摘要和引言，"
+        f"用 ./p2b writing propose {rid} --base-rev {w['revision']} 提交，直到校验通过。"
+        + (f"\n用户的要求：{instruction}" if instruction else "")
+    )
+    return start_async("writing", rid, text, name=f"写作：{x['title'][:50]}")
 
 
 def draft_research(rid):
