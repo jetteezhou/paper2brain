@@ -193,8 +193,21 @@ def ingest(capture_id):
                     candidates = []
                     break
                 candidates += [{**m, "why": f"按标题检索：{guess[:60]}"} for m in found[:3]]
-            if guesses and not candidates and not linked_any:
-                notes.append("在 arXiv 和 Crossref 上按这些标题都没找到：" + "；".join(guesses) + "。可以直接拖入 PDF。")
+            if not candidates and not linked_any:
+                terms = sources.name_terms(cap["raw"] if not info else " ".join([info.get("title") or "", *guesses]))
+                found = sources.keyword_search(terms) if terms else []
+                names = terms if len(terms) == 1 else [t for t in terms if sources.distinctive(t)]
+                named = [r for r in found if any(sources.names_itself(r["title"], n) for n in names)]
+                if len(named) == 1:
+                    confirm(lambda: fetch_paper(named[0]["pid"]), f"论文标题就是在命名 {'、'.join(names)}，且只有这一篇")
+                else:
+                    ranked = named + [r for r in found if r not in named]
+                    candidates = [{**r, "why": f"按关键词检索：{r['query']}"} for r in ranked[:5]]
+                if not terms:
+                    notes.append(("解读里没找到论文链接、英文标题或论文简称" if info else "只有中文描述，规则检索不了")
+                                 + "。可以贴链接、英文标题或论文简称，拖入 PDF，或连接 agent 让它识别。")
+                elif not candidates and not linked_any:
+                    notes.append(f"在 arXiv 和 Crossref 上都没搜到：{' '.join(terms)}。可以贴链接或拖入 PDF。")
 
         if any(p["state"] == "confirmed" for p in store.get_capture(capture_id)["papers"]):
             status = "mapped"

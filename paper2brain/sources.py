@@ -290,6 +290,39 @@ def openreview_lookup(note_id):
             "url": f"https://openreview.net/forum?id={note_id}"}
 
 
+_NAME = re.compile(r"[A-Za-zπ][A-Za-z0-9π.+\-]*[A-Za-z0-9]")
+
+
+def name_terms(text):
+    """Latin words a person would search with: model names (PatchWAM, OpenVLA-OFT, π0.5) and plain keywords."""
+    text = re.sub(r"https?://\S+", " ", text or "")
+    return list(dict.fromkeys(t for t in _NAME.findall(text) if len(t) >= 3 and t.lower() not in _STOP))[:6]
+
+
+def distinctive(term):
+    """A coined name rather than an ordinary word: internal capitals, digits or π."""
+    return len(term) >= 4 and bool(re.search(r"[a-z][A-Z]|[A-Z]{2}|\d|π", term))
+
+
+def names_itself(title, name):
+    """The title introduces this name ("PatchWAM: ...", "... with PatchWAM", "(PatchWAM)"), rather than building on
+    a method of that name ("RL Bootstrapping of OpenVLA-OFT ...")."""
+    n = re.escape(name)
+    return bool(re.search(rf"^{n}\s*[:：]|^{n}\s+[-–—]\s|\b(?:with|via|introducing)\s+{n}\s*$|\({n}\)", title.strip(), re.I))
+
+
+def keyword_search(terms, limit=6):
+    """Short names and keywords: arXiv full-text fields, ranked by how many terms the title contains."""
+    query = " AND ".join(f'all:"{t}"' for t in terms[:4])
+    results = _arxiv_query({"search_query": query, "max_results": limit * 2}) if query else []
+    phrase = " ".join(terms).lower()
+    for r in results:
+        hits = sum(bool(re.search(rf"(?<![A-Za-z0-9]){re.escape(t)}(?![A-Za-z0-9])", r["title"], re.I)) for t in terms)
+        score = 1.0 if phrase in r["title"].lower() else 0.5 + 0.45 * hits / len(terms)
+        r.update(pid="arxiv:" + r["arxiv_id"], score=round(score, 3), query=" ".join(terms))
+    return sorted(results, key=lambda r: -r["score"])[:limit]
+
+
 def find_paper(title, limit=5):
     """Title search: arXiv first, then Crossref (conference and journal papers with a DOI)."""
     found = [{**r, "pid": "arxiv:" + r["arxiv_id"]} for r in arxiv_search(title, limit)]

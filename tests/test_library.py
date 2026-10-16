@@ -35,6 +35,16 @@ class Rules(unittest.TestCase):
         self.assertEqual(rules.parse_pid("pdf:abc123"), "pdf:abc123")
         self.assertIsNone(rules.parse_pid("https://example.com/some-blog"))
 
+    def test_short_names(self):
+        from paper2brain import sources
+
+        self.assertEqual(sources.name_terms("PatchWAM 这篇的 patch 化动作值得看 https://x.com/a"), ["PatchWAM", "patch"])
+        self.assertTrue(sources.distinctive("OpenVLA-OFT") and not sources.distinctive("forcing"))
+        self.assertTrue(sources.names_itself("An Action Is Worth One Patch: Unified World-Action Modeling with PatchWAM", "PatchWAM"))
+        self.assertTrue(sources.names_itself("Octo: An Open-Source Generalist Robot Policy", "Octo"))
+        self.assertFalse(sources.names_itself("RL Bootstrapping of OpenVLA-OFT for a Novel Robot Embodiment", "OpenVLA-OFT"))
+        self.assertFalse(sources.names_itself("Octo-Tiger's New Hydro Module", "Octo"))
+
     def test_quote_page_is_corrected_and_fabrication_rejected(self):
         card = rules.validate_card(CARD, PAGES)
         self.assertEqual(card["results"][0]["page"], 2)
