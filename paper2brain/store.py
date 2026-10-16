@@ -1,5 +1,6 @@
 """SQLite storage. The only module that touches the database; every write goes through a transaction here."""
 import json
+import re
 import os
 import shutil
 import sqlite3
@@ -89,6 +90,10 @@ CREATE TABLE IF NOT EXISTS experiments (
   research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE, title TEXT, target TEXT, setup TEXT,
   results TEXT, conclusion TEXT, conclusion_text TEXT, status TEXT NOT NULL DEFAULT 'done', raw TEXT NOT NULL DEFAULT '',
   by TEXT NOT NULL, edited_by TEXT, revision INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS anchors (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, paper_id TEXT NOT NULL REFERENCES papers(id),
+  surface TEXT NOT NULL, quote TEXT NOT NULL, page INTEGER, section TEXT, by TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS anchors_paper ON anchors(paper_id);
 CREATE TABLE IF NOT EXISTS research_docs (
   id TEXT PRIMARY KEY, created_at TEXT NOT NULL, research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE,
   filename TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, text TEXT);
@@ -361,7 +366,7 @@ def paper_ids():
         return {r["id"] for r in c.execute("SELECT id FROM papers")}
 
 
-def get_paper(pid):
+def get_paper(pid, with_anchors=True):
     with tx() as c:
         p = _row(c.execute("SELECT * FROM papers WHERE id=?", (pid,)).fetchone())
         if not p:
@@ -380,10 +385,13 @@ def get_paper(pid):
         ))
         p["notes"] = _rows(c.execute("SELECT * FROM notes WHERE paper_id=? ORDER BY created_at", (pid,)))
         p["research"] = _research_for(c, "paper", [pid]).get(pid, [])
+        p["anchors"] = []
         thought_research = _research_for(c, "thought", [t["id"] for t in p["thoughts"]])
         for t in p["thoughts"]:
             t["research"] = thought_research.get(t["id"], [])
         p["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (pid,)))
+    if with_anchors:
+        p["anchors"] = anchors_for(pid)
     return p
 
 
@@ -1069,6 +1077,50 @@ def research_extras(rid):
     for e in exps:
         e["runs"] = runs.get(e["id"], [])
     return {"repos": repos, "code_maps": maps, "experiments": exps, "writing": get_writing(rid)}
+
+
+# ---------- anchored discussions (selected text in a card, report or PDF) ----------
+
+ANCHOR_SURFACES = ("card", "report", "pdf")
+
+
+def add_anchor(pid, surface, quote, by, page=None, section=None):
+    """A discussion pinned to a passage. Its thread (scope anchor:<id>) stays attached to the passage."""
+    quote = re.sub(r"\s+", " ", quote or "").strip()
+    if surface not in ANCHOR_SURFACES:
+        raise rules.Rejected(f"只能在 {ANCHOR_SURFACES} 上划词")
+    if not 2 <= len(quote) <= 2000:
+        raise rules.Rejected("选中的文字太短或太长（2-2000 字）")
+    aid = new_id()
+    with tx() as c:
+        if not c.execute("SELECT 1 FROM papers WHERE id=?", (pid,)).fetchone():
+            raise rules.Rejected("论文不在库里")
+        c.execute("INSERT INTO anchors VALUES (?,?,?,?,?,?,?,?)", (aid, now(), pid, surface, quote, page, section, by))
+    return aid
+
+
+def get_anchor(aid):
+    with tx() as c:
+        return _row(c.execute("SELECT * FROM anchors WHERE id=?", (aid,)).fetchone())
+
+
+def anchors_for(pid):
+    with tx() as c:
+        return _rows(c.execute(
+            "SELECT a.*, t.id AS thread_id, (SELECT count(*) FROM messages m WHERE m.thread_id=t.id) AS message_count, "
+            "(SELECT coalesce(nullif(m.text, ''), r.text) FROM messages m LEFT JOIN runs r ON r.id=m.run_id "
+            " WHERE m.thread_id=t.id ORDER BY m.created_at DESC LIMIT 1) AS last_text "
+            "FROM anchors a LEFT JOIN threads t ON t.scope='anchor:' || a.id WHERE a.paper_id=? "
+            "GROUP BY a.id ORDER BY a.created_at", (pid,),
+        ))
+
+
+def delete_anchor(aid):
+    with tx() as c:
+        for t in c.execute("SELECT id FROM threads WHERE scope=?", (f"anchor:{aid}",)).fetchall():
+            c.execute("DELETE FROM messages WHERE thread_id=?", (t["id"],))
+            c.execute("DELETE FROM threads WHERE id=?", (t["id"],))
+        c.execute("DELETE FROM anchors WHERE id=?", (aid,))
 
 
 # ---------- agent runs ----------

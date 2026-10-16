@@ -409,6 +409,7 @@ function renderDetail() {
   if (d.error) { el.innerHTML = `<div class="empty"><b>打不开</b>${esc(d.error)}</div>`; return; }
   const back = innerWidth <= 900 ? '<button class="btn sm ghost" data-action="back">← 返回列表</button>' : '';
   el.innerHTML = `<div class="detail">${back}${d.thought ? thoughtDetail(d.thought) : d.research ? researchDetail(d.research) : d.cap ? captureDetail(d.cap, d.papers) : paperDetail(d.papers[0])}</div>`;
+  decorateDetail();
 }
 
 const FIELDS = [
@@ -622,6 +623,10 @@ const plain = (s) => (s || '').replace(/\[(?:arxiv|doi|openreview|pdf):[^\]]*?(?
 const researchChip = (x) => `<a href="#" class="chip research-chip" data-action="open-research" data-id="${x.id}" title="打开这个研究">${STAGE[x.stage][0]} · ${esc(short(x.title, 22))}</a>`;
 const thoughtResearch = (t, paperId) => `${(t.research || []).map(researchChip).join('')}<button class="btn sm ghost" data-action="thought-research" data-id="${t.id}" data-paper="${esc(paperId || t.about_paper || t.paper_id || '')}" data-text="${esc(t.text)}" title="作为素材加入研究">→ 研究</button>`;
 
+function decorateDetail() {
+  (S.detail?.papers || []).forEach((p) => decorateAnchors(p, $('#detail')));
+}
+
 function captureDetail(c, papers) {
   const triage = { inbox: '收件箱', deep: '待深读', archived: '已存档', ignored: '已忽略' };
   const tb = (t, label) => `<button class="btn sm ${c.triage === t ? 'primary' : ''}" data-action="triage" data-id="${c.id}" data-t="${c.triage === t ? 'inbox' : t}">${label}</button>`;
@@ -743,7 +748,7 @@ function paperCard(p, { capture, inReader } = {}) {
         : '<div class="card-wait">快读卡由 agent 生成（未连接）。先看摘要：</div>';
     body = wait + (p.abstract ? `<div class="abstract">${esc(p.abstract)}</div>` : '');
   }
-  return `<article class="paper">
+  return `<article class="paper" data-anchor-surface="card" data-pid="${esc(p.id)}">
     ${inReader ? '' : `<h1 class="paper-title">${esc(p.title)}</h1>`}
     <div class="paper-meta">${esc(authors(p.authors))}${p.published ? ' · ' + esc(p.published) : ''} · ${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(idLabel(p.id))} ↗</a>` : esc(idLabel(p.id))}${p.page_count ? ` · ${p.page_count} 页` : ' · <span style="color:var(--amber)">没有全文</span>'}
     ${capture && p.captures?.length > 1 ? ` · <a href="#" data-action="select" data-kind="paper" data-id="${esc(p.id)}">共 ${p.captures.length} 个来源</a>` : ''}
@@ -779,13 +784,15 @@ function topicsRow(p, kind = 'paper') {
 async function openReader(pid, page, push = true) {
   if (push) { S.pushing = true; location.hash = `#/read/${enc(pid)}${page ? '@' + page : ''}`; return; }
   const fresh = S.reader?.pid !== pid;
-  S.reader = { ...(fresh ? { tab: S.pendingTab || 'card' } : S.reader), pid, page: page || S.reader?.page || 1 };
+  S.reader = { ...(fresh ? { tab: S.pendingTab || 'card', anchor: S.pendingAnchor } : S.reader), pid, page: page || S.reader?.page || 1 };
   S.pendingTab = null;
+  S.pendingAnchor = null;
   try {
     S.reader.paper = await get(`/api/papers/${enc(pid)}`);
   } catch (e) { fail(e); return; }
   renderReader(fresh);
   if (S.reader.tab === 'chat') await loadThread(`paper:${pid}`).then(renderPanel);
+  if (S.reader.tab === 'anchor' && S.reader.anchor) await loadThread(`anchor:${S.reader.anchor}`).then(renderPanel);
 }
 
 function closeReader(nav = true) {
@@ -800,7 +807,7 @@ function closeReader(nav = true) {
 function renderReader(fresh) {
   const r = S.reader, p = r.paper, el = $('#reader');
   el.hidden = false;
-  if (fresh || !el.querySelector('.pdf, .pdf-missing')) {
+  if (fresh || !el.querySelector('.pdfv, .pdf-missing')) {
     el.innerHTML = `<div class="reader-top">
         <button class="btn sm ghost" data-action="close-reader">← 返回 <kbd>Esc</kbd></button>
         <div class="title">${esc(p.title)}</div>
@@ -808,29 +815,278 @@ function renderReader(fresh) {
         <button class="btn sm ghost" data-action="wide">调整面板宽度</button>
       </div>
       <div class="reader-body ${S.wide ? 'wide' : ''}">
-        ${p.pdf_path ? `<iframe class="pdf" src="/api/papers/${enc(p.id)}/pdf#page=${r.page}"></iframe>` : `<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br>${pdfButton({ paper: p.id })}</div></div>`}
+        ${p.pdf_path ? '<div class="pdfv" id="pdfv"><div class="pdf-loading"><span class="spin"></span>正在打开 PDF…</div></div>' : `<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br>${pdfButton({ paper: p.id })}</div></div>`}
         <div class="panel"><div class="tabs" id="tabs"></div><div class="panel-body" id="panel"></div></div>
       </div>`;
+    if (p.pdf_path) mountPdf(p.id, r.page).catch((e) => { $('#pdfv').innerHTML = `<div class="pdf-missing">PDF 打不开：${esc(e.message)}</div>`; });
   }
   renderPanel();
 }
 
-function jump(page) {
-  const f = $('#reader .pdf');
-  if (f) f.src = `/api/papers/${enc(S.reader.pid)}/pdf?p=${page}#page=${page}`;
+function jump(page, quote) {
   S.reader.page = page;
+  S.reader.flash = quote ? { page, quote } : null;
+  jumpPdf(page);
+}
+
+// ---------- PDF.js viewer: canvas + text layer, so passages can be selected and discussions pinned to them ----------
+
+let pdfjs;
+const PDFV = { doc: null, pid: null, scale: 1, observer: null };
+
+async function pdfLib() {
+  if (!pdfjs) {
+    pdfjs = await import('/vendor/pdfjs/pdf.min.mjs');
+    pdfjs.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs';
+  }
+  return pdfjs;
+}
+
+async function mountPdf(pid, page = 1) {
+  const host = $('#pdfv');
+  if (!host) return;
+  const lib = await pdfLib();
+  const doc = PDFV.pid === pid && PDFV.doc ? PDFV.doc : await lib.getDocument(`/api/papers/${enc(pid)}/pdf`).promise;
+  Object.assign(PDFV, { doc, pid });
+  const base = (await doc.getPage(1)).getViewport({ scale: 1 });
+  PDFV.scale = Math.max(0.6, Math.min(2.4, (host.clientWidth - 36) / base.width));
+  PDFV.observer?.disconnect();
+  PDFV.observer = new IntersectionObserver((entries) => entries.forEach((e) => e.isIntersecting && renderPdfPage(+e.target.dataset.page)),
+    { root: host, rootMargin: '800px 0px' });
+  host.innerHTML = '';
+  for (let n = 1; n <= doc.numPages; n++) {
+    const div = document.createElement('div');
+    Object.assign(div.dataset, { page: n, anchorSurface: 'pdf', pid });
+    div.className = 'pdf-page';
+    div.style.width = `${base.width * PDFV.scale}px`;
+    div.style.height = `${base.height * PDFV.scale}px`;
+    div.style.setProperty('--scale-factor', PDFV.scale);
+    host.append(div);
+    PDFV.observer.observe(div);
+  }
+  if (page > 1) jumpPdf(page);
+}
+
+async function renderPdfPage(n) {
+  const div = document.querySelector(`#pdfv .pdf-page[data-page="${n}"]`);
+  if (!div || div.dataset.rendered) return;
+  div.dataset.rendered = '1';
+  const page = await PDFV.doc.getPage(n);
+  const vp = page.getViewport({ scale: PDFV.scale });
+  div.style.width = `${vp.width}px`;
+  div.style.height = `${vp.height}px`;
+  const dpr = window.devicePixelRatio || 1, canvas = document.createElement('canvas');
+  canvas.width = Math.floor(vp.width * dpr);
+  canvas.height = Math.floor(vp.height * dpr);
+  div.append(canvas);
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: dpr === 1 ? null : [dpr, 0, 0, dpr, 0, 0] }).promise;
+  const layer = document.createElement('div');
+  layer.className = 'textLayer';
+  div.append(layer);
+  await new (await pdfLib()).TextLayer({ textContentSource: page.streamTextContent(), container: layer, viewport: vp }).render();
+  markPdfPage(n);
+}
+
+function jumpPdf(page) {
+  const div = document.querySelector(`#pdfv .pdf-page[data-page="${page}"]`);
+  if (!div) return;
+  div.scrollIntoView({ block: 'start' });
+  renderPdfPage(page).then(() => markPdfPage(page));
+}
+
+function unmark(root, sel) {
+  root.querySelectorAll(sel).forEach((m) => m.replaceWith(...m.childNodes));
+  root.normalize();
+}
+
+function markPdfPage(n) {
+  const div = document.querySelector(`#pdfv .pdf-page[data-page="${n}"]`), layer = div?.querySelector('.textLayer');
+  const p = S.reader?.paper;
+  if (!layer || !p) return;
+  unmark(layer, 'mark');
+  div.querySelectorAll('.anchor-bubble').forEach((b) => b.remove());
+  const top = div.getBoundingClientRect().top;
+  for (const a of p.anchors.filter((x) => x.surface === 'pdf' && x.page === n)) {
+    const first = markText(layer, a.quote, { action: 'open-anchor', id: a.id }, 'anchor-hl', true);
+    if (first) {
+      const b = document.createElement('button');
+      Object.assign(b, { className: 'anchor-bubble', textContent: a.message_count ? `讨论 ${a.message_count}` : '讨论', title: a.quote });
+      Object.assign(b.dataset, { action: 'open-anchor', id: a.id });
+      b.style.top = `${first.getBoundingClientRect().top - top}px`;
+      div.append(b);
+    }
+  }
+  const f = S.reader.flash;
+  if (f && f.page === n) {
+    const first = markText(layer, f.quote, {}, 'flash-hl', true);
+    first?.scrollIntoView({ block: 'center' });
+    setTimeout(() => unmark(layer, 'mark.flash-hl'), 2600);
+    S.reader.flash = null;
+  }
+}
+
+const markAllPdf = () => document.querySelectorAll('#pdfv .pdf-page[data-rendered]').forEach((d) => markPdfPage(+d.dataset.page));
+
+// ---------- pinned discussions in the quick card and the deep report ----------
+
+/** Wrap the passage (whitespace-insensitive) in <mark>s, across element boundaries; returns the last mark (or the first). */
+function markText(container, quote, data, cls = 'anchor-mark', wantFirst = false) {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement.closest('button, .anchor-count, script') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  const nodes = [];
+  let text = '';
+  const owner = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    nodes.push(n);
+    [...n.data].forEach((ch, i) => { if (!/\s/.test(ch)) { text += ch.toLowerCase(); owner.push([nodes.length - 1, i]); } });
+  }
+  const q = quote.replace(/\s+/g, '').toLowerCase();
+  const at = q ? text.indexOf(q) : -1;
+  if (at < 0) return null;
+  const [sn, so] = owner[at], [en, eo] = owner[at + q.length - 1];
+  let last = null, first = null;
+  for (let k = en; k >= sn; k--) {
+    const node = nodes[k], from = k === sn ? so : 0, to = k === en ? eo + 1 : node.data.length;
+    if (to <= from || !node.data.slice(from, to).trim()) continue;
+    const range = document.createRange();
+    range.setStart(node, from);
+    range.setEnd(node, to);
+    const mark = document.createElement('mark');
+    mark.className = cls;
+    Object.assign(mark.dataset, data);
+    range.surroundContents(mark);
+    last = last || mark;
+    first = mark;
+  }
+  return wantFirst ? first : last;
+}
+
+/** Grow a selection that starts or ends mid-word to whole words (Latin text). */
+function wholeWords(range, text) {
+  const w = /[A-Za-z0-9]/;
+  const { startContainer: s, startOffset: so, endContainer: e, endOffset: eo } = range;
+  if (s.nodeType === 3 && so > 0 && w.test(s.data[so - 1]) && w.test(s.data[so] || '')) text = s.data.slice(0, so).match(/[A-Za-z0-9]*$/)[0] + text;
+  if (e.nodeType === 3 && eo < e.data.length && w.test(e.data[eo]) && w.test(e.data[eo - 1] || '')) text += e.data.slice(eo).match(/^[A-Za-z0-9]*/)[0];
+  return text;
+}
+
+function decorateAnchors(p, root = document) {
+  if (!p?.anchors?.length) return;
+  for (const a of p.anchors.filter((x) => x.surface !== 'pdf')) {
+    const sel = a.surface === 'card' ? `[data-anchor-surface="card"][data-pid="${CSS.escape(p.id)}"]`
+      : `[data-anchor-surface="report"][data-pid="${CSS.escape(p.id)}"]${a.section ? `[data-section="${CSS.escape(a.section)}"]` : ''}`;
+    root.querySelectorAll(sel).forEach((box) => {
+      if (box.querySelector(`mark[data-id="${a.id}"]`)) return;
+      const last = markText(box, a.quote, { action: 'open-anchor', id: a.id, pid: p.id });
+      if (last) last.insertAdjacentHTML('afterend', `<button class="anchor-count" data-action="open-anchor" data-id="${a.id}" data-pid="${esc(p.id)}" title="打开这段的讨论">${a.message_count || '讨论'}</button>`);
+    });
+  }
+}
+
+// ---------- selection popover ----------
+
+const selpop = Object.assign(document.createElement('div'), { id: 'selpop', hidden: true });
+document.body.append(selpop);
+selpop.addEventListener('mousedown', (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); });
+
+function showSelPop() {
+  const sel = window.getSelection();
+  if (!sel.rangeCount || selpop.contains(sel.anchorNode)) return;
+  const range = sel.getRangeAt(0);
+  const text = wholeWords(range, sel.toString()).replace(/\s+/g, ' ').trim();
+  if (text.length < 2) return;
+  const node = range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
+  const host = node.closest('[data-anchor-surface]');
+  if (!host) return;
+  const pageDiv = node.closest('.pdf-page');
+  S.selCtx = { pid: host.dataset.pid, surface: host.dataset.anchorSurface, quote: text.slice(0, 2000),
+    page: pageDiv ? +pageDiv.dataset.page : null, section: host.dataset.section || null };
+  const rect = range.getBoundingClientRect();
+  selpop.innerHTML = `<div class="selpop-quote">「${esc(short(text, 48))}」</div>
+    <form data-form="selpop"><input placeholder="围绕这段问点什么，回车发起讨论"></form>
+    <div class="selpop-acts"><button class="btn sm primary" data-action="selpop-discuss">讨论这段</button><button class="btn sm" data-action="selpop-thought">记为想法</button></div>`;
+  selpop.hidden = false;
+  const top = rect.top > 150 ? rect.top - selpop.offsetHeight - 8 : rect.bottom + 8;
+  selpop.style.top = `${Math.max(8, top)}px`;
+  selpop.style.left = `${Math.min(innerWidth - selpop.offsetWidth - 8, Math.max(8, rect.left))}px`;
+}
+
+const hideSelPop = () => { selpop.hidden = true; };
+document.addEventListener('mouseup', (e) => { if (!selpop.contains(e.target)) setTimeout(showSelPop, 0); });
+document.addEventListener('mousedown', (e) => { if (!selpop.contains(e.target)) hideSelPop(); });
+
+async function createAnchor(text) {
+  const c = S.selCtx;
+  if (!c) return;
+  hideSelPop();
+  window.getSelection().removeAllRanges();
+  try {
+    const { anchor, thread, error } = await post(`/api/papers/${enc(c.pid)}/anchors`, { ...c, text });
+    S.threads[`anchor:${anchor.id}`] = thread;
+    if (text && !error) await loadThread(`anchor:${anchor.id}`);
+    await openAnchor(anchor.id, c.pid);
+    if (error) {
+      toast(`划词已保存，但没能发出问题：${error}`, null, null, true);
+      const box = $('#panel .chat-input textarea');
+      if (box) box.value = text;
+    }
+  } catch (e) { fail(e); }
+}
+
+async function openAnchor(id, pid) {
+  if (S.reader?.pid === pid || (!pid && S.reader)) {
+    S.reader.paper = await get(`/api/papers/${enc(S.reader.pid)}`);
+    S.reader.tab = 'anchor';
+    S.reader.anchor = id;
+    if (!S.threads[`anchor:${id}`]) await loadThread(`anchor:${id}`);
+    renderPanel();
+    markAllPdf();
+    return;
+  }
+  S.pendingTab = 'anchor';
+  S.pendingAnchor = id;
+  openReader(pid);
+}
+
+function locateAnchor(a) {
+  if (a.surface === 'pdf') { jump(a.page, a.quote); return; }
+  S.reader.tab = a.surface;
+  renderPanel();
+  const mark = document.querySelector(`#panel mark[data-id="${a.id}"]`);
+  if (mark) { mark.scrollIntoView({ block: 'center' }); mark.classList.add('flash'); }
+}
+
+const SURFACE = { card: '快读卡', report: '深读报告', pdf: '原文' };
+const anchorWhere = (a) => `${SURFACE[a.surface]}${a.page ? ` p.${a.page}` : ''}${a.section ? ` · ${a.section}` : ''}`;
+
+function anchorsListHtml(p) {
+  if (!p.anchors.length) return '<div class="chat-empty" style="margin-top:40px"><b>还没有划词讨论</b><p class="hint">在快读卡、深读报告或左边原文里选中一段文字，就能围绕它发起讨论；讨论会一直挂在那段文字旁边，随时点开接着聊。</p></div>';
+  return p.anchors.map((a) => `<div class="source" data-action="open-anchor" data-id="${a.id}"><span class="source-kind">${esc(anchorWhere(a))}</span>
+    <span class="source-label">「${esc(short(a.quote, 90))}」<div class="hint">${a.message_count ? `${a.message_count} 条 · ${esc(short(plain(a.last_text || ''), 60))}` : '还没开始聊'}</div></span></div>`).join('');
+}
+
+function anchorPanelHtml(p, id) {
+  const a = p.anchors.find((x) => x.id === id);
+  if (!a) return '<div class="chat-empty">这段划词讨论已删除</div>';
+  return `<div class="anchor-head"><button class="btn sm ghost" data-action="tab" data-tab="anchors">← 全部划词</button><span class="chip">${esc(anchorWhere(a))}</span><span class="grow"></span>
+      <button class="btn sm ghost" data-action="locate-anchor" data-id="${a.id}">定位到原处</button><button class="btn sm ghost" data-action="del-anchor" data-id="${a.id}">删除</button></div>
+    <blockquote class="anchor-quote">${esc(a.quote)}</blockquote>
+    <div class="anchor-chat">${chatHtml(`anchor:${a.id}`)}</div>`;
 }
 
 function renderPanel() {
   const r = S.reader;
   if (!r) return;
   const p = r.paper;
-  const tabs = [['card', '快读卡'], ['report', '深读报告'], ['chat', '讨论'], ['notes', '想法与笔记', p.thoughts.length + p.notes.length]];
-  $('#tabs').innerHTML = tabs.map(([k, label, n]) => `<button class="tab ${r.tab === k ? 'on' : ''}" data-action="tab" data-tab="${k}">${label}${n ? `<span class="n">${n}</span>` : ''}</button>`).join('');
+  const tabs = [['card', '快读卡'], ['report', '深读报告'], ['chat', '讨论'], ['anchors', '划词', p.anchors.length], ['notes', '想法与笔记', p.thoughts.length + p.notes.length]];
+  $('#tabs').innerHTML = tabs.map(([k, label, n]) => `<button class="tab ${r.tab === k || (k === 'anchors' && r.tab === 'anchor') ? 'on' : ''}" data-action="tab" data-tab="${k}">${label}${n ? `<span class="n">${n}</span>` : ''}</button>`).join('');
   const panel = $('#panel');
-  panel.classList.toggle('chatwrap', r.tab === 'chat');
-  if (r.tab === 'card') panel.innerHTML = paperCard(p, { inReader: true });
-  else if (r.tab === 'report') panel.innerHTML = reportHtml(p);
+  panel.classList.toggle('chatwrap', r.tab === 'chat' || r.tab === 'anchor');
+  if (r.tab === 'card') { panel.innerHTML = paperCard(p, { inReader: true }); decorateAnchors(p, panel); }
+  else if (r.tab === 'report') { panel.innerHTML = reportHtml(p); decorateAnchors(p, panel); }
+  else if (r.tab === 'anchors') panel.innerHTML = anchorsListHtml(p);
+  else if (r.tab === 'anchor') { panel.innerHTML = anchorPanelHtml(p, r.anchor); scrollChat(); }
   else if (r.tab === 'notes') panel.innerHTML = notesBlock(p).replace('class="block"', 'class="block" style="margin-top:0"');
   else { panel.innerHTML = chatHtml(`paper:${p.id}`); scrollChat(); }
 }
@@ -846,7 +1102,7 @@ function reportHtml(p) {
       ${agentOn() ? '' : '<p class="hint">需要先连接 agent</p>'}
       ${last ? runCard(last, '上次深读') : ''}</div>`;
   }
-  return p.report.sections.map((s) => `<div class="section"><h3>${esc(s.heading)}</h3>${md(s.body)}
+  return p.report.sections.map((s) => `<div class="section" data-anchor-surface="report" data-pid="${esc(p.id)}" data-section="${esc(s.heading)}"><h3>${esc(s.heading)}</h3>${md(s.body)}
       ${s.citations.length ? `<div class="cites">${s.citations.map((c) => cite(p.id, c.page, c.quote)).join('')}</div>` : ''}</div>`).join('') +
     `<div style="margin-top:20px"><button class="btn sm ghost" data-action="deepread" data-pid="${esc(p.id)}" ${agentOn() ? '' : 'disabled'}>重新生成</button></div>`;
 }
@@ -858,6 +1114,7 @@ const SUGGEST = {
   topic: ['这个方向最近在解决什么问题？', '列出代表性方法和它们的关键区别'],
   thoughts: ['把我最近的想法归纳成几个方向', '哪些想法和库里的论文有关？'],
   library: ['最近收的论文里，哪几篇值得深读？', '库里有谁做过灵巧手相关的工作？'],
+  anchor: ['这段在说什么？用大白话解释一下', '为什么要这样设计？有没有别的做法', '这和我的研究有什么关系？'],
   thought: ['这个想法成立的前提是什么？', '库里有没有支持或反对它的证据？', '如果值得做，最小的验证方式是什么？'],
   research: ['这个研究的问题成立吗？最强的反对意见是什么？', '和库里最接近的工作相比，方法上的区别在哪？', '帮我把验证方案收敛到一个最小实验'],
 };
@@ -867,6 +1124,7 @@ function scopeLabel(scope) {
   const ref = rest.join(':');
   if (k === 'research') return `研究《${S.scopeTitles[scope] || '…'}》`;
   if (k === 'thought') return '这条想法';
+  if (k === 'anchor') return '选中的这段';
   return k === 'paper' ? '这篇论文' : k === 'topic' ? `主题 ${ref}` : k === 'thoughts' ? '我的想法' : '整个论文库';
 }
 
@@ -1383,16 +1641,22 @@ const actions = {
   'cancel-run': async (el) => { await post(`/api/runs/${enc(el.dataset.id)}/cancel`).catch(fail); refresh(true); },
   read: (el, e) => { e.preventDefault(); S.pendingTab = el.dataset.tab || null; if (S.reader && S.reader.pid === el.dataset.pid) { S.reader.tab = el.dataset.tab || 'card'; renderPanel(); } else openReader(el.dataset.pid); },
   'close-reader': () => closeReader(),
-  wide: () => { S.wide = !S.wide; $('#reader .reader-body').classList.toggle('wide', S.wide); },
+  wide: () => {
+    S.wide = !S.wide;
+    $('#reader .reader-body').classList.toggle('wide', S.wide);
+    const top = [...document.querySelectorAll('#pdfv .pdf-page')].find((d) => d.getBoundingClientRect().bottom > 80);
+    if (S.reader.paper.pdf_path) mountPdf(S.reader.pid, top ? +top.dataset.page : 1);
+  },
   tab: async (el) => {
     S.reader.tab = el.dataset.tab;
+    hideSelPop();
     renderPanel();
     if (el.dataset.tab === 'chat') { await loadThread(`paper:${S.reader.pid}`); renderPanel(); }
   },
   cite: (el, e) => {
     e.preventDefault(); e.stopPropagation();
     const page = +el.dataset.page, pid = el.dataset.pid;
-    if (S.reader?.pid === pid) jump(page); else { S.pendingTab = 'card'; openReader(pid, page); }
+    if (S.reader?.pid === pid) jump(page, el.title); else { S.pendingTab = 'card'; openReader(pid, page); }
   },
   picker: (el, e) => { e.stopPropagation(); S.picker = S.picker === el.dataset.pid ? null : el.dataset.pid; S.reader ? renderPanel() : renderDetail(); },
   'topic-toggle': (el) => {
@@ -1403,6 +1667,30 @@ const actions = {
   'topic-remove': (el, e) => {
     e.stopPropagation();
     saveTopics(el.dataset.kind, el.dataset.pid, topicOwner(el).topics.filter((t) => t !== el.dataset.topic));
+  },
+  'open-anchor': (el, e) => {
+    if (window.getSelection().toString().trim()) return;
+    e.preventDefault(); e.stopPropagation();
+    openAnchor(el.dataset.id, el.dataset.pid || S.reader?.pid);
+  },
+  'locate-anchor': (el) => locateAnchor(S.reader.paper.anchors.find((a) => a.id === el.dataset.id)),
+  'del-anchor': async (el) => {
+    const a = S.reader.paper.anchors.find((x) => x.id === el.dataset.id);
+    if (a?.message_count && !confirm(`删除这段划词和它的 ${a.message_count} 条讨论？`)) return;
+    await api('DELETE', `/api/anchors/${enc(el.dataset.id)}`).catch(fail);
+    S.reader.paper = await get(`/api/papers/${enc(S.reader.pid)}`);
+    S.reader.tab = 'anchors';
+    renderPanel();
+    markAllPdf();
+  },
+  'selpop-discuss': () => createAnchor(selpop.querySelector('input').value.trim()),
+  'selpop-thought': async () => {
+    const note = selpop.querySelector('input').value.trim(), c = S.selCtx;
+    if (!note) { selpop.querySelector('input').placeholder = '先写下你的想法，再点“记为想法”'; selpop.querySelector('input').focus(); return; }
+    hideSelPop();
+    await post('/api/thoughts', { text: `关于「${short(c.quote, 120)}」：${note}`, paper_id: c.pid }).catch(fail);
+    toast('已记为想法，agent 会补一句提炼');
+    if (S.reader) { S.reader.paper = await get(`/api/papers/${enc(S.reader.pid)}`); renderPanel(); }
   },
   'open-thought': (el, e) => { e.preventDefault(); e.stopPropagation(); openItem('thought', el.dataset.id, 'thoughts'); },
   'open-paper': (el, e) => { e.preventDefault(); e.stopPropagation(); openItem('paper', el.dataset.pid, 'papers'); },
@@ -1668,6 +1956,10 @@ document.addEventListener('submit', async (e) => {
   const form = e.target.closest('[data-form]');
   if (!form) return;
   e.preventDefault();
+  if (form.dataset.form === 'selpop') {
+    createAnchor(form.querySelector('input').value.trim());
+    return;
+  }
   if (form.dataset.form === 'cmp-repo') {
     const url = form.querySelector('input').value.trim();
     if (url && !S.composer.repos.some((r) => r.url === url)) S.composer.repos.push({ url, role: new FormData(form).get('role') });
@@ -1774,7 +2066,8 @@ async function refresh(force) {
       if (force || changed('reader', p)) {
         S.reader.paper = p;
         const typing = document.activeElement?.closest?.('#panel') && document.activeElement.matches('input, textarea');
-        if (!typing && !S.picker && S.reader.tab !== 'chat') renderPanel();
+        if (!typing && !S.picker && !['chat', 'anchor'].includes(S.reader.tab)) renderPanel();
+        markAllPdf();
       }
     }
     for (const [scope, t] of Object.entries(S.threads)) {

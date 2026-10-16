@@ -14,6 +14,7 @@ from pathlib import Path
 from . import cursor_api, export, inbox, pipeline, repos, rules, store
 
 WEB = Path(__file__).resolve().parent.parent / "web"
+mimetypes.add_type("text/javascript", ".mjs")  # ES modules (PDF.js) must not be served as octet-stream
 ROUTES = []
 
 
@@ -171,6 +172,25 @@ def paper_pages(q, body, pid):
 @route("POST", "/api/papers/([^/]+)/pdf")
 def paper_upload_pdf(q, body, pid):
     return pipeline.attach_pdf(pid, base64.b64decode(body["data"]))
+
+
+@route("POST", "/api/papers/([^/]+)/anchors")
+def anchor_add(q, body, pid):
+    aid = store.add_anchor(pid, body.get("surface"), body.get("quote"), "user", body.get("page"), body.get("section"))
+    scope = f"anchor:{aid}"
+    text, error = (body.get("text") or "").strip(), None
+    if text:
+        try:
+            cursor_api.discuss(scope, text)
+        except cursor_api.AgentError as e:
+            error = str(e)
+    return {"anchor": store.get_anchor(aid), "thread": store.thread_for(scope), "error": error}
+
+
+@route("DELETE", "/api/anchors/([^/]+)")
+def anchor_delete(q, body, aid):
+    store.delete_anchor(aid)
+    return {"ok": True}
 
 
 @route("POST", "/api/papers/([^/]+)/topics")

@@ -249,6 +249,18 @@ def scope_text(scope):
         return f"主题「{ref}」下的论文。先运行 `./p2b papers --topic '{ref}'`。"
     if kind == "thoughts":
         return "用户记下的想法。先运行 `./p2b thoughts`，再结合相关论文回答。"
+    if kind == "anchor":
+        a = store.get_anchor(ref) or {}
+        pid, page, section = a.get("paper_id"), a.get("page"), a.get("section")
+        p = (store.get_paper(pid, with_anchors=False) or {}) if pid else {}
+        where = {"card": "快读卡", "report": "深读报告", "pdf": "原文"}.get(a.get("surface"), "")
+        at = (f"第 {page} 页" if page else "") + (f"（{section}）" if section else "")
+        ctx = f"需要上下文时用 `./p2b text {pid} --pages {max(1, page - 1)}-{page + 1}`；" if page else ""
+        return (
+            f"论文 {pid}《{p.get('title', '')}》的{where}{at}里，用户选中了这段：「{a.get('quote', '')}」。"
+            f"先运行 `./p2b show paper {pid}`；{ctx}围绕这段回答：它在说什么、为什么这样做、"
+            f"和别的工作或用户的研究有什么关系，或者回答用户的具体问题。回答要短，引用页码。"
+        )
     if kind == "thought":
         t = store.get_thought(ref) or {}
         about = f"，关于论文 {t['about_paper']}《{t.get('paper_title') or ''}》" if t.get("about_paper") else ""

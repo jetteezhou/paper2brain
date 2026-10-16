@@ -264,6 +264,18 @@ class Store(unittest.TestCase):
         with self.assertRaises(rules.Rejected):
             pipeline.start_research("", "  ", [], [], [])
 
+    def test_anchored_discussion_stays_with_the_passage(self):
+        store.upsert_paper("arxiv:2410.24164", "pi0")
+        aid = store.add_anchor("arxiv:2410.24164", "pdf", "  action expert\n  that produces ", "user", page=1)
+        t = store.thread_for(f"anchor:{aid}")
+        store.add_message(t["id"], "user", "为什么要单独的 action expert？")
+        a = next(x for x in store.get_paper("arxiv:2410.24164")["anchors"] if x["id"] == aid)
+        self.assertEqual((a["quote"], a["page"], a["message_count"]), ("action expert that produces", 1, 1))
+        with self.assertRaises(rules.Rejected):
+            store.add_anchor("arxiv:2410.24164", "margin", "abc", "user")
+        store.delete_anchor(aid)
+        self.assertFalse(any(x["id"] == aid for x in store.anchors_for("arxiv:2410.24164")))
+
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])
