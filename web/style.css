@@ -324,6 +324,20 @@ details.runs summary::-webkit-details-marker { display: none; }
 .research-create input, .research-create textarea { border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px 11px; outline: none; background: var(--panel); resize: vertical; }
 .research-create input:focus, .research-create textarea:focus { border-color: var(--accent); }
 
+/* ---------- thoughts ---------- */
+.thought-gist { font-size: 20px; font-weight: 650; line-height: 1.45; margin: 14px 0 4px; display: flex; gap: 8px; align-items: baseline; }
+.thought-gist .btn { flex: none; }
+.thought-raw { margin: 12px 0 0; padding: 8px 14px; border-left: 3px solid var(--amber); background: var(--amber-soft); border-radius: 0 8px 8px 0; font-size: 14px; }
+.mini-paper { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin-bottom: 8px; }
+.mini-paper-title { font-size: 15px; font-weight: 600; }
+.mini-acts { display: flex; gap: 6px; margin-top: 8px; }
+.thought-research { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 6px 0; font-size: 13px; }
+.thought-chat { height: 480px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.thought-open { cursor: pointer; }
+.thought-open:hover { text-decoration: underline; text-decoration-color: var(--amber); }
+.paper-chip { background: var(--side); color: var(--text); }
+.paper-chip:hover { text-decoration: none; filter: brightness(.97); }
+
 /* ---------- toast & modal ---------- */
 #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px); opacity: 0; transition: .2s; background: #2a2825; color: #f3f1ec; padding: 9px 16px; border-radius: 10px; box-shadow: var(--shadow); display: flex; gap: 14px; align-items: center; z-index: 100; pointer-events: none; font-size: 13.5px; }
 #toast.show { opacity: 1; transform: translateX(-50%); pointer-events: auto; }

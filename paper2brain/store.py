@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS paper_topics (
   PRIMARY KEY (paper_id, topic));
 CREATE TABLE IF NOT EXISTS thoughts (
   id TEXT PRIMARY KEY, created_at TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL,
-  capture_id TEXT REFERENCES captures(id) ON DELETE CASCADE, paper_id TEXT REFERENCES papers(id));
+  capture_id TEXT REFERENCES captures(id) ON DELETE CASCADE, paper_id TEXT REFERENCES papers(id),
+  gist TEXT, gist_by TEXT);
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS notes (
   id TEXT PRIMARY KEY, created_at TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL,
   paper_id TEXT REFERENCES papers(id), topic TEXT, thread_id TEXT);
@@ -131,6 +133,10 @@ def tx():
         key = str(home())
         if key not in _initialized:
             conn.executescript(SCHEMA)
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(thoughts)")}
+            for col in ("gist", "gist_by"):
+                if col not in cols:
+                    conn.execute(f"ALTER TABLE thoughts ADD COLUMN {col} TEXT")
             if not conn.execute("SELECT 1 FROM topics LIMIT 1").fetchone():
                 for i, (parent, children) in enumerate(TOPIC_TREE):
                     conn.execute("INSERT INTO topics VALUES (?,?,?,?)", (parent, parent, None, i))
@@ -490,15 +496,67 @@ def set_topics(pid, paths, by):
 
 # ---------- thoughts & notes ----------
 
-def add_thought(text, by, capture_id=None, paper_id=None):
+def add_thought(text, by, capture_id=None, paper_id=None, gist=None):
     if not (text or "").strip():
         raise rules.Rejected("想法不能为空")
     tid = new_id()
     with tx() as c:
         c.execute(
-            "INSERT INTO thoughts VALUES (?,?,?,?,?,?)", (tid, now(), text.strip(), by, capture_id, paper_id)
+            "INSERT INTO thoughts (id, created_at, text, by, capture_id, paper_id, gist, gist_by) VALUES (?,?,?,?,?,?,?,?)",
+            (tid, now(), text.strip(), by, capture_id, paper_id, (gist or "").strip() or None, gist and by),
         )
     return tid
+
+
+def set_gist(tid, gist, by):
+    """The one sentence that matters, in the user's terms. The agent only fills empty ones; the user's edit is final."""
+    gist = (gist or "").strip()
+    if not gist:
+        raise rules.Rejected("提炼不能为空")
+    with tx() as c:
+        cur = c.execute("SELECT gist_by FROM thoughts WHERE id=?", (tid,)).fetchone()
+        if not cur:
+            raise rules.Rejected("想法不存在")
+        if by != "user" and cur["gist_by"] == "user":
+            raise rules.Rejected("用户已手动改过这条提炼，agent 不能修改")
+        c.execute("UPDATE thoughts SET gist=?, gist_by=? WHERE id=?", (gist, by, tid))
+
+
+def pending_gists(limit=12):
+    with tx() as c:
+        return [r["id"] for r in c.execute(
+            "SELECT id FROM thoughts WHERE gist IS NULL ORDER BY created_at LIMIT ?", (limit,)
+        )]
+
+
+def get_thought(tid):
+    """A thought with everything needed to keep thinking about it: its paper, its researches, its neighbours."""
+    t = next((x for x in list_thoughts() if x["id"] == tid), None)
+    if not t:
+        return None
+    with tx() as c:
+        pid = t["about_paper"]
+        if pid:
+            p = _row(c.execute("SELECT id, title, card, page_count FROM papers WHERE id=?", (pid,)).fetchone())
+            card = p.pop("card") or {}
+            t["paper"] = {**p, "tldr": card.get("tldr"), "results": (card.get("results") or [])[:3]}
+        rids = [r["id"] for r in t["research"]]
+        t["siblings"] = [x for x in list_thoughts() if x["id"] != tid and (
+            (pid and x["about_paper"] == pid) or any(r["id"] in rids for r in x["research"]))][:8]
+        if t["capture_id"]:
+            t["capture"] = _row(c.execute("SELECT id, title, raw, channel, author FROM captures WHERE id=?", (t["capture_id"],)).fetchone())
+    return t
+
+
+def kv_get(key):
+    with tx() as c:
+        r = c.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+    return r and r["value"]
+
+
+def kv_set(key, value):
+    with tx() as c:
+        c.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, value))
 
 
 def list_thoughts():
@@ -836,6 +894,11 @@ def update_run(run_id, **fields):
 def get_run(run_id):
     with tx() as c:
         return _row(c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())
+
+
+def last_run(kind):
+    with tx() as c:
+        return _row(c.execute("SELECT * FROM runs WHERE kind=? ORDER BY created_at DESC LIMIT 1", (kind,)).fetchone())
 
 
 def unfinished_runs():

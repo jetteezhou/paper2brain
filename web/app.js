@@ -32,7 +32,7 @@ const VIEWS = {
   papers: { title: '全部论文', kind: 'papers', empty: ['库里还没有论文', '收下的内容关联到论文后会出现在这里。'] },
   topic: { kind: 'papers', empty: ['这个主题下还没有论文', 'agent 会自动归类；你也可以在论文卡片上手动调整主题。'] },
   unsorted: { title: '未归类', kind: 'papers', empty: ['都归好类了', 'agent 拿不准的论文会留在这里。'] },
-  thoughts: { title: '想法', kind: 'page' },
+  thoughts: { title: '想法', kind: 'thoughts', empty: ['还没有想法', '收下内容时在“想法”一栏顺手写一句，或者在上面直接记。<br>agent 会帮每条想法补一句提炼，点开可以接着往下想。'] },
   research: { title: '研究', kind: 'research', empty: ['还没有研究', '在讨论、想法或论文卡片上点“加入研究”，或者在上面直接开一个。<br>素材攒够了，再和 agent 一起推敲三要素：研究问题、研究方法、验证方案。'] },
   discuss: { title: '讨论', kind: 'page' },
   search: { title: '搜索', kind: 'search' },
@@ -193,7 +193,7 @@ async function load() {
       S.list = await get('/api/papers' + q);
     } else if (v.kind === 'research') S.list = await get('/api/research' + (S.arg ? `?topic=${enc(S.arg)}` : ''));
     else if (S.view === 'search') S.search = await get(`/api/search?q=${enc(S.arg || '')}`);
-    else if (S.view === 'thoughts') S.thoughts = await get('/api/thoughts');
+    else if (v.kind === 'thoughts') S.list = await get('/api/thoughts');
     else if (S.view === 'discuss') { await loadThread(scopeKey(), S.threadId); S.threadId = null; }
     if ((S.view === 'topic' || S.view === 'research') && S.arg) {
       const other = await get(S.view === 'topic' ? `/api/research?topic=${enc(S.arg)}` : `/api/papers?topic=${enc(S.arg)}`);
@@ -207,7 +207,7 @@ async function load() {
   else if (!S.sel && v.kind !== 'page' && S.list.length && innerWidth > 900) select(itemKind(S.list[0]), S.list[0].id);
 }
 
-const itemKind = (x) => (x.stage !== undefined ? 'research' : x.raw !== undefined ? 'capture' : 'paper');
+const itemKind = (x) => (x.stage !== undefined ? 'research' : x.raw !== undefined ? 'capture' : x.text !== undefined ? 'thought' : 'paper');
 
 async function select(kind, id) {
   S.sel = { kind, id };
@@ -227,6 +227,10 @@ async function loadDetail(force) {
       const papers = await Promise.all(cap.papers.filter((p) => p.state === 'confirmed').map((p) => get(`/api/papers/${enc(p.id)}`)));
       d = { cap, papers };
     } else if (S.sel.kind === 'research') d = { research: await get(`/api/research/${enc(S.sel.id)}`) };
+    else if (S.sel.kind === 'thought') {
+      d = { thought: await get(`/api/thoughts/${enc(S.sel.id)}`) };
+      if (!S.threads[`thought:${S.sel.id}`]) await loadThread(`thought:${S.sel.id}`);
+    }
     else d = { papers: [await get(`/api/papers/${enc(S.sel.id)}`)] };
     if (force || changed('detail', d)) { S.detail = d; renderDetail(); }
   } catch (e) {
@@ -290,7 +294,6 @@ function render() {
 function renderBody() {
   const v = VIEWS[S.view];
   $('#body').classList.toggle('single', v.kind === 'page');
-  if (S.view === 'thoughts') { $('#list').innerHTML = ''; $('#detail').innerHTML = thoughtsPage(); return; }
   if (S.view === 'discuss') { $('#list').innerHTML = ''; $('#detail').innerHTML = discussPage(); scrollChat(); return; }
   $('#list').innerHTML = S.view === 'search' ? searchList() : listHtml();
 }
@@ -310,6 +313,7 @@ function listHtml() {
   const v = VIEWS[S.view];
   const title = S.arg && (S.view === 'topic' || S.view === 'research') ? S.arg.replace('/', ' / ') : v.title;
   if (v.kind === 'research') return researchList(title);
+  if (v.kind === 'thoughts') return thoughtsList();
   const keys = v.kind === 'captures' && ['inbox', 'pending'].includes(S.view) ? '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>D</kbd> 深读 <kbd>A</kbd> 存档' : '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>↵</kbd> 阅读';
   const head = listHead(title, S.list.length ? `${S.list.length} 条` : '', S.list.length ? keys : '') + topicTabs();
   if (!S.list.length) return head + `<div class="empty"><b>${v.empty[0]}</b>${v.empty[1]}</div>`;
@@ -389,7 +393,7 @@ function searchList() {
   if (!total) return h + '<div class="empty"><b>库里没找到</b>换个关键词试试：论文英文标题、方法名、公众号名或你想法里的词。</div>';
   if (r.papers.length) h += '<div class="group-label">论文</div>' + r.papers.map((p) => paperItem({ ...p, topics: [] })).join('');
   if (r.captures.length) h += '<div class="group-label">解读与捕获</div>' + r.captures.map((c) => captureItem({ ...c, papers: [], status: '' })).join('');
-  if (r.thoughts.length) h += '<div class="group-label">想法</div>' + r.thoughts.map((t) => `<div class="item" ${t.capture_id ? `data-action="select" data-kind="capture" data-id="${t.capture_id}"` : t.paper_id ? `data-action="select" data-kind="paper" data-id="${esc(t.paper_id)}"` : ''}><div class="item-thought" style="white-space:normal">${esc(t.text)}</div><div class="item-meta" style="margin-top:4px"><time>${ago(t.created_at)}</time></div></div>`).join('');
+  if (r.thoughts.length) h += '<div class="group-label">想法</div>' + r.thoughts.map((t) => `<div class="item" data-action="select" data-kind="thought" data-id="${t.id}"><div class="item-thought" style="white-space:normal">${esc(t.text)}</div><div class="item-meta" style="margin-top:4px"><time>${ago(t.created_at)}</time></div></div>`).join('');
   if (r.notes.length) h += '<div class="group-label">笔记</div>' + r.notes.map((n) => `<div class="item" ${n.paper_id ? `data-action="select" data-kind="paper" data-id="${esc(n.paper_id)}"` : ''}><div class="item-tldr" style="-webkit-line-clamp:4">${esc(n.text)}</div><div class="item-meta" style="margin-top:4px"><time>${ago(n.created_at)}</time></div></div>`).join('');
   return h;
 }
@@ -403,7 +407,7 @@ function renderDetail() {
   if (!S.sel || !d) { el.innerHTML = S.list.length ? '<div class="empty" style="padding-top:120px">选择左侧一条查看</div>' : ''; return; }
   if (d.error) { el.innerHTML = `<div class="empty"><b>打不开</b>${esc(d.error)}</div>`; return; }
   const back = innerWidth <= 900 ? '<button class="btn sm ghost" data-action="back">← 返回列表</button>' : '';
-  el.innerHTML = `<div class="detail">${back}${d.research ? researchDetail(d.research) : d.cap ? captureDetail(d.cap, d.papers) : paperDetail(d.papers[0])}</div>`;
+  el.innerHTML = `<div class="detail">${back}${d.thought ? thoughtDetail(d.thought) : d.research ? researchDetail(d.research) : d.cap ? captureDetail(d.cap, d.papers) : paperDetail(d.papers[0])}</div>`;
 }
 
 const FIELDS = [
@@ -497,7 +501,7 @@ function captureDetail(c, papers) {
     ? `<a href="/api/attachments/${a.id}" target="_blank" class="thumb" style="width:96px;height:96px"><img src="/api/attachments/${a.id}"></a>`
     : `<a href="/api/attachments/${a.id}" target="_blank" class="chip">${esc(a.filename.replace(/^\d+-/, ''))} ↗</a>`).join('')}</div>`;
   const capPaper = papers[0]?.id;
-  h += `<div class="thoughts">${c.thoughts.map((t) => `<div class="thought"><span>${esc(t.text)}<small>${t.by === 'agent' ? 'agent 记录 · ' : ''}${ago(t.created_at)}</small></span><span class="thought-acts">${thoughtResearch(t, capPaper)}</span></div>`).join('')}
+  h += `<div class="thoughts">${c.thoughts.map((t) => `<div class="thought"><span class="thought-open" data-action="open-thought" data-id="${t.id}" title="打开想法，接着往下想">${esc(t.gist || t.text)}<small>${t.by === 'agent' ? 'agent 记录 · ' : ''}${ago(t.created_at)}</small></span><span class="thought-acts">${thoughtResearch(t, capPaper)}</span></div>`).join('')}
     <form class="add-line" data-form="thought" data-capture="${c.id}"><input placeholder="${c.thoughts.length ? '再补一句想法…' : '补一句想法：为什么收它？'}"><button class="btn sm">记下</button></form></div>`;
 
   if (c.status === 'needs_confirm' && !papers.length) {
@@ -568,7 +572,7 @@ function paperDetail(p) {
 
 function notesBlock(p) {
   return `<div class="block"><div class="block-title">想法与笔记<span class="line"></span></div>
-    ${p.thoughts.map((t) => `<div class="thought"><span>${esc(t.text)}<small>${ago(t.created_at)}</small></span><span class="thought-acts">${thoughtResearch(t, p.id)}</span></div>`).join('')}
+    ${p.thoughts.map((t) => `<div class="thought"><span class="thought-open" data-action="open-thought" data-id="${t.id}" title="打开想法，接着往下想">${esc(t.gist || t.text)}<small>${ago(t.created_at)}</small></span><span class="thought-acts">${thoughtResearch(t, p.id)}</span></div>`).join('')}
     ${p.notes.map((n) => `<div class="run" style="margin-top:6px">${md(n.text)}<div class="hint">${n.by === 'agent' ? 'agent 记录的讨论结论' : '笔记'} · ${ago(n.created_at)}</div></div>`).join('')}
     <form class="add-line" data-form="thought" data-paper="${esc(p.id)}"><input placeholder="记一个想法，会和这篇论文绑在一起"><button class="btn sm">记下</button></form></div>`;
 }
@@ -716,6 +720,7 @@ const SUGGEST = {
   topic: ['这个方向最近在解决什么问题？', '列出代表性方法和它们的关键区别'],
   thoughts: ['把我最近的想法归纳成几个方向', '哪些想法和库里的论文有关？'],
   library: ['最近收的论文里，哪几篇值得深读？', '库里有谁做过灵巧手相关的工作？'],
+  thought: ['这个想法成立的前提是什么？', '库里有没有支持或反对它的证据？', '如果值得做，最小的验证方式是什么？'],
   research: ['这个研究的问题成立吗？最强的反对意见是什么？', '和库里最接近的工作相比，方法上的区别在哪？', '帮我把验证方案收敛到一个最小实验'],
 };
 
@@ -723,6 +728,7 @@ function scopeLabel(scope) {
   const [k, ...rest] = scope.split(':');
   const ref = rest.join(':');
   if (k === 'research') return `研究《${S.scopeTitles[scope] || '…'}》`;
+  if (k === 'thought') return '这条想法';
   return k === 'paper' ? '这篇论文' : k === 'topic' ? `主题 ${ref}` : k === 'thoughts' ? '我的想法' : '整个论文库';
 }
 
@@ -812,23 +818,55 @@ function refreshChat(scope) {
   scrollChat();
 }
 
-// ---------- thoughts page ----------
+// ---------- thoughts: list + workbench ----------
 
-function thoughtsPage() {
+const paperChip = (pid, title) => `<a href="#" class="chip paper-chip" data-action="open-paper" data-pid="${esc(pid)}" title="打开论文卡片">论文 · ${esc(short(title || pid, 26))}</a>`;
+
+function thoughtsList() {
   let lastDay = '';
-  const items = S.thoughts.map((t) => {
+  const items = S.list.map((t) => {
     const d = day(t.created_at);
-    const head = d !== lastDay ? `<div class="t-day">${d}</div>` : '';
+    const head = d !== lastDay ? `<div class="group-label">${d}</div>` : '';
     lastDay = d;
-    const about = t.about_paper
-      ? `<a href="#" data-action="read" data-pid="${esc(t.about_paper)}" data-tab="notes">${esc(short(t.paper_title, 60))}</a>`
-      : t.capture_id ? `<a href="#" data-action="goto-capture" data-id="${t.capture_id}">${esc(short(t.capture_title || '来自一条捕获', 50))}</a>` : '<span>独立想法</span>';
-    return `${head}<div class="t-item"><div class="t-text">${esc(t.text)}</div><div class="t-meta"><span>${ago(t.created_at)}</span>·${about}${t.by === 'agent' ? '<span class="chip">agent 记录</span>' : ''}<span class="grow"></span>${thoughtResearch(t)}</div></div>`;
+    return head + `<div class="item ${S.sel?.id === t.id ? 'on' : ''}" data-action="select" data-kind="thought" data-id="${t.id}">
+      <div class="item-meta"><span>${t.by === 'agent' ? 'agent 记录' : '你的想法'}</span><time>${ago(t.created_at)}</time></div>
+      <div class="item-title">${esc(t.gist || t.text)}</div>
+      ${t.gist ? `<div class="item-thought">${esc(t.text)}</div>` : agentOn() ? '<div class="hint">提炼中…</div>' : ''}
+      <div class="item-tags">${t.about_paper ? paperChip(t.about_paper, t.paper_title) : ''}${(t.research || []).map(researchChip).join('')}</div>
+    </div>`;
   }).join('');
-  return `<div class="page pad"><h2 class="page-title">想法</h2><p class="hint" style="margin:0 0 12px">一闪念都在这里。和论文绑在一起的，会在深读和讨论时被调出来。</p>
-    <form class="add-line" data-form="thought"><input placeholder="记一个想法…（回车保存）" style="padding:9px 12px;font-size:14.5px"><button class="btn primary">记下</button></form>
-    ${items || '<div class="empty"><b>还没有想法</b>收下内容时在“想法”一栏顺手写一句，或者在这里直接记。</div>'}
-    <div style="margin-top:20px"><button class="btn" data-action="discuss-thoughts">和 agent 聊聊我的想法 →</button></div></div>`;
+  return listHead('想法', S.list.length ? `${S.list.length} 条` : '', `<a href="#" data-action="discuss-thoughts">和 agent 聊聊全部想法 →</a>`) +
+    `<form class="add-line idea-like" data-form="thought" style="margin:10px 18px 6px"><input placeholder="记一个想法…（回车）"></form>` +
+    (items || `<div class="empty"><b>${VIEWS.thoughts.empty[0]}</b>${VIEWS.thoughts.empty[1]}</div>`);
+}
+
+function thoughtDetail(t) {
+  const editing = S.editGist === t.id;
+  const gistNote = t.gist ? (t.gist_by === 'user' ? '提炼 · 你改过' : '提炼 · agent 生成') : agentOn() ? 'agent 正在提炼这条想法…' : '连接 agent 后会自动补一句提炼';
+  let h = `<div class="src-bar"><span class="chip">想法</span><span>${t.by === 'agent' ? 'agent 在讨论里记下' : '你记下'} · ${ago(t.created_at)}</span><span class="grow"></span>
+    <button class="btn sm" data-action="thought-research" data-id="${t.id}" data-paper="${esc(t.about_paper || '')}" data-text="${esc(t.text)}">加入研究</button></div>`;
+  h += editing
+    ? `<form class="add-line" data-form="gist" data-id="${t.id}" style="margin-top:14px"><input value="${esc(t.gist || t.text)}" placeholder="一句话说清这个想法"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" data-action="edit-gist" data-id="${t.id}">取消</button></form>`
+    : `<h1 class="thought-gist">${esc(t.gist || t.text)}<button class="btn sm ghost" data-action="edit-gist" data-id="${t.id}" title="改写提炼">改写</button></h1>`;
+  h += `<div class="hint">${gistNote}</div>`;
+  if (t.gist) h += `<blockquote class="thought-raw">${esc(t.text)}<span class="hint">　— 你的原话</span></blockquote>`;
+  const links = [];
+  if (t.paper) {
+    links.push(`<div class="mini-paper"><div class="mini-paper-title serif">${esc(t.paper.title)}</div>
+      ${t.paper.tldr ? `<div class="item-tldr">${esc(t.paper.tldr)}</div>` : ''}
+      <div class="mini-acts"><button class="btn sm" data-action="open-paper" data-pid="${esc(t.paper.id)}">打开论文卡片</button>
+      ${t.paper.page_count ? `<button class="btn sm ghost" data-action="read" data-pid="${esc(t.paper.id)}">看原文 PDF</button>` : ''}</div></div>`);
+  }
+  if (t.research?.length) links.push(`<div class="thought-research"><span class="hint">所在研究</span>${t.research.map(researchChip).join('')}</div>`);
+  if (t.capture) links.push(`<div class="thought-research"><span class="hint">来自</span><a href="#" data-action="goto-capture" data-id="${t.capture.id}">${esc(short(t.capture.title || firstLine(t.capture.raw), 60))}</a></div>`);
+  if (links.length) h += `<div class="block"><div class="block-title">关联<span class="line"></span></div>${links.join('')}</div>`;
+  h += `<div class="block"><div class="block-title">接着往下想<span class="line"></span></div>
+    <div class="thought-chat">${chatHtml(`thought:${t.id}`)}</div></div>`;
+  if (t.siblings?.length) {
+    h += `<div class="block"><div class="block-title">同一论文或研究下的其他想法<span class="line"></span></div>${t.siblings.map((x) => `
+      <div class="source" data-action="select" data-kind="thought" data-id="${x.id}"><span class="source-kind">${ago(x.created_at)}</span><span class="source-label">${esc(short(x.gist || x.text, 120))}</span></div>`).join('')}</div>`;
+  }
+  return h;
 }
 
 // ---------- capture bar ----------
@@ -978,7 +1016,6 @@ function afterResearch(id, message) {
   loadState();
   if (S.reader) get(`/api/papers/${enc(S.reader.pid)}`).then((p) => { S.reader.paper = p; if (S.reader.tab !== 'chat') renderPanel(); });
   for (const scope of Object.keys(S.threads)) loadThread(scope).then(() => refreshChat(scope));
-  if (S.view === 'thoughts') get('/api/thoughts').then((t) => { S.thoughts = t; renderBody(); });
   loadDetail(true);
 }
 
@@ -1007,7 +1044,7 @@ async function openThreadAt(scope, threadId, mid) {
 
 const openSource = {
   paper: (el) => openReader(el.dataset.ref),
-  thought: (el) => (el.dataset.paper ? (S.pendingTab = 'notes', openReader(el.dataset.paper)) : openItem('capture', el.dataset.capture, 'inbox')),
+  thought: (el) => openItem('thought', el.dataset.ref, 'thoughts'),
   message: (el) => openThreadAt(el.dataset.scope, el.dataset.thread, el.dataset.ref),
   thread: (el) => openThreadAt(el.dataset.scope, el.dataset.ref),
   capture: (el) => openItem('capture', el.dataset.ref, 'inbox'),
@@ -1086,6 +1123,9 @@ const actions = {
     e.stopPropagation();
     saveTopics(el.dataset.kind, el.dataset.pid, topicOwner(el).topics.filter((t) => t !== el.dataset.topic));
   },
+  'open-thought': (el, e) => { e.preventDefault(); e.stopPropagation(); openItem('thought', el.dataset.id, 'thoughts'); },
+  'open-paper': (el, e) => { e.preventDefault(); e.stopPropagation(); openItem('paper', el.dataset.pid, 'papers'); },
+  'edit-gist': (el) => { S.editGist = S.editGist === el.dataset.id ? null : el.dataset.id; renderDetail(); $('form[data-form="gist"] input')?.focus(); },
   'open-research': (el, e) => { e.preventDefault(); e.stopPropagation(); openItem('research', el.dataset.id, 'research'); },
   'open-source': (el, e) => { if (e.target.closest('.x')) return; openSource[el.dataset.kind](el); },
   'thought-research': (el, e) => {
@@ -1246,12 +1286,17 @@ document.addEventListener('submit', async (e) => {
   const kind = form.dataset.form;
   try {
     if (kind === 'thought') {
-      await post('/api/thoughts', { text: value, capture_id: form.dataset.capture || null, paper_id: form.dataset.paper || null });
+      const added = await post('/api/thoughts', { text: value, capture_id: form.dataset.capture || null, paper_id: form.dataset.paper || null });
       input.value = '';
       toast('已记下');
-      if (S.view === 'thoughts') { S.thoughts = await get('/api/thoughts'); renderBody(); }
+      if (S.view === 'thoughts') { S.wantSel = { kind: 'thought', id: added.id }; load(); }
       if (S.reader) { S.reader.paper = await get(`/api/papers/${enc(S.reader.pid)}`); renderPanel(); }
       loadState(); loadDetail(true);
+    } else if (kind === 'gist') {
+      await post(`/api/thoughts/${enc(form.dataset.id)}`, { gist: value });
+      S.editGist = null;
+      toast('已保存提炼');
+      loadDetail(true); load();
     } else if (kind === 'link') {
       input.disabled = true;
       await post(`/api/captures/${enc(form.dataset.capture)}/link`, { paper: value });
@@ -1315,16 +1360,16 @@ async function refresh(force) {
     await loadState();
     const v = VIEWS[S.view];
     const editing = document.activeElement?.closest?.('#list, #detail') && document.activeElement.matches('input, textarea, select');
-    if (['captures', 'papers', 'research'].includes(v.kind)) {
+    if (['captures', 'papers', 'research', 'thoughts'].includes(v.kind)) {
       const list = v.kind === 'captures' ? await get(`/api/captures?view=${S.view}`)
         : v.kind === 'research' ? await get('/api/research' + (S.arg ? `?topic=${enc(S.arg)}` : ''))
+        : v.kind === 'thoughts' ? await get('/api/thoughts')
           : await get('/api/papers' + (S.view === 'topic' ? `?topic=${enc(S.arg)}` : S.view === 'unsorted' ? '?unsorted=1' : ''));
       const typingInList = document.activeElement?.closest?.('#list') && document.activeElement.matches('input');
       if ((force || changed('list', list)) && !typingInList) { S.list = list; renderBody(); }
     }
     // the agent and the iPhone change things behind our back; loadDetail only re-renders when the data changed
-    if (S.sel && !editing && !S.picker && !S.editResearch && !document.querySelector('.modal-bg')) await loadDetail(force);
-    if (S.view === 'thoughts' && force) { S.thoughts = await get('/api/thoughts'); renderBody(); }
+    if (S.sel && !editing && !S.picker && !S.editResearch && !S.editGist && !document.querySelector('.modal-bg')) await loadDetail(force);
     if (S.reader) {
       const p = await get(`/api/papers/${enc(S.reader.pid)}`);
       if (force || changed('reader', p)) {

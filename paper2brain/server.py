@@ -198,6 +198,20 @@ def thoughts(q, body):
     return store.list_thoughts()
 
 
+@route("GET", "/api/thoughts/([^/]+)")
+def thought_get(q, body, tid):
+    t = store.get_thought(tid)
+    if not t:
+        raise rules.Rejected("这条想法不存在或已删除")
+    return t
+
+
+@route("POST", "/api/thoughts/([^/]+)")
+def thought_update(q, body, tid):
+    store.set_gist(tid, body.get("gist"), "user")
+    return store.get_thought(tid)
+
+
 @route("POST", "/api/thoughts")
 def thought_add(q, body):
     return {"id": store.add_thought(body.get("text"), "user", body.get("capture_id"), body.get("paper_id"))}
@@ -388,11 +402,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def _poll_inbox():
     while True:
-        try:
-            inbox.drain()
-        except Exception:
-            traceback.print_exc()
-        time.sleep(30)
+        for job in (inbox.drain, cursor_api.distill_pending):
+            try:
+                job()
+            except Exception:
+                traceback.print_exc()
+        time.sleep(20)
 
 
 def serve(host="127.0.0.1", port=8765):

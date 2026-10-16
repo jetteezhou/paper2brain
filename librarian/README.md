@@ -24,7 +24,9 @@
 ./p2b report put <arxiv:id> --file /tmp/report.json
 ./p2b topics
 ./p2b topic set <arxiv:id> "VLA/推理加速" ["WAM/世界模型" ...]
-./p2b thought add --text "..." [--capture <id>] [--paper <arxiv:id>]
+./p2b thought add --text "..." [--gist "一句话提炼"] [--capture <id>] [--paper <arxiv:id>]
+./p2b thought show <id> [<id> ...]   # 想法 + 论文、研究、同类想法
+./p2b thought gist <id> --text "..." # 一句话提炼（见 librarian/thought.md）
 ./p2b note add --text "..." [--paper <arxiv:id>] [--topic "VLA"]
 ./p2b research list [--topic "VLA"]
 ./p2b research show <研究 id>

@@ -21,7 +21,7 @@
 用户在讨论里说出自己的想法（"我觉得……""能不能……"）时，记成想法：
 
 ```
-./p2b thought add --text "用户原话或忠实转述" --paper <arxiv:id>
+./p2b thought add --text "用户原话或忠实转述" --gist "一句话提炼（补全指代，见 librarian/thought.md）" --paper <arxiv:id>
 ```
 
 讨论里冒出一个**值得做的研究方向**（不只是感想：有明确的问题，可能做成实验或论文）时：

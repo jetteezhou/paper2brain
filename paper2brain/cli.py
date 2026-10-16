@@ -66,7 +66,14 @@ def run(args):
         store.set_topics(pid, args.paths, "agent")
         return {"paper": pid, "topics": args.paths}
     if cmd == "thought":
-        return {"id": store.add_thought(args.text, "agent", args.capture, args.paper and to_pid(args.paper))}
+        if args.action == "show":
+            return [store.get_thought(i) for i in args.ids]
+        if args.action == "gist":
+            store.set_gist(args.ids[0], args.text, "agent")
+            return {"ok": True}
+        if not args.text:
+            raise rules.Rejected("--text 不能为空")
+        return {"id": store.add_thought(args.text, "agent", args.capture, args.paper and to_pid(args.paper), args.gist)}
     if cmd == "note":
         return {"id": store.add_note(args.text, "agent", args.paper and to_pid(args.paper), args.topic, args.thread)}
     if cmd == "research":
@@ -156,9 +163,11 @@ def parser():
     s.add_argument("paper")
     s.add_argument("paths", nargs="+")
 
-    s = sub.add_parser("thought", help="记一条想法")
-    s.add_argument("action", choices=["add"])
-    s.add_argument("--text", required=True)
+    s = sub.add_parser("thought", help="想法：add 记一条 / show 查看（含论文、研究、同类想法）/ gist 写一句话提炼")
+    s.add_argument("action", choices=["add", "show", "gist"])
+    s.add_argument("ids", nargs="*", help="show/gist 时的想法 id")
+    s.add_argument("--text", help="add：想法原文；gist：一句话提炼")
+    s.add_argument("--gist", help="add 时可同时给出一句话提炼")
     s.add_argument("--capture")
     s.add_argument("--paper")
     s = sub.add_parser("note", help="记一条讨论结论")

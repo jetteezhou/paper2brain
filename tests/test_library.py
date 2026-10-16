@@ -171,6 +171,18 @@ class Store(unittest.TestCase):
         self.assertEqual((r["title"], r["body"]["validation"], r["proposal"], r["stage"]),
                          ("t", "v [arxiv:2410.24164 p.3]", None, "forming"))
 
+    def test_thought_gist_keeps_raw_and_user_edit_wins(self):
+        tid = store.add_thought("和 diffusion policy 对比一下", "user", paper_id="arxiv:2410.24164")
+        self.assertIn(tid, store.pending_gists(100))
+        store.set_gist(tid, "π0 的 flow matching 动作头和 Diffusion Policy 差在哪", "agent")
+        self.assertNotIn(tid, store.pending_gists(100))
+        store.set_gist(tid, "比较两种动作生成头", "user")
+        with self.assertRaisesRegex(rules.Rejected, "手动改过"):
+            store.set_gist(tid, "agent 又来改", "agent")
+        t = store.get_thought(tid)
+        self.assertEqual((t["text"], t["gist"], t["gist_by"], t["paper"]["id"]),
+                         ("和 diffusion policy 对比一下", "比较两种动作生成头", "user", "arxiv:2410.24164"))
+
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])

@@ -249,6 +249,14 @@ def scope_text(scope):
         return f"主题「{ref}」下的论文。先运行 `./p2b papers --topic '{ref}'`。"
     if kind == "thoughts":
         return "用户记下的想法。先运行 `./p2b thoughts`，再结合相关论文回答。"
+    if kind == "thought":
+        t = store.get_thought(ref) or {}
+        about = f"，关于论文 {t['about_paper']}《{t.get('paper_title') or ''}》" if t.get("about_paper") else ""
+        gist = f"，提炼为「{t['gist']}」" if t.get("gist") else ""
+        return (
+            f"用户的一个想法（{ref}）：原话「{t.get('text', '')}」{gist}{about}。先运行 `./p2b thought show {ref}`，"
+            f"再按 librarian/thought.md 的“围绕一条想法讨论”一节，帮用户把这个念头往下推。"
+        )
     if kind == "research":
         x = store.get_research(ref)
         return (
@@ -277,6 +285,27 @@ def discuss(scope, text, thread_id=None):
 
     return start_async("chat", thread["id"], prompt, name=name, agent_id=thread["agent_id"], prepare=prepare,
                        on_agent=None if thread["agent_id"] else lambda aid: store.set_thread_agent(thread["id"], aid))
+
+
+DISTILL_AGENT, DISTILL_TRIED = "distill_agent", "distill_tried"
+
+
+def distill_pending():
+    """Fill empty thought gists in batches through one long-lived agent: a follow-up starts in seconds, while a new
+    agent on this machine takes about a minute. Each thought is tried at most twice."""
+    if not status()["enabled"] or any(r["kind"] == "distill" for r in store.unfinished_runs()):
+        return
+    tried = json.loads(store.kv_get(DISTILL_TRIED) or "{}")
+    ids = [i for i in store.pending_gists() if tried.get(i, 0) < 2]
+    if not ids:
+        return
+    last = store.last_run("distill")
+    if last and last["status"] == "ERROR" and "agent_busy" not in (last["error"] or ""):
+        store.kv_set(DISTILL_AGENT, "")  # that agent is gone (archived or expired); start a fresh one
+    store.kv_set(DISTILL_TRIED, json.dumps({**tried, **{i: tried.get(i, 0) + 1 for i in ids}}))
+    text = f"先读 librarian/README.md 和 librarian/thought.md，按“提炼想法”一节处理这些想法：{' '.join(ids)}"
+    start_async("distill", "thoughts", text, name="提炼想法", agent_id=store.kv_get(DISTILL_AGENT) or None,
+                on_agent=lambda aid: store.kv_set(DISTILL_AGENT, aid))
 
 
 def draft_research(rid):
