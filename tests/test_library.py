@@ -128,31 +128,48 @@ class Store(unittest.TestCase):
                                    store.pages(paper["id"]))
         self.assertEqual(card["results"][0]["page"], 2)
 
-    def test_idea_links_both_ways_and_inherits_topics(self):
+    def test_research_materials_link_both_ways_and_inherit_topics(self):
         store.upsert_paper("arxiv:2501.00001", "one-step policy")
         store.set_topics("arxiv:2501.00001", ["VLA/推理加速"], "agent")
         tid = store.add_thought("能不能把动作头蒸馏到一步", "user", paper_id="arxiv:2501.00001")
-        iid = store.add_idea("一步动作头", "user", links=[("thought", tid), ("paper", "arxiv:2501.00001")])
-        idea = store.get_idea(iid)
-        self.assertEqual(idea["topics"], ["VLA/推理加速"])
-        self.assertEqual({l["kind"] for l in idea["links"]}, {"thought", "paper"})
-        self.assertEqual(store.get_paper("arxiv:2501.00001")["ideas"][0]["id"], iid)
-        self.assertTrue(any(t["ideas"] for t in store.list_thoughts() if t["id"] == tid))
-        self.assertEqual([i["id"] for i in store.list_ideas("VLA")], [iid])
+        rid = store.add_research("一步动作头", "user", links=[("thought", tid), ("paper", "arxiv:2501.00001")])
+        r = store.get_research(rid)
+        self.assertEqual((r["stage"], r["topics"]), ("forming", ["VLA/推理加速"]))
+        self.assertEqual({l["kind"] for l in r["links"]}, {"thought", "paper"})
+        self.assertEqual(store.get_paper("arxiv:2501.00001")["research"][0]["id"], rid)
+        self.assertTrue(any(t["research"] for t in store.list_thoughts() if t["id"] == tid))
+        self.assertEqual([x["id"] for x in store.list_research("VLA")], [rid])
         with self.assertRaisesRegex(rules.Rejected, "不存在"):
-            store.link_idea(iid, "message", "nope", "user")
+            store.link_research(rid, "message", "nope", "user")
 
-    def test_idea_revision_and_draft_citations(self):
-        iid = store.add_idea("x", "user")
-        rev = store.update_idea(iid, "user", title="用户改过的标题")
-        with self.assertRaisesRegex(rules.Rejected, "已被修改"):
-            store.update_idea(iid, "agent", rev - 1, stage="refined")
-        draft = {"title": "t", "summary": "s", "problem": "p", "insight": "i", "approach": "a",
-                 "experiment": "e [arxiv:2410.24164 p.3]", "risks": "r [arxiv:9999.99999]"}
+    def test_only_user_establishes_with_all_three_elements(self):
+        rid = store.add_research("x", "user")
+        with self.assertRaisesRegex(rules.Rejected, "只能由用户确立"):
+            store.establish(rid, "agent")
+        store.update_research(rid, body={"problem": "p", "method": "m"})
+        with self.assertRaisesRegex(rules.Rejected, "还缺：验证方案"):
+            store.establish(rid, "user")
+        store.update_research(rid, body={"problem": "p", "method": "m", "validation": "v"})
+        store.establish(rid, "user")
+        self.assertEqual(store.get_research(rid)["stage"], "established")
+
+    def test_agent_draft_waits_for_user(self):
+        rid = store.add_research("x", "user")
+        rev = store.update_research(rid, title="用户改过的标题")
+        draft = {"title": "t", "summary": "s", "problem": "p", "method": "m",
+                 "validation": "v [arxiv:2410.24164 p.3]", "notes": "n [arxiv:9999.99999]"}
         with self.assertRaisesRegex(rules.Rejected, "库里没有"):
-            rules.validate_idea_draft(draft, store.paper_ids())
-        ok = rules.validate_idea_draft({**draft, "risks": "r"}, store.paper_ids())
-        self.assertEqual(ok["cited"], ["arxiv:2410.24164"])
+            rules.validate_research_draft(draft, store.paper_ids())
+        draft, cited = rules.validate_research_draft({**draft, "notes": None}, store.paper_ids())
+        self.assertEqual(cited, ["arxiv:2410.24164"])
+        with self.assertRaisesRegex(rules.Rejected, "已被修改"):
+            store.propose(rid, draft, "agent", rev - 1)
+        store.propose(rid, draft, "agent", rev)
+        self.assertEqual(store.get_research(rid)["title"], "用户改过的标题")
+        store.accept_proposal(rid)
+        r = store.get_research(rid)
+        self.assertEqual((r["title"], r["body"]["validation"], r["proposal"], r["stage"]),
+                         ("t", "v [arxiv:2410.24164 p.3]", None, "forming"))
 
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}

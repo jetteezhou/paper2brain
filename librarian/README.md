@@ -26,10 +26,11 @@
 ./p2b topic set <arxiv:id> "VLA/推理加速" ["WAM/世界模型" ...]
 ./p2b thought add --text "..." [--capture <id>] [--paper <arxiv:id>]
 ./p2b note add --text "..." [--paper <arxiv:id>] [--topic "VLA"]
-./p2b ideas [--topic "VLA"]
-./p2b idea show <idea_id>
-./p2b idea add --title "..." --summary "..." [--paper <id>] [--thread <id>] [--topic "VLA"]
-./p2b idea link <idea_id> paper|thought|thread|capture <id>
+./p2b research list [--topic "VLA"]
+./p2b research show <研究 id>
+./p2b research add --title "..." --summary "..." [--paper <id>] [--thread <id>] [--topic "VLA"]
+./p2b research link <研究 id> paper|thought|thread|capture <id>
+./p2b research propose <研究 id> --file /tmp/research.json --base-rev N   # 修改稿，用户确认后才生效
 ./p2b papers [--topic "VLA"] [--unsorted]
 ./p2b thoughts
 ./p2b search "关键词"

@@ -218,66 +218,81 @@ def message_get(q, body, mid):
     return store.message(mid)
 
 
-# ---------- ideas ----------
+# ---------- research ----------
 
-@route("GET", "/api/ideas")
-def ideas(q, body):
-    return store.list_ideas("" if q.get("unsorted") else q.get("topic"))
+@route("GET", "/api/research")
+def research_list(q, body):
+    return store.list_research("" if q.get("unsorted") else q.get("topic"))
 
 
-@route("POST", "/api/ideas")
-def idea_add(q, body):
+@route("POST", "/api/research")
+def research_add(q, body):
     links = [(x["kind"], x["ref"]) for x in body.get("links") or []]
-    iid = store.add_idea(body.get("title"), "user", body.get("summary"), body.get("topics") or [], links, body.get("stage", "seed"))
-    return store.get_idea(iid)
+    return store.get_research(store.add_research(body.get("title"), "user", body.get("summary"), body.get("topics") or [], links))
 
 
-def _idea(iid):
-    i = store.get_idea(iid)
-    if not i:
-        raise rules.Rejected("这个 Idea 不存在或已删除")
-    return i
+def _research(rid):
+    x = store.get_research(rid)
+    if not x:
+        raise rules.Rejected("这个研究不存在或已删除")
+    return x
 
 
-@route("GET", "/api/ideas/([^/]+)")
-def idea_get(q, body, iid):
-    return _idea(iid)
+@route("GET", "/api/research/([^/]+)")
+def research_get(q, body, rid):
+    return _research(rid)
 
 
-@route("POST", "/api/ideas/([^/]+)")
-def idea_update(q, body, iid):
-    fields = {k: body[k] for k in ("title", "summary", "stage", "body") if k in body}
-    store.update_idea(iid, "user", body.get("base_rev"), **fields)
-    return _idea(iid)
+@route("POST", "/api/research/([^/]+)")
+def research_update(q, body, rid):
+    store.update_research(rid, body.get("base_rev"), body.get("title"), body.get("summary"), body.get("body"))
+    return _research(rid)
 
 
-@route("DELETE", "/api/ideas/([^/]+)")
-def idea_delete(q, body, iid):
-    store.delete_idea(iid)
+@route("DELETE", "/api/research/([^/]+)")
+def research_delete(q, body, rid):
+    store.delete_research(rid)
     return {"ok": True}
 
 
-@route("POST", "/api/ideas/([^/]+)/topics")
-def idea_topics(q, body, iid):
-    store.set_idea_topics(iid, body.get("topics") or [], "user")
-    return _idea(iid)
+@route("POST", "/api/research/([^/]+)/establish")
+def research_establish(q, body, rid):
+    store.establish(rid, "user", body.get("established", True))
+    return _research(rid)
 
 
-@route("POST", "/api/ideas/([^/]+)/links")
-def idea_link(q, body, iid):
-    store.link_idea(iid, body["kind"], body["ref"], "user")
-    return _idea(iid)
+@route("POST", "/api/research/([^/]+)/proposal")
+def research_proposal(q, body, rid):
+    if body.get("action") == "discard":
+        store.discard_proposal(rid)
+    else:
+        store.accept_proposal(rid, body.get("base_rev"))
+        if body.get("establish"):
+            store.establish(rid, "user")
+    return _research(rid)
 
 
-@route("POST", "/api/ideas/([^/]+)/unlink")
-def idea_unlink(q, body, iid):
-    store.unlink_idea(iid, body["kind"], body["ref"])
-    return _idea(iid)
+@route("POST", "/api/research/([^/]+)/topics")
+def research_topics(q, body, rid):
+    store.set_research_topics(rid, body.get("topics") or [])
+    return _research(rid)
 
 
-@route("POST", "/api/ideas/([^/]+)/refine")
-def idea_refine(q, body, iid):
-    return {"run_id": cursor_api.refine_idea(iid)}
+@route("POST", "/api/research/([^/]+)/links")
+def research_link(q, body, rid):
+    store.link_research(rid, body["kind"], body["ref"], "user")
+    return _research(rid)
+
+
+@route("POST", "/api/research/([^/]+)/unlink")
+def research_unlink(q, body, rid):
+    store.unlink_research(rid, body["kind"], body["ref"])
+    return _research(rid)
+
+
+@route("POST", "/api/research/([^/]+)/draft")
+def research_draft(q, body, rid):
+    return {"run_id": cursor_api.draft_research(rid)}
 
 
 @route("POST", "/api/threads")
