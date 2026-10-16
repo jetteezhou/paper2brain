@@ -73,7 +73,29 @@ def _prompt(text, images):
     return p
 
 
-def start(kind, ref, text, images=(), name=None, agent_id=None):
+def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, on_agent=None):
+    """Like start(), but returns at once with a placeholder run the UI can show as "starting": creating an agent on a
+    machine takes about a minute. prepare(placeholder) runs before the request is sent (e.g. to add chat messages)."""
+    if not config()["machine"]:
+        raise AgentError("未配置 P2B_MACHINE（本机 worker 的名字）")
+    placeholder = f"pending-{uuid.uuid4()}"
+    store.add_run(placeholder, agent_id or "", kind, ref, text, "CREATING")
+    if prepare:
+        prepare(placeholder)
+
+    def go():
+        try:
+            aid, _ = start(kind, ref, text, images, name, agent_id, placeholder)
+            if on_agent:
+                on_agent(aid)
+        except Exception as e:
+            store.update_run(placeholder, status="ERROR", error=str(e))
+
+    threading.Thread(target=go, daemon=True).start()
+    return placeholder
+
+
+def start(kind, ref, text, images=(), name=None, agent_id=None, placeholder=None):
     """Follow up on agent_id when given, otherwise create a new agent on this Mac. Returns (agent_id, run_id).
     The run is watched in the background; its progress lands in the runs table."""
     cfg = config()
@@ -102,7 +124,13 @@ def start(kind, ref, text, images=(), name=None, agent_id=None):
             run = _json("POST", "/agents", body, timeout=180)["run"]
         except (TimeoutError, urllib.error.URLError, ConnectionError):
             run = _latest_run(agent_id)
-    store.add_run(run["id"], agent_id, kind, ref, text, run.get("status", "CREATING"))
+    if placeholder:
+        cancelled = (store.get_run(placeholder) or {}).get("status") == "CANCELLED"
+        store.replace_run(placeholder, run["id"], agent_id, run.get("status", "CREATING"))
+        if cancelled:
+            cancel(agent_id, run["id"])
+    else:
+        store.add_run(run["id"], agent_id, kind, ref, text, run.get("status", "CREATING"))
     watch(agent_id, run["id"])
     return agent_id, run["id"]
 
@@ -185,7 +213,10 @@ def cancel(agent_id, run_id):
 
 def resume_watchers():
     for run in store.unfinished_runs():
-        watch(run["agent_id"], run["id"])
+        if run["id"].startswith("pending-"):
+            store.update_run(run["id"], status="ERROR", error="服务重启时 agent 还没创建完成，请重试")
+        else:
+            watch(run["agent_id"], run["id"])
 
 
 # ---------- what we ask the librarian agent to do; the details live in librarian/*.md ----------
@@ -202,9 +233,8 @@ def process_capture(capture_id):
         f"你是 paper2brain 的论文管理员。先读 librarian/README.md 和 librarian/capture.md，"
         f"然后处理捕获 {capture_id}（已入库并做过规则预处理，用 ./p2b show capture {capture_id} 查看）。"
     )
-    agent_id, run_id = start("capture", capture_id, text, images, name=f"收下：{label}")
-    store.update_capture(capture_id, agent_id=agent_id)
-    return run_id
+    return start_async("capture", capture_id, text, images, name=f"收下：{label}",
+                       on_agent=lambda aid: store.update_capture(capture_id, agent_id=aid))
 
 
 def scope_text(scope):
@@ -233,17 +263,20 @@ def discuss(scope, text, thread_id=None):
     """Continue the scope's latest discussion, or an older one the user jumped back to."""
     thread = store.thread_for(scope, thread_id)
     if thread["agent_id"]:
-        agent_id, run_id = start("chat", thread["id"], text, agent_id=thread["agent_id"])
+        prompt, name = text, None
     else:
         prompt = (
             f"先读 librarian/README.md 和 librarian/discuss.md。\n讨论范围：{scope_text(scope)}\n"
             f"讨论线程 ID：{thread['id']}（关联研究素材或笔记时用 --thread）\n\n用户的问题：{text}"
         )
-        agent_id, run_id = start("chat", thread["id"], prompt, name=f"讨论：{text[:40]}")
-        store.set_thread_agent(thread["id"], agent_id)
-    store.add_message(thread["id"], "user", text)
-    store.add_message(thread["id"], "assistant", "", run_id)
-    return run_id
+        name = f"讨论：{text[:40]}"
+
+    def prepare(placeholder):
+        store.add_message(thread["id"], "user", text)
+        store.add_message(thread["id"], "assistant", "", placeholder)
+
+    return start_async("chat", thread["id"], prompt, name=name, agent_id=thread["agent_id"], prepare=prepare,
+                       on_agent=None if thread["agent_id"] else lambda aid: store.set_thread_agent(thread["id"], aid))
 
 
 def draft_research(rid):
@@ -252,7 +285,7 @@ def draft_research(rid):
         f"先读 librarian/README.md 和 librarian/research.md，为研究 {rid}《{x['title']}》起草三要素修改稿，"
         f"用 ./p2b research propose {rid} --base-rev {x['revision']} 提交，直到校验通过。修改稿由用户确认后才生效。"
     )
-    return start("draft", rid, text, name=f"起草研究：{x['title'][:60]}")[1]
+    return start_async("draft", rid, text, name=f"起草研究：{x['title'][:60]}")
 
 
 def deep_read(pid):
@@ -261,4 +294,4 @@ def deep_read(pid):
         f"先读 librarian/README.md 和 librarian/deepread.md，为论文 {pid}《{p['title']}》写深读报告，"
         f"用 ./p2b report put 提交，直到校验通过。"
     )
-    return start("deepread", pid, text, name=f"深读：{p['title'][:60]}")[1]
+    return start_async("deepread", pid, text, name=f"深读：{p['title'][:60]}")

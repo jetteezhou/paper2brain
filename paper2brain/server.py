@@ -317,7 +317,10 @@ def run_get(q, body, rid):
 @route("POST", "/api/runs/([^/]+)/cancel")
 def run_cancel(q, body, rid):
     r = store.get_run(rid)
-    cursor_api.cancel(r["agent_id"], rid)
+    if r["id"].startswith("pending-"):
+        store.update_run(rid, status="CANCELLED")
+    else:
+        cursor_api.cancel(r["agent_id"], rid)
     return {"ok": True}
 
 

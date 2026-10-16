@@ -817,6 +817,13 @@ def add_run(run_id, agent_id, kind, ref, prompt, status):
         )
 
 
+def replace_run(placeholder, run_id, agent_id, status):
+    """Swap the placeholder shown while Cursor was still creating the agent for the real run."""
+    with tx() as c:
+        c.execute("UPDATE runs SET id=?, agent_id=?, status=?, updated_at=? WHERE id=?", (run_id, agent_id, status, now(), placeholder))
+        c.execute("UPDATE messages SET run_id=? WHERE run_id=?", (run_id, placeholder))
+
+
 def update_run(run_id, **fields):
     if "tools" in fields:
         fields["tools"] = json.dumps(fields["tools"], ensure_ascii=False)
