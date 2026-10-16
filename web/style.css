@@ -279,8 +279,8 @@ details.runs summary::-webkit-details-marker { display: none; }
 .elements { margin-top: 18px; display: grid; gap: 10px; }
 .element { border: 1px solid var(--line); border-radius: 12px; padding: 12px 18px 14px; background: var(--panel); }
 .element h3 { color: var(--accent); font-size: 13px; letter-spacing: .3px; margin: 0 0 4px; }
-.element.empty { border-style: dashed; background: var(--bg); }
-.element.empty h3 { color: var(--muted); }
+.element.blank { border-style: dashed; background: var(--bg); }
+.element.blank h3 { color: var(--muted); }
 .establish { margin-top: 14px; display: flex; gap: 14px; align-items: center; justify-content: space-between; padding: 12px 16px; border-radius: 12px; background: var(--accent-soft); font-size: 13.5px; }
 .establish.done { background: var(--bg); }
 .proposal { margin-top: 16px; border: 1.5px solid var(--violet); border-radius: 12px; padding: 12px 16px 14px; background: var(--violet-soft); }

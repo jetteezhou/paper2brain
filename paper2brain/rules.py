@@ -187,9 +187,10 @@ def _numbers(text):
     return {float(n) for n in _NUM.findall((text or "").replace(",", ""))}
 
 
-def validate_experiment(draft, raw):
-    """The agent's structured version of a pasted result. Every number it reports must appear in the raw input,
-    so a figure can never be invented on the way from the log to the results table."""
+def validate_experiment(draft, raw, context=""):
+    """The agent's structured version of a pasted result. Every number in the results must appear in the raw input,
+    so a figure can never be invented on the way from the log to the results table. The conclusion may also cite
+    numbers from context (the research's own elements, e.g. a success threshold in the validation plan)."""
     if not isinstance(draft, dict):
         raise Rejected("实验记录必须是 JSON 对象")
     errors = []
@@ -215,10 +216,10 @@ def validate_experiment(draft, raw):
         if missing:
             errors.append(f"results 第 {i} 条（{r['name']}）的数字 {missing} 在原始结果里找不到")
         out["results"].append({"name": str(r["name"]).strip(), "value": str(r["value"]).strip(), "note": (r.get("note") or "").strip() or None})
-    allowed = seen | {n for r in out["results"] for n in _numbers(r["value"])}
+    allowed = seen | _numbers(context) | {n for r in out["results"] for n in _numbers(r["value"])}
     extra = [n for n in _numbers(out["conclusion_text"]) if n not in allowed]
     if extra:
-        errors.append(f"结论里的数字 {extra} 在原始结果里找不到")
+        errors.append(f"结论里的数字 {extra} 在原始结果和研究三要素里都找不到")
     if errors:
         raise Rejected("实验记录未通过校验：\n- " + "\n- ".join(errors))
     return out

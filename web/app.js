@@ -88,6 +88,7 @@ function inline(s) {
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
     .replace(/\[(arxiv:\d{4}\.\d{4,5})\s*p\.?\s*(\d+)\]/gi, (m, id, p) => cite(id.toLowerCase(), +p))
+    .replace(/\[((?:arxiv|doi|openreview|pdf):[^\s\]]+)\]/gi, (m, id) => `<button class="cite" data-action="open-paper" data-pid="${id.replace(/^(\w+):/, (k) => k.toLowerCase())}" title="打开论文卡片">${esc(idLabel(id.replace(/^(\w+):/, (k) => k.toLowerCase())))}</button>`)
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/(^|[\s(（])(https?:\/\/[^\s<)）]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 }
@@ -449,7 +450,7 @@ function researchDetail(x) {
     <button class="btn sm" data-action="research-edit" data-id="${x.id}">编辑</button></div>`;
   if (run) h += '<div class="card-wait"><span class="spin"></span>Agent 正在起草：读素材、查库里的相关工作。写好后会作为修改稿等你确认…</div>';
   if (x.proposal) h += proposalBlock(x);
-  h += `<div class="elements">${ELEMENTS.map(([k, label, hint]) => `<div class="element ${x.body?.[k] ? '' : 'empty'}"><h3>${label}</h3>${x.body?.[k]
+  h += `<div class="elements">${ELEMENTS.map(([k, label, hint]) => `<div class="element ${x.body?.[k] ? '' : 'blank'}"><h3>${label}</h3>${x.body?.[k]
     ? md(x.body[k]) : `<div class="hint">${hint}</div><button class="btn sm ghost" data-action="research-edit" data-id="${x.id}">补上</button>`}</div>`).join('')}
     ${x.body?.notes ? `<div class="element"><h3>其他</h3>${md(x.body.notes)}</div>` : ''}</div>`;
   h += establishBar(x);
@@ -571,7 +572,7 @@ function writingTab(x) {
   h += SECTIONS.map(([k, label, hint]) => S.editWriting === k
     ? `<form class="element writing-form" data-form="writing-edit" data-id="${x.id}" data-section="${k}" data-rev="${w.revision}"><h3>${label}</h3>
         <textarea rows="12">${esc(w[k] || '')}</textarea><div style="display:flex;gap:8px;margin-top:8px"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" data-action="writing-edit" data-section="${k}">取消</button></div></form>`
-    : `<div class="element ${w[k] ? '' : 'empty'}"><h3>${label}<button class="btn sm ghost" data-action="writing-edit" data-section="${k}" style="float:right">编辑</button></h3>${w[k] ? md(w[k]) : `<div class="hint">${hint}</div>`}</div>`).join('');
+    : `<div class="element ${w[k] ? '' : 'blank'}"><h3>${label}<button class="btn sm ghost" data-action="writing-edit" data-section="${k}" style="float:right">编辑</button></h3>${w[k] ? md(w[k]) : `<div class="hint">${hint}</div>`}</div>`).join('');
   return h + runsBlock2(runsOf(x, 'writing'), '写作', 'librarian/writing.md');
 }
 

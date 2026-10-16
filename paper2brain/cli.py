@@ -98,7 +98,8 @@ def run(args):
         if args.action == "show":
             e.pop("runs")
             return e
-        draft = rules.validate_experiment(_read_json(args.file), e["raw"])
+        body = (store.get_research(e["research_id"]) or {}).get("body") or {}
+        draft = rules.validate_experiment(_read_json(args.file), e["raw"], "\n".join(filter(None, body.values())))
         rev = store.update_experiment(args.id, "agent", args.base_rev, **draft)
         return {"accepted": True, "revision": rev}
     if cmd == "writing":

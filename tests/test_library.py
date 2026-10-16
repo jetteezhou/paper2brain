@@ -193,6 +193,8 @@ class Store(unittest.TestCase):
             rules.validate_experiment({"title": "t", "results": [{"name": "x", "value": "0.95"}]}, raw)
         with self.assertRaisesRegex(rules.Rejected, "结论里的数字"):
             rules.validate_experiment({"title": "t", "conclusion_text": "提升 12.5 个点"}, raw)
+        ok = rules.validate_experiment({"title": "t", "conclusion_text": "超过 0.9 的成功线"}, raw, "验证方案：成功率 ≥ 0.9")
+        self.assertEqual(ok["conclusion_text"], "超过 0.9 的成功线")
 
     def test_code_map_snippets_are_verbatim(self):
         files = {"src/policy.py": "import torch\n\ndef chunk(actions, horizon=50):\n    return actions.unfold(0, horizon, 1)\n"}
