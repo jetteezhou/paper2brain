@@ -316,7 +316,7 @@ function listHtml() {
   if (v.kind === 'research') return researchList(title);
   if (v.kind === 'thoughts') return thoughtsList();
   const keys = v.kind === 'captures' && ['inbox', 'pending'].includes(S.view) ? '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>D</kbd> 深读 <kbd>A</kbd> 存档' : '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>↵</kbd> 阅读';
-  const head = listHead(title, S.list.length ? `${S.list.length} 条` : '', S.list.length ? keys : '') + topicTabs();
+  const head = listHead(title, S.list.length ? `${S.list.length} 条` : '', S.list.length ? (v.kind === 'papers' ? `${selectToggle('paper')}　` : '') + keys : '') + topicTabs() + (v.kind === 'papers' ? selectBar('paper') : '');
   if (!S.list.length) return head + `<div class="empty"><b>${v.empty[0]}</b>${v.empty[1]}</div>`;
   return head + S.list.map((x) => (v.kind === 'captures' ? captureItem(x) : paperItem(x))).join('');
 }
@@ -327,7 +327,7 @@ const elementsChip = (n) => `<span class="chip ${n === 3 ? 'green' : ''}" title=
 
 function researchList(title) {
   const placeholder = S.arg ? `在 ${S.arg.replace('/', ' / ')} 下开一个研究：先写个名字…（回车）` : '开一个研究：先写个名字…（回车）';
-  let h = listHead(title, S.list.length ? `${S.list.length} 个研究` : '', '') + topicTabs() +
+  let h = listHead(title, S.list.length ? `${S.list.length} 个研究` : '', `<button class="btn sm primary" data-action="compose" data-topic="${esc(S.arg || '')}">开始研究…</button>`) + topicTabs() +
     `<form class="add-line research-new" data-form="research-new" data-topic="${esc(S.arg || '')}"><input placeholder="${esc(placeholder)}"></form>`;
   if (!S.list.length) return h + `<div class="empty"><b>${S.arg ? '这个主题下还没有研究' : VIEWS.research.empty[0]}</b>${VIEWS.research.empty[1]}</div>`;
   for (const stage of ['established', 'forming']) {
@@ -377,7 +377,7 @@ function captureItem(c) {
 }
 
 function paperItem(p) {
-  return `<div class="item ${S.sel?.id === p.id ? 'on' : ''}" data-action="select" data-kind="paper" data-id="${esc(p.id)}">
+  return `<div class="item ${S.sel?.id === p.id ? 'on' : ''}${picked(p.id)}" data-action="select" data-kind="paper" data-id="${esc(p.id)}">
     <div class="item-meta"><span class="src">${esc(idLabel(p.id))}</span>${p.published ? `<span>· ${esc(p.published.slice(0, 7))}</span>` : ''}<time>${ago(p.last_captured)}</time></div>
     <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${esc(p.title)}</div>
     <div class="item-meta" style="margin:3px 0 0">${esc(authors(p.authors))}</div>
@@ -609,7 +609,7 @@ function researchForm(x) {
 }
 
 function materialsBlock(x) {
-  const kindLabel = (l) => ({ paper: '论文', thought: '想法', message: l.role === 'user' ? '你在讨论里说' : 'agent 在讨论里说', thread: '讨论', capture: '收下的内容', note: '笔记' }[l.kind]);
+  const kindLabel = (l) => ({ paper: '论文', thought: '想法', message: l.role === 'user' ? '你在讨论里说' : 'agent 在讨论里说', thread: '讨论', capture: '收下的内容', note: '笔记', doc: '附件' }[l.kind]);
   const rows = x.links.map((l) => `<div class="source ${l.missing ? 'missing' : ''}" ${l.missing ? '' : `data-action="open-source" data-kind="${l.kind}" data-ref="${esc(l.ref)}" data-paper="${esc(l.paper_id || '')}" data-capture="${esc(l.capture_id || '')}" data-scope="${esc(l.scope || '')}" data-thread="${esc(l.thread_id || '')}"`} title="${l.missing ? '' : '跳过去看'}">
       <span class="source-kind">${kindLabel(l)}</span><span class="source-label ${l.kind === 'paper' ? 'serif' : ''}">${esc(l.missing ? '（已删除）' : short(plain(l.label), 160))}</span>
       ${l.at ? `<time>${ago(l.at)}</time>` : ''}<button class="x" data-action="research-unlink" data-id="${x.id}" data-kind="${l.kind}" data-ref="${esc(l.ref)}" title="移出素材">×</button></div>`).join('');
@@ -756,6 +756,7 @@ function paperCard(p, { capture, inReader } = {}) {
     ${inReader ? '' : `<div class="paper-actions">
       <button class="btn primary" data-action="read" data-pid="${esc(p.id)}">进入深读 →</button>
       <button class="btn" data-action="read" data-pid="${esc(p.id)}" data-tab="chat">讨论这篇</button>
+      <button class="btn" data-action="compose-paper" data-pid="${esc(p.id)}" data-label="${esc(p.title)}">以这篇开始研究</button>
       <button class="btn ${deep ? 'primary' : ''}" data-action="paper-deep" data-pid="${esc(p.id)}" data-on="${deep ? '' : '1'}">${deep ? '已在待深读' : '加入待深读'}</button></div>`}
   </article>`;
 }
@@ -883,6 +884,7 @@ function chatHtml(scope) {
     <div class="chat-head">范围：${esc(scopeLabel(scope))}${t?.proposal ? `<a href="#" class="chip violet" data-action="open-research" data-id="${esc(scope.slice(9))}">有修改稿待你确认 →</a>` : ''}${t?.pinned ? `<span class="chip amber">${ago(t.created_at)}的一段讨论</span>` : ''}<span class="grow"></span>
       ${t?.pinned ? `<button class="btn sm ghost" data-action="chat-latest" data-scope="${esc(scope)}">回到最新对话</button>` : ''}
       ${t?.agent_id ? `<a class="btn sm ghost" href="https://cursor.com/agents/${esc(t.agent_id)}" target="_blank">在 Cursor 中继续 ↗</a>` : ''}
+      ${t?.messages.length && !scope.startsWith('research:') ? `<button class="btn sm ghost" data-action="compose-thread" data-scope="${esc(scope)}" title="把这段讨论作为素材开一个研究">转成研究</button>` : ''}
       ${t?.messages.length ? `<button class="btn sm ghost" data-action="chat-new" data-scope="${esc(scope)}">新对话</button>` : ''}</div>
     <div class="msgs">${msgs}</div>
     <form class="chat-input" data-form="chat" data-scope="${esc(scope)}">
@@ -959,20 +961,33 @@ function refreshChat(scope) {
 
 const paperChip = (pid, title) => `<a href="#" class="chip paper-chip" data-action="open-paper" data-pid="${esc(pid)}" title="打开论文卡片">论文 · ${esc(short(title || pid, 26))}</a>`;
 
+function selectBar(kind) {
+  const sel = S.selecting;
+  if (!sel || sel.kind !== kind) return '';
+  const n = sel.ids.size, noun = kind === 'thought' ? '条想法' : '篇论文';
+  return `<div class="select-bar"><span>已选 ${n} ${noun}</span><span class="grow"></span>
+    <button class="btn sm primary" data-action="sel-start" ${n ? '' : 'disabled'}>用它们开始研究</button>
+    <button class="btn sm" data-action="sel-join" ${n ? '' : 'disabled'}>加入已有研究</button>
+    <button class="btn sm ghost" data-action="sel-cancel">取消</button></div>`;
+}
+
+const selectToggle = (kind) => `<a href="#" data-action="sel-mode" data-kind="${kind}">${S.selecting?.kind === kind ? '退出多选' : '多选'}</a>`;
+const picked = (id) => (S.selecting?.ids.has(id) ? ' picked' : '');
+
 function thoughtsList() {
   let lastDay = '';
   const items = S.list.map((t) => {
     const d = day(t.created_at);
     const head = d !== lastDay ? `<div class="group-label">${d}</div>` : '';
     lastDay = d;
-    return head + `<div class="item ${S.sel?.id === t.id ? 'on' : ''}" data-action="select" data-kind="thought" data-id="${t.id}">
+    return head + `<div class="item ${S.sel?.id === t.id ? 'on' : ''}${picked(t.id)}" data-action="select" data-kind="thought" data-id="${t.id}">
       <div class="item-meta"><span>${t.by === 'agent' ? 'agent 记录' : '你的想法'}</span><time>${ago(t.created_at)}</time></div>
       <div class="item-title">${esc(t.gist || t.text)}</div>
       ${t.gist ? `<div class="item-thought">${esc(t.text)}</div>` : agentOn() ? '<div class="hint">提炼中…</div>' : ''}
       <div class="item-tags">${t.about_paper ? paperChip(t.about_paper, t.paper_title) : ''}${(t.research || []).map(researchChip).join('')}</div>
     </div>`;
   }).join('');
-  return listHead('想法', S.list.length ? `${S.list.length} 条` : '', `<a href="#" data-action="discuss-thoughts">和 agent 聊聊全部想法 →</a>`) +
+  return listHead('想法', S.list.length ? `${S.list.length} 条` : '', `${selectToggle('thought')}　<a href="#" data-action="discuss-thoughts">和 agent 聊聊全部想法 →</a>`) + selectBar('thought') +
     `<form class="add-line idea-like" data-form="thought" style="margin:10px 18px 6px"><input placeholder="记一个想法…（回车）"></form>` +
     (items || `<div class="empty"><b>${VIEWS.thoughts.empty[0]}</b>${VIEWS.thoughts.empty[1]}</div>`);
 }
@@ -981,7 +996,8 @@ function thoughtDetail(t) {
   const editing = S.editGist === t.id;
   const gistNote = t.gist ? (t.gist_by === 'user' ? '提炼 · 你改过' : '提炼 · agent 生成') : agentOn() ? 'agent 正在提炼这条想法…' : '连接 agent 后会自动补一句提炼';
   let h = `<div class="src-bar"><span class="chip">想法</span><span>${t.by === 'agent' ? 'agent 在讨论里记下' : '你记下'} · ${ago(t.created_at)}</span><span class="grow"></span>
-    <button class="btn sm" data-action="thought-research" data-id="${t.id}" data-paper="${esc(t.about_paper || '')}" data-text="${esc(t.text)}">加入研究</button></div>`;
+    <button class="btn sm" data-action="compose-thought" data-id="${t.id}" data-label="${esc(t.gist || t.text)}" data-paper="${esc(t.about_paper || '')}" data-ptitle="${esc(t.paper_title || '')}">以此开始研究</button>
+    <button class="btn sm" data-action="thought-research" data-id="${t.id}" data-paper="${esc(t.about_paper || '')}" data-text="${esc(t.text)}">加入已有研究</button></div>`;
   h += editing
     ? `<form class="add-line" data-form="gist" data-id="${t.id}" style="margin-top:14px"><input value="${esc(t.gist || t.text)}" placeholder="一句话说清这个想法"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" data-action="edit-gist" data-id="${t.id}">取消</button></form>`
     : `<h1 class="thought-gist">${esc(t.gist || t.text)}<button class="btn sm ghost" data-action="edit-gist" data-id="${t.id}" title="改写提炼">改写</button></h1>`;
@@ -1127,6 +1143,124 @@ async function saveTopics(kind, id, topics) {
 const topicOwner = (el) => (el.dataset.kind === 'research' ? S.detail.research
   : S.reader?.paper?.id === el.dataset.pid ? S.reader.paper : S.detail.papers.find((x) => x.id === el.dataset.pid));
 
+// ---------- start a research from whatever the user already has ----------
+
+const PAPER_RE = /(?:arxiv\.org\/(?:abs|pdf|html)\/|alphaxiv\.org\/(?:abs|overview)\/|huggingface\.co\/papers\/|arxiv\s*[:：]\s*)(\d{4}\.\d{4,5})|\b(10\.\d{4,9}\/[^\s"'<>，。；)）\]]+)|openreview\.net\/(?:forum|pdf)\?id=([\w-]+)/gi;
+const REPO_RE = /https?:\/\/(?:github\.com|gitlab\.com|gitee\.com|bitbucket\.org)\/[\w.-]+\/[\w.-]+/gi;
+const KIND_NAME = { thought: '想法', paper: '论文', thread: '讨论', message: '讨论消息', capture: '收下的内容' };
+
+function detectRefs(text) {
+  const papers = new Set(), repos = new Set();
+  for (const m of text.matchAll(PAPER_RE)) papers.add(m[1] ? `arxiv:${m[1]}` : m[2] ? `doi:${m[2].replace(/[.,;:]+$/, '').toLowerCase()}` : `openreview:${m[3]}`);
+  for (const m of text.matchAll(REPO_RE)) if (!/arxiv|openreview/.test(m[0])) repos.add(m[0].replace(/\.git$/, '').replace(/\/$/, ''));
+  return { papers: [...papers], repos: [...repos] };
+}
+
+function openComposer(ctx = {}) {
+  S.composer = { title: '', text: '', links: [], repos: [], files: [], topics: [], roles: {}, ...ctx };
+  const topics = S.state.topics.flatMap((t) => [t, ...t.children]);
+  modal(`<div class="composer"><h3>开始一个研究</h3>
+    <p class="hint" style="margin-top:0">把你已经想到的都带进来：一大段文字、构思稿或白板照片、几条想法、几篇论文、一段讨论、代码仓库。agent 会先读懂、复述理解、起草三要素，再问你几个关键问题。</p>
+    <input class="cmp-title" placeholder="研究名称（可选，agent 会帮你起）" value="${esc(S.composer.title)}">
+    <div class="cmp-box" id="cmp-box"><textarea class="cmp-text" rows="8" placeholder="想研究什么、为什么、已有的思路和计划……长篇也可以。可以直接粘贴或拖入文件（PDF、Markdown、图片）。">${esc(S.composer.text)}</textarea>
+      <div id="cmp-files"></div></div>
+    <div id="cmp-detected"></div>
+    <div class="cmp-section"><span class="hint">素材</span><div id="cmp-chips" class="cmp-chips"></div>
+      <button class="btn sm ghost" data-action="cmp-pick" data-kind="thought">+ 想法</button>
+      <button class="btn sm ghost" data-action="cmp-pick" data-kind="paper">+ 论文</button>
+      <label class="btn sm ghost">+ 文件<input type="file" multiple hidden data-cmp-files accept="application/pdf,image/*,text/*,.md,.markdown,.txt"></label></div>
+    <div id="cmp-picker"></div>
+    <div class="cmp-section"><span class="hint">代码仓库</span><form class="add-line" data-form="cmp-repo" style="flex:1;margin:0"><input placeholder="GitHub 链接、git 地址或本机路径（文字里的 GitHub 链接会自动识别）"><select name="role"><option value="baseline">baseline</option><option value="own">自己的</option></select><button class="btn sm">添加</button></form></div>
+    <div class="cmp-section"><span class="hint">主题</span><select class="cmp-topic"><option value="">跟随论文自动归类</option>${topics.map((t) => `<option value="${esc(t.path)}" ${S.composer.topics.includes(t.path) ? 'selected' : ''}>${t.path.includes('/') ? '　' : ''}${esc(t.name)}</option>`).join('')}</select></div>
+    <div class="cmp-acts"><span class="hint">${agentOn() ? '' : 'agent 未连接：会先建好研究、关联素材，起草要等连上 agent。'}</span><span class="grow"></span>
+      <button class="btn" data-action="close-modal">取消</button>
+      <button class="btn" data-action="cmp-submit" data-mode="create" title="建好后进入研究页，agent 在后台起草">直接创建</button>
+      <button class="btn primary" data-action="cmp-submit" data-mode="discuss" title="建好后进入讨论，和 agent 一起推敲">开始讨论</button></div></div>`);
+  document.querySelector('.modal').classList.add('wide');
+  renderComposer();
+  const ta = $('.cmp-text');
+  ta.addEventListener('input', () => { S.composer.text = ta.value; renderDetected(); });
+  ta.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (files.length) { e.preventDefault(); e.stopPropagation(); addComposerFiles(files); }
+  });
+  const box = $('#cmp-box');
+  box.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); box.classList.add('drop'); });
+  box.addEventListener('dragleave', () => box.classList.remove('drop'));
+  box.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); box.classList.remove('drop'); addComposerFiles([...e.dataTransfer.files]); });
+  (S.composer.text || S.composer.links.length ? ta : $('.cmp-title')).focus();
+}
+
+const composerFileOk = (f) => f.type === 'application/pdf' || f.type.startsWith('image/') || f.type.startsWith('text/') || /\.(md|markdown|txt)$/i.test(f.name);
+
+async function addComposerFiles(files) {
+  for (const f of files) {
+    if (!composerFileOk(f)) { toast(`不支持 ${f.name}：只收 PDF、图片和文本`); continue; }
+    S.composer.files.push({ name: f.name, mime: f.type || 'text/markdown', data: await readBase64(f) });
+  }
+  renderComposer();
+}
+
+function renderComposer() {
+  const c = S.composer;
+  $('#cmp-files').innerHTML = c.files.map((f, i) => `<span class="chip">${f.mime.startsWith('image/') ? '图片' : f.mime === 'application/pdf' ? 'PDF' : '文本'} · ${esc(short(f.name, 30))}<button data-action="cmp-rm" data-list="files" data-i="${i}">×</button></span>`).join('');
+  $('#cmp-chips').innerHTML = c.links.map((l, i) => `<span class="chip ${l.kind === 'paper' ? 'paper-chip' : l.kind === 'thought' ? 'amber' : 'violet'}">${KIND_NAME[l.kind] || l.kind} · ${esc(short(l.label || l.ref, 34))}<button data-action="cmp-rm" data-list="links" data-i="${i}">×</button></span>`).join('')
+    + c.repos.map((r, i) => `<span class="chip">仓库 · ${esc(r.url.replace(/^https?:\/\/(www\.)?github\.com\//, ''))}（${r.role === 'own' ? '自己的' : 'baseline'}）<button data-action="cmp-rm" data-list="repos" data-i="${i}">×</button></span>`).join('')
+    || '<span class="hint">还没有。可以从下面添加，也可以在想法、论文列表里多选后进来。</span>';
+  renderDetected();
+}
+
+function renderDetected() {
+  const c = S.composer, d = detectRefs(c.text);
+  const papers = d.papers.filter((p) => !c.links.some((l) => l.ref === p));
+  const repos = d.repos.filter((u) => !c.repos.some((r) => r.url === u));
+  $('#cmp-detected').innerHTML = papers.length || repos.length
+    ? `<div class="cmp-section"><span class="hint">文字里识别到</span><div class="cmp-chips">${papers.map((p) => `<span class="chip paper-chip">论文 · ${esc(idLabel(p))} ✓</span>`).join('')}
+      ${repos.map((u) => `<span class="chip">仓库 · ${esc(u.replace(/^https?:\/\/(www\.)?github\.com\//, ''))}
+        <button class="role-toggle" data-action="cmp-role" data-url="${esc(u)}">${(c.roles[u] || 'baseline') === 'own' ? '自己的' : 'baseline'}</button></span>`).join('')}</div><span class="hint">创建时会自动入库和克隆</span></div>`
+    : '';
+}
+
+async function composerPicker(kind) {
+  const items = kind === 'thought' ? await get('/api/thoughts') : await get('/api/papers');
+  const has = (id) => S.composer.links.some((l) => l.kind === kind && l.ref === id);
+  $('#cmp-picker').innerHTML = `<div class="cmp-picker"><input class="picker-filter" data-filter="pick" placeholder="筛选${KIND_NAME[kind]}…">
+    <div class="pick-list">${items.map((x) => {
+      const label = kind === 'thought' ? x.gist || x.text : x.title;
+      return `<label class="pick" data-name="${esc(label.toLowerCase())}"><input type="checkbox" data-cmp-toggle="${kind}" data-id="${esc(x.id)}" data-label="${esc(short(label, 80))}" ${has(x.id) ? 'checked' : ''}><span class="pick-title ${kind === 'paper' ? 'serif' : ''}">${esc(short(label, 90))}</span></label>`;
+    }).join('') || `<p class="hint">还没有${KIND_NAME[kind]}</p>`}</div>
+    <div style="text-align:right;margin-top:6px"><button class="btn sm" data-action="cmp-pick-done">完成</button></div></div>`;
+  $('#cmp-picker .picker-filter').focus();
+}
+
+async function submitComposer(mode) {
+  const c = S.composer;
+  c.title = $('.cmp-title').value.trim();
+  c.text = $('.cmp-text').value;
+  if (!c.title && !c.text.trim()) c.title = short(plain(c.links[0]?.label || c.files[0]?.name || ''), 30);
+  const topic = $('.cmp-topic').value;
+  const detected = detectRefs(c.text).repos.filter((u) => !c.repos.some((r) => r.url === u)).map((u) => ({ url: u, role: c.roles[u] || 'baseline' }));
+  const btns = document.querySelectorAll('[data-action="cmp-submit"]');
+  btns.forEach((b) => (b.disabled = true));
+  try {
+    const { id } = await post('/api/research/start', {
+      title: c.title, text: c.text, topics: topic ? [topic] : [], links: c.links.map(({ kind, ref }) => ({ kind, ref })),
+      repos: [...c.repos, ...detected], files: c.files,
+    });
+    closeModal();
+    S.composer = null;
+    loadState();
+    toast(agentOn() ? '研究已开始，agent 正在读你带来的内容' : '研究已建好');
+    if (mode === 'discuss') {
+      S.scopeTitles[`research:${id}`] = c.title || firstLine(c.text) || '新研究';
+      setTimeout(() => openThreadAt(`research:${id}`), 400);
+    } else openItem('research', id, 'research');
+  } catch (e) {
+    btns.forEach((b) => (b.disabled = false));
+    fail(e);
+  }
+}
+
 // ---------- research: gather materials from anywhere, jump back to them ----------
 
 const firstSentence = (s, n = 30) => short((s || '').replace(/[#*`>\-\[\]]/g, '').split(/[。！？\n.!?]/).find((x) => x.trim())?.trim() || '', n);
@@ -1186,6 +1320,7 @@ const openSource = {
   thread: (el) => openThreadAt(el.dataset.scope, el.dataset.ref),
   capture: (el) => openItem('capture', el.dataset.ref, 'inbox'),
   note: (el) => el.dataset.paper && (S.pendingTab = 'notes', openReader(el.dataset.paper)),
+  doc: (el) => window.open(`/api/docs/${enc(el.dataset.ref)}`, '_blank'),
 };
 
 async function libraryPaperPicker(rid) {
@@ -1211,7 +1346,16 @@ async function researchPost(path, body, okMessage) {
 const actions = {
   go: (el) => { if (el.dataset.view === 'topic' && S.view === 'topic' && S.arg === el.dataset.arg) return; go(el.dataset.view, el.dataset.arg); },
   'toggle-tree': (el, e) => { e.stopPropagation(); const p = el.dataset.path; S.open.has(p) ? S.open.delete(p) : S.open.add(p); renderSide(); },
-  select: (el, e) => { e.preventDefault(); select(el.dataset.kind, el.dataset.id); },
+  select: (el, e) => {
+    e.preventDefault();
+    if (S.selecting && S.selecting.kind === el.dataset.kind && el.closest('#list')) {
+      const ids = S.selecting.ids;
+      ids.has(el.dataset.id) ? ids.delete(el.dataset.id) : ids.add(el.dataset.id);
+      renderBody();
+      return;
+    }
+    select(el.dataset.kind, el.dataset.id);
+  },
   back: () => $('#body').classList.remove('show-detail'),
   triage: (el, e) => { e.stopPropagation(); triage(el.dataset.id, el.dataset.t).catch(fail); },
   'undo-capture': async (el) => {
@@ -1283,6 +1427,40 @@ const actions = {
       afterResearch(el.dataset.id, `已作为素材加入「${el.querySelector('.pick-title').textContent}」`);
     } catch (e) { fail(e); }
   },
+  compose: (el) => openComposer({ topics: el.dataset.topic ? [el.dataset.topic] : [] }),
+  'compose-paper': (el) => openComposer({ links: [{ kind: 'paper', ref: el.dataset.pid, label: el.dataset.label }] }),
+  'compose-thought': (el) => openComposer({ links: [{ kind: 'thought', ref: el.dataset.id, label: el.dataset.label },
+    ...(el.dataset.paper ? [{ kind: 'paper', ref: el.dataset.paper, label: el.dataset.ptitle }] : [])] }),
+  'compose-thread': (el) => {
+    const scope = el.dataset.scope, t = S.threads[scope], [k, ...rest] = scope.split(':'), ref = rest.join(':');
+    const first = t.messages.find((m) => m.role === 'user');
+    openComposer({ links: [{ kind: 'thread', ref: t.id, label: first ? first.text : scopeLabel(scope) },
+      ...(k === 'paper' ? [{ kind: 'paper', ref, label: S.reader?.paper?.title || ref }] : [])], topics: k === 'topic' ? [ref] : [] });
+  },
+  'compose-capture': () => {
+    const text = [capText.value.trim(), capThought.value.trim()].filter(Boolean).join('\n\n');
+    const files = S.images.map((img, i) => ({ name: img.name || `截图-${i + 1}.png`, mime: img.mime, data: img.data }));
+    capText.value = ''; capThought.value = ''; S.images = []; renderImages(); autosize(capText);
+    openComposer({ text, files });
+  },
+  'sel-mode': (el, e) => { e.preventDefault(); S.selecting = S.selecting?.kind === el.dataset.kind ? null : { kind: el.dataset.kind, ids: new Set() }; renderBody(); },
+  'sel-cancel': () => { S.selecting = null; renderBody(); },
+  'sel-start': () => {
+    const { kind, ids } = S.selecting;
+    const links = S.list.filter((x) => ids.has(x.id)).map((x) => ({ kind, ref: x.id, label: kind === 'thought' ? x.gist || x.text : x.title }));
+    S.selecting = null; renderBody();
+    openComposer({ links });
+  },
+  'sel-join': () => {
+    const { kind, ids } = S.selecting;
+    S.selecting = null; renderBody();
+    researchPicker({ heading: `把 ${ids.size} ${kind === 'thought' ? '条想法' : '篇论文'}加入研究`, links: [...ids].map((ref) => ({ kind, ref })) });
+  },
+  'cmp-pick': (el) => composerPicker(el.dataset.kind),
+  'cmp-pick-done': () => { $('#cmp-picker').innerHTML = ''; },
+  'cmp-rm': (el) => { S.composer[el.dataset.list].splice(+el.dataset.i, 1); renderComposer(); },
+  'cmp-role': (el) => { const u = el.dataset.url; S.composer.roles[u] = (S.composer.roles[u] || 'baseline') === 'own' ? 'baseline' : 'own'; renderDetected(); },
+  'cmp-submit': (el) => submitComposer(el.dataset.mode),
   'research-tab': (el) => { S.researchTab[el.dataset.id] = el.dataset.tab; renderDetail(); },
   'repo-official': (el) => researchPost(`${enc(el.dataset.id)}/repos`, { url: el.dataset.url, role: 'baseline' }, '已关联，正在克隆'),
   'repo-pull': async (el) => { await post(`/api/repos/${enc(el.dataset.id)}/pull`).catch(fail); toast('正在拉取'); setTimeout(() => loadDetail(true), 1500); },
@@ -1396,6 +1574,15 @@ document.addEventListener('click', (e) => {
 });
 
 document.addEventListener('change', async (e) => {
+  if (e.target.dataset.cmpToggle && S.composer) {
+    const { cmpToggle: kind, id, label } = e.target.dataset;
+    const i = S.composer.links.findIndex((l) => l.kind === kind && l.ref === id);
+    if (e.target.checked && i < 0) S.composer.links.push({ kind, ref: id, label });
+    if (!e.target.checked && i >= 0) S.composer.links.splice(i, 1);
+    renderComposer();
+    return;
+  }
+  if (e.target.hasAttribute('data-cmp-files')) { addComposerFiles([...e.target.files]); e.target.value = ''; return; }
   const up = e.target.dataset.upload;
   if (up && e.target.files[0]) {
     const f = e.target.files[0], label = e.target.parentElement;
@@ -1481,6 +1668,13 @@ document.addEventListener('submit', async (e) => {
   const form = e.target.closest('[data-form]');
   if (!form) return;
   e.preventDefault();
+  if (form.dataset.form === 'cmp-repo') {
+    const url = form.querySelector('input').value.trim();
+    if (url && !S.composer.repos.some((r) => r.url === url)) S.composer.repos.push({ url, role: new FormData(form).get('role') });
+    form.querySelector('input').value = '';
+    renderComposer();
+    return;
+  }
   if (/^(research|repo|exp|writing)-/.test(form.dataset.form)) {
     try { await submitResearchForm(form); } catch (err) { fail(err); if (/已被修改/.test(err.message)) loadDetail(true); }
     return;

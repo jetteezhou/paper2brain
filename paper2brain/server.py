@@ -257,7 +257,7 @@ def research_get(q, body, rid):
     return _research(rid)
 
 
-@route("POST", "/api/research/([^/]+)")
+@route("POST", "/api/research/(?!start$)([^/]+)")
 def research_update(q, body, rid):
     store.update_research(rid, body.get("base_rev"), body.get("title"), body.get("summary"), body.get("body"))
     return _research(rid)
@@ -318,6 +318,28 @@ def _sync_repo(repo_id, fresh):
         store.update_repo(repo_id, status="ready", head=sha, pulled_at=store.now(), error=None)
     except Exception as e:
         store.update_repo(repo_id, status="error" if fresh else "ready", error=str(e)[:400])
+
+
+@route("POST", "/api/research/start")
+def research_start(q, body):
+    files = [(f.get("name") or "file", f.get("mime") or "application/octet-stream", base64.b64decode(f["data"])) for f in body.get("files") or []]
+    links = [(x["kind"], x["ref"]) for x in body.get("links") or []]
+    rid, images = pipeline.start_research(body.get("title"), body.get("text"), body.get("topics") or [], links, files)
+
+    def clone(repo_id):
+        store.update_repo(repo_id, status="cloning", error=None)
+        bg(_sync_repo, repo_id, True)
+
+    bg(pipeline.finish_start, rid, body.get("text") or "", body.get("repos") or [], images, clone)
+    return {"id": rid}
+
+
+@route("GET", "/api/docs/([^/]+)")
+def doc_file(q, body, did):
+    d = store.get_doc(did)
+    if not d:
+        raise rules.Rejected("附件不存在")
+    return Reply(d["path"], d["mime"])
 
 
 @route("POST", "/api/research/([^/]+)/repos")

@@ -236,6 +236,91 @@ def ingest(capture_id):
     return store.get_capture(capture_id)
 
 
+REPO_HOSTS = ("github.com", "gitlab.com", "gitee.com", "bitbucket.org")
+
+
+def start_research(title, text, topics=(), links=(), files=()):
+    """Open a research from whatever the user already has: a long text, files, chosen thoughts / papers /
+    discussions. Fast part only (create, store files, explicit links); finish_start does the network work."""
+    text = (text or "").strip()
+    if not ((title or "").strip() or text or links or files):
+        raise rules.Rejected("至少写一句想法，或者带上文件、想法、论文、讨论、仓库中的一样")
+    first = next((ln.strip(" #>-*") for ln in text.splitlines() if ln.strip(" #>-*")), "")
+    title = (title or "").strip() or short_title(first) or "新研究"
+    rid = store.add_research(title, "user", None, topics, links)
+    if title == "新研究" and links:
+        label = next((l.get("label") for l in store.get_research(rid)["links"] if l.get("label")), None)
+        if label:
+            store.update_research(rid, title=short_title(label))
+    images = []
+    for name, mime, data in files:
+        if mime == "application/pdf":
+            pages = _pages(data)[0]
+            head = pages[0] if pages else ""
+            if rules.find_arxiv_ids(head) or len([r for r in rules.find_paper_refs(head) if r.startswith("doi:")]) == 1:
+                try:
+                    store.link_research(rid, "paper", paper_from_pdf(data)["id"], "user")
+                    continue
+                except rules.Rejected:
+                    pass
+            store.add_doc(rid, name, mime, data, "\n\n".join(f"[p.{i}] {t}" for i, t in enumerate(pages, 1))[:200000], "user")
+        elif mime.startswith("image/"):
+            store.add_doc(rid, name, mime, data, None, "user")
+            images.append((data, mime))
+        else:
+            store.add_doc(rid, name, mime, data, data.decode("utf-8", "replace")[:200000], "user")
+    return rid, images
+
+
+def short_title(line, n=30):
+    line = line.rstrip("。.!！?？，,;；:： ")
+    return line if len(line) <= n else line[:n].rstrip() + "…"
+
+
+def _materials_line(rid):
+    r = store.get_research(rid)
+    names = {"paper": "论文", "thought": "想法", "thread": "讨论", "message": "讨论消息", "capture": "收下的内容", "doc": "附件"}
+    parts = [f"{names.get(l['kind'], l['kind'])}「{short_title(l.get('label') or '', 24)}」" for l in r["links"] if not l["missing"]]
+    parts += [f"仓库 {x['name']}（{'自己的' if x['role'] == 'own' else 'baseline'}）" for x in r["repos"]]
+    return "、".join(parts)
+
+
+def finish_start(rid, text, repos_in=(), images=(), clone=None):
+    """Link the papers and repositories named in the text, then hand the research to the agent with the user's
+    words as the first message of its discussion."""
+    from . import cursor_api, repos
+
+    notes = []
+    for ref in rules.find_paper_refs(text or ""):
+        try:
+            store.link_research(rid, "paper", fetch_paper(ref)["id"], "user")
+        except Exception as e:
+            notes.append(f"{ref}：{e}")
+    wanted = {repos.normalize(r["url"]): r.get("role") or "baseline" for r in repos_in if r.get("url")}
+    for url in rules.find_urls(text or ""):
+        if any(h in url for h in REPO_HOSTS) and not rules.find_paper_refs(url):
+            try:
+                wanted.setdefault(repos.normalize(url), "baseline")
+            except rules.Rejected:
+                pass
+    for url, role in wanted.items():
+        repo_id, _ = store.add_repo(url, repos.local_dir(store.home(), url))
+        store.link_repo(rid, repo_id, role)
+        if clone and store.get_repo(repo_id)["status"] != "ready":
+            clone(repo_id)
+    scope = f"research:{rid}"
+    materials = _materials_line(rid)
+    opening = (text or "").strip() or "我想从这些素材开始一个研究。"
+    if materials:
+        opening += f"\n\n（带来的素材：{materials}）"
+    if notes:
+        opening += "\n\n（有几处链接没能自动入库：" + "；".join(notes) + "）"
+    if cursor_api.status()["enabled"]:
+        cursor_api.discuss(scope, opening, start=True, images=images)
+    else:
+        store.add_message(store.thread_for(scope)["id"], "user", opening)
+
+
 def process(capture_id, agent=True):
     """Rule-based preprocessing, then hand over to the librarian agent when one is configured."""
     from . import cursor_api

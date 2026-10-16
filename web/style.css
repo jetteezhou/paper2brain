@@ -353,6 +353,30 @@ details.runs summary::-webkit-details-marker { display: none; }
 .exp-card pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--bg); padding: 8px; border-radius: 6px; max-height: 220px; overflow: auto; }
 .exp-acts { display: flex; gap: 4px; margin-top: 6px; }
 
+/* ---------- start a research ---------- */
+.cap-acts { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+.modal.wide { width: min(860px, 94vw); }
+.composer { display: flex; flex-direction: column; gap: 10px; }
+.composer h3 { margin-bottom: 0; }
+.cmp-title { border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px 11px; font-size: 15px; font-weight: 600; outline: none; background: var(--panel); }
+.cmp-title:focus { border-color: var(--accent); }
+.cmp-box { border: 1px solid var(--line-strong); border-radius: 12px; padding: 10px 12px; background: var(--panel); }
+.cmp-box:focus-within { border-color: var(--accent); }
+.cmp-box.drop { border-style: dashed; border-color: var(--accent); background: var(--accent-soft); }
+.cmp-text { width: 100%; border: 0; outline: 0; resize: vertical; background: transparent; line-height: 1.6; min-height: 150px; }
+#cmp-files { display: flex; gap: 6px; flex-wrap: wrap; }
+#cmp-files:not(:empty) { margin-top: 8px; }
+.cmp-section { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cmp-section > .hint:first-child { width: 84px; flex: none; }
+.cmp-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; align-items: center; }
+.cmp-section select { border: 1px solid var(--line-strong); border-radius: 8px; padding: 4px 8px; background: var(--panel); }
+.cmp-picker { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: var(--bg); }
+.cmp-acts { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.role-toggle { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 6px; font-size: 11px; padding: 0 5px; cursor: pointer; margin-left: 2px; }
+.select-bar { position: sticky; top: 52px; z-index: 3; display: flex; gap: 8px; align-items: center; padding: 8px 18px; background: var(--accent-soft); border-bottom: 1px solid var(--line); font-size: 13px; }
+.item.picked { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.item.picked .item-title::before { content: "✓ "; color: var(--accent); }
+
 /* ---------- thoughts ---------- */
 .thought-gist { font-size: 20px; font-weight: 650; line-height: 1.45; margin: 14px 0 4px; display: flex; gap: 8px; align-items: baseline; }
 .thought-gist .btn { flex: none; }

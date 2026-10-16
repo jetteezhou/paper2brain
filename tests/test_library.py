@@ -248,6 +248,22 @@ class Store(unittest.TestCase):
         self.assertIn("@article{black2024vision,", out["bib"])
         self.assertIn("eprint = {2410.24164}", out["bib"])
 
+    def test_start_research_from_what_the_user_has(self):
+        from paper2brain import pipeline
+        tid = store.add_thought("用 latent action 预训练 tokenizer", "user")
+        rid, images = pipeline.start_research(
+            None, "# 我想做：跨本体的动作 tokenizer\n背景很长……", ["VLA/tokenizer"], [("thought", tid)],
+            [("notes.md", "text/markdown", "白板笔记：codebook 512".encode()), ("board.png", "image/png", b"\x89PNG fake")])
+        r = store.get_research(rid)
+        self.assertEqual(r["title"], "我想做：跨本体的动作 tokenizer")
+        kinds = sorted(l["kind"] for l in r["links"])
+        self.assertEqual(kinds, ["doc", "doc", "thought"])
+        doc = next(l for l in r["links"] if l["kind"] == "doc" and l["label"] == "notes.md")
+        self.assertEqual(store.get_doc(doc["ref"])["text"], "白板笔记：codebook 512")
+        self.assertEqual(len(images), 1)
+        with self.assertRaises(rules.Rejected):
+            pipeline.start_research("", "  ", [], [], [])
+
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])

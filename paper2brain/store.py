@@ -19,7 +19,7 @@ TRIAGE = ("inbox", "deep", "archived", "ignored")
 JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows"}
 RESEARCH_ELEMENTS = ("problem", "method", "validation")
 RESEARCH_FIELDS = RESEARCH_ELEMENTS + ("notes",)
-LINK_KINDS = ("paper", "thought", "message", "thread", "capture", "note")
+LINK_KINDS = ("paper", "thought", "message", "thread", "capture", "note", "doc")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS captures (
@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS experiments (
   research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE, title TEXT, target TEXT, setup TEXT,
   results TEXT, conclusion TEXT, conclusion_text TEXT, status TEXT NOT NULL DEFAULT 'done', raw TEXT NOT NULL DEFAULT '',
   by TEXT NOT NULL, edited_by TEXT, revision INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS research_docs (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, research_id TEXT NOT NULL REFERENCES research(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL, mime TEXT NOT NULL, path TEXT NOT NULL, text TEXT);
 CREATE TABLE IF NOT EXISTS writing (
   research_id TEXT PRIMARY KEY REFERENCES research(id) ON DELETE CASCADE, abstract TEXT, introduction TEXT,
   proposal TEXT, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT, edited_by TEXT);
@@ -681,7 +684,7 @@ def _check_topics(c, paths):
 def _check_link(c, kind, ref):
     if kind not in LINK_KINDS:
         raise rules.Rejected(f"不能关联 {kind}，可选：{', '.join(LINK_KINDS)}")
-    table = {"paper": "papers", "thought": "thoughts", "message": "messages", "thread": "threads",
+    table = {"paper": "papers", "thought": "thoughts", "message": "messages", "thread": "threads", "doc": "research_docs",
              "capture": "captures", "note": "notes"}[kind]
     if not c.execute(f"SELECT 1 FROM {table} WHERE id=?", (ref,)).fetchone():
         raise rules.Rejected(f"要关联的 {kind} {ref} 不存在")
@@ -841,6 +844,9 @@ def _resolve_link(c, kind, ref):
     if kind == "capture":
         r = c.execute("SELECT coalesce(title, substr(raw,1,120)) AS label, created_at FROM captures WHERE id=?", (ref,)).fetchone()
         return r and {"label": r["label"], "at": r["created_at"]}
+    if kind == "doc":
+        r = c.execute("SELECT filename, mime, created_at, substr(text,1,200) AS excerpt FROM research_docs WHERE id=?", (ref,)).fetchone()
+        return r and {"label": r["filename"], "excerpt": r["excerpt"], "mime": r["mime"], "at": r["created_at"]}
     r = c.execute("SELECT text, created_at, paper_id FROM notes WHERE id=?", (ref,)).fetchone()
     return r and {"label": r["text"][:200], "at": r["created_at"], "paper_id": r["paper_id"]}
 
@@ -1027,6 +1033,24 @@ def accept_writing(rid, base_rev=None):
 def discard_writing(rid):
     with tx() as c:
         c.execute("UPDATE writing SET proposal=NULL WHERE research_id=?", (rid,))
+
+
+def add_doc(rid, filename, mime, data, text, by):
+    """A file the user brought when starting a research: their own draft, notes, a whiteboard photo."""
+    did = new_id()
+    folder = home() / "assets" / "research" / rid
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{did[:8]}-{Path(filename).name}"
+    path.write_bytes(data)
+    with tx() as c:
+        c.execute("INSERT INTO research_docs VALUES (?,?,?,?,?,?,?)", (did, now(), rid, filename, mime, str(path), text))
+        c.execute("INSERT INTO research_links VALUES (?,?,?,?,?)", (rid, "doc", did, by, now()))
+    return did
+
+
+def get_doc(did):
+    with tx() as c:
+        return _row(c.execute("SELECT * FROM research_docs WHERE id=?", (did,)).fetchone())
 
 
 def research_extras(rid):

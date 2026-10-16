@@ -268,23 +268,25 @@ def scope_text(scope):
     return "整个论文库。用 `./p2b search` 和 `./p2b papers` 检索。"
 
 
-def discuss(scope, text, thread_id=None):
-    """Continue the scope's latest discussion, or an older one the user jumped back to."""
+def discuss(scope, text, thread_id=None, start=False, images=()):
+    """Continue the scope's latest discussion, or an older one the user jumped back to. start=True opens a new
+    research: the agent first reads what the user brought and drafts, instead of just answering."""
     thread = store.thread_for(scope, thread_id)
     if thread["agent_id"]:
         prompt, name = text, None
     else:
+        opening = "这是研究的开端：按 librarian/research.md 的“开启研究”一节处理。\n" if start else ""
         prompt = (
-            f"先读 librarian/README.md 和 librarian/discuss.md。\n讨论范围：{scope_text(scope)}\n"
-            f"讨论线程 ID：{thread['id']}（关联研究素材或笔记时用 --thread）\n\n用户的问题：{text}"
+            f"先读 librarian/README.md 和 librarian/discuss.md。\n{opening}讨论范围：{scope_text(scope)}\n"
+            f"讨论线程 ID：{thread['id']}（关联研究素材或笔记时用 --thread）\n\n用户{'的原话' if start else '的问题'}：{text}"
         )
-        name = f"讨论：{text[:40]}"
+        name = f"{'开启研究' if start else '讨论'}：{text[:40]}"
 
     def prepare(placeholder):
         store.add_message(thread["id"], "user", text)
         store.add_message(thread["id"], "assistant", "", placeholder)
 
-    return start_async("chat", thread["id"], prompt, name=name, agent_id=thread["agent_id"], prepare=prepare,
+    return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare,
                        on_agent=None if thread["agent_id"] else lambda aid: store.set_thread_agent(thread["id"], aid))
 
 

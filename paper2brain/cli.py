@@ -76,6 +76,11 @@ def run(args):
         return {"id": store.add_thought(args.text, "agent", args.capture, args.paper and to_pid(args.paper), args.gist)}
     if cmd == "note":
         return {"id": store.add_note(args.text, "agent", args.paper and to_pid(args.paper), args.topic, args.thread)}
+    if cmd == "doc":
+        d = store.get_doc(args.id)
+        if not d:
+            raise rules.Rejected("附件不存在")
+        return {**d, "text": (d["text"] or "（图片附件，没有文字；内容已随提示词发给你）")[:60000]}
     if cmd == "repo":
         repo = store.get_repo(args.id)
         if not repo:
@@ -209,6 +214,7 @@ def parser():
     s.add_argument("--topic")
     s.add_argument("--thread")
 
+    sub.add_parser("doc", help="研究附件的全文（用户开研究时带来的构思稿、笔记等）").add_argument("id")
     sub.add_parser("repo", help="代码仓库（只读）：本地路径、当前 commit、最近提交").add_argument("id")
     s = sub.add_parser("codemap", help="提交方法—代码对照（论文引用和代码片段都逐字核对）")
     s.add_argument("action", choices=["put"])
