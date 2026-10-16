@@ -68,7 +68,12 @@ const day = (iso) => {
   if (d.toDateString() === new Date(Date.now() - 864e5).toDateString()) return '昨天';
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 };
-const CHANNEL = { wechat: '公众号', xhs: '小红书', arxiv: 'arXiv', web: '网页' };
+const CHANNEL = { wechat: '公众号', xhs: '小红书', arxiv: 'arXiv', doi: 'DOI', openreview: 'OpenReview', web: '网页' };
+const idLabel = (pid) => {
+  const [k, ...r] = pid.split(':');
+  const ref = r.join(':');
+  return { arxiv: `arXiv ${ref}`, doi: `DOI ${ref}`, openreview: `OpenReview ${ref}` }[k] || 'PDF';
+};
 const channel = (c) => CHANNEL[c.channel] || (c.source === 'shortcut' ? 'iPhone' : c.source === 'web' ? '手动' : '命令行');
 const authors = (a) => (a || []).length ? a.slice(0, 3).join(', ') + (a.length > 3 ? ' 等' : '') : '';
 const firstLine = (s) => (s || '').split('\n').find((l) => l.trim()) || '';
@@ -297,7 +302,7 @@ function statusChip(c) {
 
 function captureItem(c) {
   const p = c.papers[0];
-  const title = c.title || firstLine(c.raw) || (c.image_count ? `截图 ${c.image_count} 张` : c.thought ? '一个想法' : '');
+  const title = c.title || firstLine(c.raw) || (c.image_count ? `附件 ${c.image_count} 个` : c.thought ? '一个想法' : '');
   const topics = [...new Set(c.papers.flatMap((x) => x.topics))];
   const triageBtns = S.view === 'inbox' || S.view === 'pending'
     ? `<div class="item-actions"><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="deep" title="待深读 (D)">深读</button><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="archived" title="存档 (A)">存档</button><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="ignored" title="忽略 (X)">忽略</button></div>`
@@ -315,7 +320,7 @@ function captureItem(c) {
 
 function paperItem(p) {
   return `<div class="item ${S.sel?.id === p.id ? 'on' : ''}" data-action="select" data-kind="paper" data-id="${esc(p.id)}">
-    <div class="item-meta"><span class="src">${esc(p.id.replace('arxiv:', 'arXiv '))}</span>${p.published ? `<span>· ${esc(p.published.slice(0, 7))}</span>` : ''}<time>${ago(p.last_captured)}</time></div>
+    <div class="item-meta"><span class="src">${esc(idLabel(p.id))}</span>${p.published ? `<span>· ${esc(p.published.slice(0, 7))}</span>` : ''}<time>${ago(p.last_captured)}</time></div>
     <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${esc(p.title)}</div>
     <div class="item-meta" style="margin:3px 0 0">${esc(authors(p.authors))}</div>
     ${p.tldr ? `<div class="item-tldr">${esc(p.tldr)}</div>` : ''}
@@ -360,22 +365,24 @@ function captureDetail(c, papers) {
     <div class="hint" style="margin-top:4px">当前在：${triage[c.triage]}</div>`;
   if (c.title) h += `<div class="cap-title">${esc(c.title)}</div>`;
   if (rawExtra || (!c.title && c.raw)) h += `<div class="raw">${inline(c.raw)}</div>`;
-  if (c.attachments.length) h += `<div style="display:flex;gap:8px;margin-top:12px">${c.attachments.map((a) => `<a href="/api/attachments/${a.id}" target="_blank" class="thumb" style="width:96px;height:96px"><img src="/api/attachments/${a.id}"></a>`).join('')}</div>`;
+  if (c.attachments.length) h += `<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">${c.attachments.map((a) => a.mime.startsWith('image/')
+    ? `<a href="/api/attachments/${a.id}" target="_blank" class="thumb" style="width:96px;height:96px"><img src="/api/attachments/${a.id}"></a>`
+    : `<a href="/api/attachments/${a.id}" target="_blank" class="chip">${esc(a.filename.replace(/^\d+-/, ''))} ↗</a>`).join('')}</div>`;
   h += `<div class="thoughts">${c.thoughts.map((t) => `<div class="thought">${esc(t.text)}<small>${t.by === 'agent' ? 'agent 记录 · ' : ''}${ago(t.created_at)}</small></div>`).join('')}
     <form class="add-line" data-form="thought" data-capture="${c.id}"><input placeholder="${c.thoughts.length ? '再补一句想法…' : '补一句想法：为什么收它？'}"><button class="btn sm">记下</button></form></div>`;
 
   if (c.status === 'needs_confirm' && !papers.length) {
     h += `<div class="notice"><h3>这条解读讲的是哪篇论文？</h3>${(c.candidates || []).map((m) => `
       <div class="cand"><div class="cand-body"><div class="cand-title">${esc(m.title)}</div>
-      <div class="cand-meta">${esc(authors(m.authors))} · ${esc(m.published || '')} · <a href="${esc(m.url)}" target="_blank">arXiv ${esc(m.arxiv_id)}</a>${m.score ? ` · 标题相似度 ${Math.round(m.score * 100)}%` : ''}</div>
+      <div class="cand-meta">${esc(authors(m.authors))} · ${esc(m.published || '')} · <a href="${esc(m.url)}" target="_blank">${esc(idLabel(m.pid))}</a>${m.score ? ` · 标题相似度 ${Math.round(m.score * 100)}%` : ''}</div>
       <div class="cand-meta">${esc(m.why || '')}</div></div>
-      <button class="btn sm primary" data-action="link" data-id="${c.id}" data-paper="${esc(m.arxiv_id)}">就是这篇</button></div>`).join('')}
-      ${manualLink(c.id, '都不是？粘贴正确的 arXiv 链接或编号')}</div>`;
+      <button class="btn sm primary" data-action="link" data-id="${c.id}" data-paper="${esc(m.pid)}">就是这篇</button></div>`).join('')}
+      ${manualLink(c.id, '都不是？粘贴论文链接、DOI 或 PDF 链接，或把 PDF 拖进来')}</div>`;
   } else if (!papers.length && c.status !== 'saved' && c.status !== 'resolving') {
     const msg = { unmapped: '没找到对应的论文', failed: '规则预处理失败', needs_agent: '截图需要 agent 看图识别', mapped: '没有关联的论文' }[c.status] || '';
     h += `<div class="notice info"><h3>${msg}</h3>${c.note ? `<div class="hint" style="white-space:pre-wrap">${esc(c.note)}</div>` : ''}
       <p class="hint">${running ? 'Agent 正在处理…' : agentOn() ? '可以让 agent 再看一次，或者直接告诉我是哪篇。' : '连接 agent 后可以自动识别；也可以直接告诉我是哪篇。'}</p>
-      ${manualLink(c.id, '粘贴 arXiv 链接或编号')}</div>`;
+      ${manualLink(c.id, '粘贴论文链接、DOI 或 PDF 链接')}${pdfButton({ capture: c.id })}</div>`;
   } else if (c.status === 'saved' || c.status === 'resolving') {
     h += `<div class="card-wait"><span class="spin"></span>规则预处理中：识别链接、抓取解读快照、下载论文全文…</div>`;
   }
@@ -386,6 +393,8 @@ function captureDetail(c, papers) {
 
 const manualLink = (cid, placeholder) =>
   `<form class="add-line" data-form="link" data-capture="${cid}"><input placeholder="${esc(placeholder)}"><button class="btn sm">关联</button></form>`;
+const pdfButton = ({ capture, paper }) =>
+  `<label class="btn sm" style="margin-top:8px">上传 PDF<input type="file" accept="application/pdf" hidden data-upload="${capture ? 'capture' : 'paper'}" data-id="${esc(capture || paper)}"></label>`;
 
 function runsBlock(c) {
   const label = { capture: '整理', chat: '讨论', deepread: '深读' };
@@ -466,10 +475,11 @@ function paperCard(p, { capture, inReader } = {}) {
   }
   return `<article class="paper">
     ${inReader ? '' : `<h1 class="paper-title">${esc(p.title)}</h1>`}
-    <div class="paper-meta">${esc(authors(p.authors))}${p.published ? ' · ' + esc(p.published) : ''} · <a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.id.replace('arxiv:', 'arXiv '))} ↗</a>${p.page_count ? ` · ${p.page_count} 页` : ''}
+    <div class="paper-meta">${esc(authors(p.authors))}${p.published ? ' · ' + esc(p.published) : ''} · ${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(idLabel(p.id))} ↗</a>` : esc(idLabel(p.id))}${p.page_count ? ` · ${p.page_count} 页` : ' · <span style="color:var(--amber)">没有全文</span>'}
     ${capture && p.captures?.length > 1 ? ` · <a href="#" data-action="select" data-kind="paper" data-id="${esc(p.id)}">共 ${p.captures.length} 个来源</a>` : ''}
     ${capture ? ` · <a href="#" data-action="unlink" data-id="${capture.id}" data-paper="${esc(p.id)}" title="这条捕获不是讲这篇">不是这篇？</a>` : ''}</div>
     ${topicsRow(p)}
+    ${p.page_count ? '' : `<div class="notice" style="margin-top:12px">没下载到这篇论文的 PDF（可能需要登录或不公开）。上传 PDF 后才能写快读卡、深读和对照原文。<br>${pdfButton({ paper: p.id })}</div>`}
     ${body}
     ${inReader ? '' : `<div class="paper-actions">
       <button class="btn primary" data-action="read" data-pid="${esc(p.id)}">进入深读 →</button>
@@ -520,11 +530,11 @@ function renderReader(fresh) {
     el.innerHTML = `<div class="reader-top">
         <button class="btn sm ghost" data-action="close-reader">← 返回 <kbd>Esc</kbd></button>
         <div class="title">${esc(p.title)}</div>
-        <a class="btn sm ghost" href="${esc(p.url)}" target="_blank">arXiv ↗</a>
+        ${p.url ? `<a class="btn sm ghost" href="${esc(p.url)}" target="_blank">${esc(idLabel(p.id).split(' ')[0])} ↗</a>` : ''}
         <button class="btn sm ghost" data-action="wide">调整面板宽度</button>
       </div>
       <div class="reader-body ${S.wide ? 'wide' : ''}">
-        ${p.pdf_path ? `<iframe class="pdf" src="/api/papers/${enc(p.id)}/pdf#page=${r.page}"></iframe>` : '<div class="pdf-missing">还没有 PDF</div>'}
+        ${p.pdf_path ? `<iframe class="pdf" src="/api/papers/${enc(p.id)}/pdf#page=${r.page}"></iframe>` : `<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br>${pdfButton({ paper: p.id })}</div></div>`}
         <div class="panel"><div class="tabs" id="tabs"></div><div class="panel-body" id="panel"></div></div>
       </div>`;
   }
@@ -682,17 +692,26 @@ const capText = $('#cap-text'), capThought = $('#cap-thought');
 
 function autosize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 160) + 'px'; }
 
+const accepted = (f) => f.type.startsWith('image/') || f.type === 'application/pdf';
+const readBase64 = (f) => new Promise((ok, bad) => {
+  const reader = new FileReader();
+  reader.onload = () => ok(reader.result.split(',')[1]);
+  reader.onerror = bad;
+  reader.readAsDataURL(f);
+});
+
 function renderImages() {
-  $('#cap-images').innerHTML = S.images.map((img, i) => `<div class="thumb"><img src="data:${img.mime};base64,${img.data}"><button type="button" data-action="rm-image" data-i="${i}">×</button></div>`).join('');
+  $('#cap-images').innerHTML = S.images.map((img, i) => `<div class="thumb">${img.mime === 'application/pdf'
+    ? `<div style="display:grid;place-items:center;height:100%;font-size:11px;padding:4px;text-align:center;color:var(--muted);word-break:break-all"><b style="color:var(--red)">PDF</b>${esc(short(img.name, 18))}</div>`
+    : `<img src="data:${img.mime};base64,${img.data}">`}<button type="button" data-action="rm-image" data-i="${i}">×</button></div>`).join('');
 }
 
-function addImageFiles(files) {
+async function addFiles(files) {
   for (const f of files) {
-    if (!f.type.startsWith('image/')) continue;
-    if (S.images.length >= 5) { toast('一次最多 5 张图'); break; }
-    const reader = new FileReader();
-    reader.onload = () => { S.images.push({ mime: f.type, data: reader.result.split(',')[1] }); renderImages(); };
-    reader.readAsDataURL(f);
+    if (!accepted(f)) { toast(`不支持 ${f.name}：只收图片和 PDF`); continue; }
+    if (S.images.length >= 5) { toast('一次最多 5 个文件'); break; }
+    S.images.push({ mime: f.type, name: f.name, data: await readBase64(f) });
+    renderImages();
   }
   capText.focus();
 }
@@ -727,11 +746,11 @@ for (const el of [capText, capThought]) {
 }
 
 document.addEventListener('paste', (e) => {
-  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+  const files = [...(e.clipboardData?.files || [])].filter(accepted);
   const typing = e.target instanceof Element && e.target.closest('input, textarea');
   if (files.length && (!typing || e.target === capText || e.target === capThought)) {
     e.preventDefault();
-    addImageFiles(files);
+    addFiles(files);
   } else if (!typing && !S.reader) {
     const text = e.clipboardData.getData('text');
     if (text) { e.preventDefault(); capText.value = text; autosize(capText); capText.focus(); }
@@ -746,7 +765,7 @@ document.addEventListener('drop', (e) => {
   e.preventDefault();
   dragDepth = 0;
   $('#cap-box').classList.remove('drop');
-  if (e.dataTransfer.files.length) addImageFiles(e.dataTransfer.files);
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
   else {
     const text = e.dataTransfer.getData('text');
     if (text) { capText.value = text; autosize(capText); capText.focus(); }
@@ -878,6 +897,20 @@ document.addEventListener('click', (e) => {
 });
 
 document.addEventListener('change', async (e) => {
+  const up = e.target.dataset.upload;
+  if (up && e.target.files[0]) {
+    const f = e.target.files[0], label = e.target.parentElement;
+    label.innerHTML = '<span class="spin"></span>读取 PDF…';
+    try {
+      const data = await readBase64(f);
+      if (up === 'paper') await post(`/api/papers/${enc(e.target.dataset.id)}/pdf`, { data });
+      else await post(`/api/captures/${enc(e.target.dataset.id)}/pdf`, { data });
+      toast('PDF 已加入');
+      if (S.reader) { S.reader.paper = await get(`/api/papers/${enc(S.reader.pid)}`); renderReader(true); }
+      refresh(true);
+    } catch (err) { fail(err); refresh(true); }
+    return;
+  }
   if (e.target.dataset.change === 'scope' && e.target.value) {
     S.scope = e.target.value; renderBody(); await loadThread(S.scope); renderBody();
   }

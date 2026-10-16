@@ -9,10 +9,13 @@ class Rejected(ValueError):
 
 _ID = r"(\d{4}\.\d{4,5})(?:v\d+)?"
 _ARXIV = re.compile(
-    r"(?:arxiv\.org/(?:abs|pdf|html)/|alphaxiv\.org/(?:abs|overview)/|huggingface\.co/papers/|arxiv\s*[:：]\s*)" + _ID,
+    r"(?:arxiv\.org/(?:abs|pdf|html)/|alphaxiv\.org/(?:abs|overview)/|huggingface\.co/papers/|10\.48550/arxiv\.|arxiv\s*[:：]\s*)" + _ID,
     re.I,
 )
+_DOI = re.compile(r"\b(10\.\d{4,9}/[^\s\"'<>，。、；）)】\]]+)", re.I)
+_OPENREVIEW = re.compile(r"openreview\.net/(?:forum|pdf)\?id=([A-Za-z0-9_\-]+)", re.I)
 _URL = re.compile(r"https?://[^\s<>\"'，。、）)】]+", re.I)
+PREFIXES = ("arxiv:", "doi:", "openreview:", "pdf:")
 
 
 def find_arxiv_ids(text):
@@ -24,12 +27,39 @@ def find_arxiv_ids(text):
     return seen
 
 
+def find_paper_refs(text):
+    """Paper identifiers in text, in order: arXiv IDs, DOIs (arXiv's own DOIs count as arXiv), OpenReview IDs."""
+    text = text or ""
+    refs = ["arxiv:" + a for a in find_arxiv_ids(text)]
+    refs += ["doi:" + d.rstrip(".,;:").lower() for d in _DOI.findall(text) if not d.lower().startswith("10.48550/")]
+    refs += ["openreview:" + o for o in _OPENREVIEW.findall(text)]
+    return list(dict.fromkeys(refs))
+
+
+def parse_pid(s):
+    """A paper ID from what a person or the agent typed: a stored ID, a link, a DOI or a bare arXiv number."""
+    s = (s or "").strip()
+    if s.lower().startswith(PREFIXES):
+        kind, _, ref = s.partition(":")
+        kind = kind.lower()
+        if kind == "arxiv":
+            ref = re.sub(r"v\d+$", "", ref)
+        return f"{kind}:{ref.lower() if kind == 'doi' else ref}"
+    refs = find_paper_refs(s) or (["arxiv:" + m.group(1)] if (m := re.fullmatch(_ID, s)) else [])
+    return refs[0] if refs else None
+
+
 def find_urls(text):
     return list(dict.fromkeys(u.rstrip(".,;") for u in _URL.findall(text or "")))
 
 
 def paper_id(arxiv_id):
     return "arxiv:" + arxiv_id
+
+
+def id_label(pid):
+    kind, _, ref = pid.partition(":")
+    return {"arxiv": f"arXiv {ref}", "doi": f"DOI {ref}", "openreview": f"OpenReview {ref}"}.get(kind, "PDF")
 
 
 def normalize(text):
@@ -75,7 +105,7 @@ def validate_card(card, pages):
     if not isinstance(card, dict):
         raise Rejected("快读卡必须是 JSON 对象")
     if not pages:
-        raise Rejected("这篇论文还没有全文，先运行 ./p2b fetch")
+        raise Rejected("这篇论文还没有全文（./p2b fetch 没拿到 PDF）。请在回复里请用户上传 PDF，或用 ./p2b fetch <PDF 链接> 补上")
     errors = []
     out = {k: _text(card, k, errors) for k in ("tldr", "problem", "method", "relevance")}
     results = card.get("results")
@@ -111,7 +141,7 @@ def validate_report(report, pages):
     if not isinstance(report, dict) or not isinstance(report.get("sections"), list) or not report["sections"]:
         raise Rejected("深读报告必须是 {sections: [{heading, body, citations}]}")
     if not pages:
-        raise Rejected("这篇论文还没有全文，先运行 ./p2b fetch")
+        raise Rejected("这篇论文还没有全文（./p2b fetch 没拿到 PDF）。请在回复里请用户上传 PDF，或用 ./p2b fetch <PDF 链接> 补上")
     errors, sections, total = [], [], 0
     for i, s in enumerate(report["sections"], 1):
         if not isinstance(s, dict):

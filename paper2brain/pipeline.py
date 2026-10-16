@@ -1,4 +1,7 @@
 """Deterministic processing shared by the CLI (agent) and the web server: no model involved here."""
+import hashlib
+import re
+
 import pymupdf
 
 from . import rules, sources, store
@@ -6,33 +9,130 @@ from . import rules, sources, store
 AUTO_CONFIRM_SCORE = 0.95
 
 
-def fetch_paper(pid):
-    """Metadata, PDF and per-page text for an arXiv paper. Idempotent: skips what is already there."""
-    if not pid.startswith("arxiv:"):
-        raise rules.Rejected("目前只支持 arXiv 论文（ID 形如 arxiv:2410.24164）")
-    paper = store.get_paper(pid)
-    if not paper:
-        found = sources.arxiv_lookup([pid[6:]])
+def _meta(pid):
+    kind, _, ref = pid.partition(":")
+    if kind == "arxiv":
+        found = sources.arxiv_lookup([ref])
         if not found:
             raise rules.Rejected(f"arXiv 上找不到 {pid}")
-        m = found[0]
+        return {**found[0], "pdf_url": f"https://arxiv.org/pdf/{ref}", "arxiv_id": None}
+    if kind == "doi":
+        return sources.doi_lookup(ref)
+    if kind == "openreview":
+        return sources.openreview_lookup(ref)
+    raise rules.Rejected(f"不认识的论文 ID：{pid}")
+
+
+def _pages(data):
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
+        return [page.get_text() for page in doc], (doc.metadata or {}).get("title") or ""
+
+
+def fetch_paper(pid, pdf=None):
+    """Metadata, PDF and per-page text for arXiv / DOI / OpenReview papers. Returns the stored paper, whose ID may be
+    the canonical one (a DOI with an arXiv copy becomes the arXiv paper). Idempotent. A paper whose PDF cannot be
+    downloaded is kept with metadata only; uploading a PDF later completes it."""
+    pid = rules.parse_pid(pid) or pid
+    paper = store.get_paper(pid)
+    pdf_url = None
+    if not paper:
+        try:
+            m = _meta(pid)
+        except rules.Rejected:
+            raise
+        except Exception as e:
+            raise rules.Rejected(f"查不到 {pid} 的信息：{e}") from None
+        if m.get("arxiv_id"):
+            return fetch_paper("arxiv:" + m["arxiv_id"], pdf)
+        if not m.get("title"):
+            raise rules.Rejected(f"查不到 {pid} 的标题")
         store.upsert_paper(pid, m["title"], m["authors"], m["abstract"], m["published"], m["url"])
+        pdf_url = m.get("pdf_url")
+    elif pid.startswith("arxiv:"):
+        pdf_url = f"https://arxiv.org/pdf/{pid[6:]}"
+    elif not store.pages(pid) and not pdf and not pid.startswith("pdf:"):
+        try:
+            pdf_url = _meta(pid).get("pdf_url")
+        except Exception:
+            pass
     if not store.pages(pid):
         path = store.paper_dir(pid) / "paper.pdf"
-        if not path.exists():
-            sources.download(f"https://arxiv.org/pdf/{pid[6:]}", path)
-        with pymupdf.open(path) as doc:
-            store.set_fulltext(pid, path, [page.get_text() for page in doc])
+        if pdf:
+            path.write_bytes(pdf)
+        elif not path.exists() and pdf_url:
+            try:
+                sources.download(pdf_url, path)
+            except Exception:
+                pass  # metadata only for now
+        if path.exists():
+            store.set_fulltext(pid, path, _pages(path.read_bytes())[0])
     return store.get_paper(pid)
 
 
-def _confirm(capture_id, arxiv_id, evidence):
-    pid = rules.paper_id(arxiv_id)
-    fetch_paper(pid)
+def paper_from_pdf(data, url=None):
+    """Any PDF becomes a paper. An arXiv stamp or a single DOI on page 1 ties it to that paper; otherwise it is
+    stored under its content hash with the title read from the PDF."""
+    pages, meta_title = _pages(data)
+    first = pages[0] if pages else ""
+    arxiv = rules.find_arxiv_ids(first)
+    dois = [r for r in rules.find_paper_refs(first) if r.startswith("doi:")]
+    for ref in (["arxiv:" + arxiv[0]] if arxiv else []) + (dois if len(dois) == 1 else []):
+        try:
+            return fetch_paper(ref, pdf=data)
+        except rules.Rejected:
+            pass
+    pid = "pdf:" + hashlib.sha256(data).hexdigest()[:16]
+    if not store.get_paper(pid):
+        lines = [ln.strip() for ln in first.splitlines() if len(ln.strip()) > 8]
+        title = meta_title.strip() if len(meta_title.strip()) > 8 else (lines[0] if lines else "未命名 PDF")
+        store.upsert_paper(pid, sources.clean_title(title), [], None, None, url)
+        path = store.paper_dir(pid) / "paper.pdf"
+        path.write_bytes(data)
+        store.set_fulltext(pid, path, pages)
+    return store.get_paper(pid)
+
+
+def resolve_paper(s):
+    """A paper from anything that names one: stored ID, arXiv/DOI/OpenReview link or number, or a link to a PDF."""
+    pid = rules.parse_pid(s)
+    if pid:
+        return fetch_paper(pid)
+    if re.match(r"https?://", (s or "").strip()):
+        try:
+            data = sources.download(s.strip())
+        except Exception as e:
+            raise rules.Rejected(f"这个链接既不是论文编号，也下载不到 PDF：{e}") from None
+        return paper_from_pdf(data, s.strip())
+    raise rules.Rejected(f"认不出论文：{s}（可以是 arXiv 链接或编号、DOI、OpenReview 链接，或 PDF 链接）")
+
+
+def attach_pdf(pid, data):
+    """Complete a metadata-only paper with a PDF the user supplied."""
+    if not store.get_paper(pid):
+        raise rules.Rejected("论文不在库里")
+    if not data.startswith(b"%PDF"):
+        raise rules.Rejected("这不是 PDF 文件")
+    path = store.paper_dir(pid) / "paper.pdf"
+    path.write_bytes(data)
+    store.set_fulltext(pid, path, _pages(data)[0])
+    return store.get_paper(pid)
+
+
+def _confirm(capture_id, paper, evidence):
     try:
-        store.link(capture_id, pid, "rule", evidence=evidence)
+        store.link(capture_id, paper["id"], "rule", evidence=evidence)
     except rules.Rejected:
         pass  # the user removed this link earlier; respect it
+
+
+def _candidate(pid, why):
+    try:
+        m = _meta(pid)
+    except Exception:
+        return None
+    if m.get("arxiv_id"):
+        pid = "arxiv:" + m["arxiv_id"]
+    return {"pid": pid, "title": m["title"], "authors": m["authors"], "published": m["published"], "url": m["url"], "why": why}
 
 
 def ingest(capture_id):
@@ -42,51 +142,65 @@ def ingest(capture_id):
     if not cap:
         raise rules.Rejected(f"找不到捕获 {capture_id}")
     store.update_capture(capture_id, status="resolving", note=None)
-    notes, info = [], {}
+    notes, info, linked_any = [], {}, False
+
+    def confirm(make, evidence):
+        nonlocal linked_any
+        try:
+            _confirm(capture_id, make(), evidence)
+            linked_any = True
+        except rules.Rejected as e:
+            notes.append(str(e))
+
     try:
-        direct = rules.find_arxiv_ids(cap["raw"])
-        page_ids = []
+        direct = rules.find_paper_refs(cap["raw"])
+        page_refs = []
         for url in rules.find_urls(cap["raw"])[:3]:
-            if sources.channel_of(url) == "arxiv":
+            if rules.find_paper_refs(url):
                 continue
             try:
                 page = sources.fetch_page(url)
             except Exception as e:  # network or anti-crawling: keep going with what we have
                 notes.append(f"抓取 {url[:60]} 失败：{e}")
                 continue
+            if "pdf" in page:
+                confirm(lambda: paper_from_pdf(page["pdf"], page["url"]), "你给的是 PDF 链接")
+                continue
             folder = store.home() / "assets" / capture_id
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "snapshot.html").write_text(page.pop("html"), encoding="utf-8")
             info = info or page
-            page_ids += rules.find_arxiv_ids(page["text"] + "\n" + "\n".join(page["links"]))
-        page_ids = [i for i in dict.fromkeys(page_ids) if i not in direct]
+            page_refs += rules.find_paper_refs(page["text"] + "\n" + "\n".join(page["links"]))
+        page_refs = [r for r in dict.fromkeys(page_refs) if r not in direct]
 
-        for aid in direct:
-            _confirm(capture_id, aid, f"原文直接给出了 arXiv:{aid}")
+        for att in cap["attachments"]:
+            if att["mime"] == "application/pdf":
+                data = open(store.attachment(att["id"])["path"], "rb").read()
+                confirm(lambda: paper_from_pdf(data), f"你上传的 PDF：{att['filename']}")
+        for ref in direct:
+            confirm(lambda: fetch_paper(ref), f"原文直接给出了 {rules.id_label(ref)}")
         candidates = []
-        if not direct and len(page_ids) == 1:
-            _confirm(capture_id, page_ids[0], f"解读里只出现了这一个论文链接 arXiv:{page_ids[0]}")
-        elif page_ids:
-            for m in sources.arxiv_lookup(page_ids[:8]):
-                candidates.append({**m, "why": "解读中出现的论文链接"})
-        if not direct and not page_ids:
+        if not direct and len(page_refs) == 1:
+            confirm(lambda: fetch_paper(page_refs[0]), f"解读里只出现了这一个论文链接 {rules.id_label(page_refs[0])}")
+        elif page_refs:
+            candidates = [c for c in (_candidate(r, "解读中出现的论文链接") for r in page_refs[:6]) if c]
+        if not direct and not page_refs and not linked_any:
             guesses = sources.guess_titles(info.get("text") or cap["raw"], info.get("title"))[:2]
             for guess in guesses:
-                found = sources.arxiv_search(guess)
+                found = sources.find_paper(guess)
                 if found and found[0]["score"] >= AUTO_CONFIRM_SCORE:
-                    _confirm(capture_id, found[0]["arxiv_id"], f"标题匹配（相似度 {found[0]['score']}）：{guess[:80]}")
+                    confirm(lambda: fetch_paper(found[0]["pid"]), f"标题匹配（相似度 {found[0]['score']}）：{guess[:80]}")
                     candidates = []
                     break
                 candidates += [{**m, "why": f"按标题检索：{guess[:60]}"} for m in found[:3]]
-            if guesses and not candidates and not store.get_capture(capture_id)["papers"]:
-                notes.append("在 arXiv 上按这些标题都没找到（可能不在 arXiv 上）：" + "；".join(guesses))
+            if guesses and not candidates and not linked_any:
+                notes.append("在 arXiv 和 Crossref 上按这些标题都没找到：" + "；".join(guesses) + "。可以直接拖入 PDF。")
 
-        linked = [p for p in store.get_capture(capture_id)["papers"] if p["state"] == "confirmed"]
-        if linked:
+        if any(p["state"] == "confirmed" for p in store.get_capture(capture_id)["papers"]):
             status = "mapped"
         elif candidates:
             status = "needs_confirm"
-        elif cap["attachments"]:
+        elif any(a["mime"].startswith("image/") for a in cap["attachments"]):
             status = "needs_agent"
             notes.append("截图需要 agent 看图识别论文")
         else:
@@ -95,7 +209,7 @@ def ingest(capture_id):
             capture_id,
             status=status,
             note="\n".join(notes) or None,
-            channel=info.get("channel") or ("arxiv" if direct else None),
+            channel=info.get("channel") or (re.sub(r":.*", "", direct[0]) if direct else None),
             url=info.get("url"),
             title=info.get("title"),
             author=info.get("author"),

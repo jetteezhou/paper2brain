@@ -177,7 +177,8 @@ def process_capture(capture_id):
     images = []
     for a in cap["attachments"]:
         att = store.attachment(a["id"])
-        images.append((open(att["path"], "rb").read(), att["mime"]))
+        if att["mime"] in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            images.append((open(att["path"], "rb").read(), att["mime"]))
     label = cap["title"] or cap["raw"][:40] or "截图"
     text = (
         f"你是 paper2brain 的论文管理员。先读 librarian/README.md 和 librarian/capture.md，"

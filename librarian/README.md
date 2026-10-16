@@ -15,11 +15,11 @@
 
 ```
 ./p2b show capture <id>        # 捕获详情：原文、快照正文、候选论文、已关联论文、用户想法
-./p2b show paper <arxiv:id>    # 论文详情：元数据、快读卡、主题、来源、想法、笔记
-./p2b text <arxiv:id> --pages 1-3
-./p2b arxiv-search "English title"
-./p2b fetch <arxiv:id>
-./p2b link <capture_id> <arxiv:id> --evidence "为什么判定是这篇"
+./p2b show paper <paper_id>    # 论文详情：元数据、快读卡、主题、来源、想法、笔记
+./p2b text <paper_id> --pages 1-3
+./p2b find "English title"     # 按标题检索（arXiv + Crossref），返回 pid 和相似度
+./p2b fetch <论文>              # 拉取元数据和全文
+./p2b link <capture_id> <论文> --evidence "为什么判定是这篇"
 ./p2b card put <arxiv:id> --file /tmp/card.json
 ./p2b report put <arxiv:id> --file /tmp/report.json
 ./p2b topics
@@ -32,3 +32,5 @@
 ```
 
 所有命令输出 JSON；`"ok": false` 表示被拒绝，`error` 里写了原因。
+
+`<论文>` 可以是：arXiv 链接或编号、DOI（`10.xxxx/...` 或 doi.org 链接）、OpenReview 链接，或者**任意 PDF 的直链**（会员论文、项目页上的 PDF、CVF 的 PDF 都行）。论文 ID（`paper_id`）形如 `arxiv:2410.24164`、`doi:10.15607/rss.2023.xix.026`、`openreview:xxxx`、`pdf:<哈希>`，以命令返回的为准。

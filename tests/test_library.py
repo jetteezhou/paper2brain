@@ -22,6 +22,19 @@ class Rules(unittest.TestCase):
         text = "看 https://arxiv.org/abs/2410.24164v2 和 arXiv:2303.04137，还有 hf huggingface.co/papers/2506.07339；日期 2024.10311 不算"
         self.assertEqual(rules.find_arxiv_ids(text), ["2410.24164", "2303.04137", "2506.07339"])
 
+    def test_paper_refs_beyond_arxiv(self):
+        text = ("https://doi.org/10.15607/RSS.2023.XIX.026，另见 https://openreview.net/forum?id=AbC_12-x "
+                "以及 arXiv 自己的 DOI 10.48550/arXiv.2410.24164。")
+        self.assertEqual(rules.find_paper_refs(text),
+                         ["arxiv:2410.24164", "doi:10.15607/rss.2023.xix.026", "openreview:AbC_12-x"])
+
+    def test_parse_pid(self):
+        self.assertEqual(rules.parse_pid("2410.24164v3"), "arxiv:2410.24164")
+        self.assertEqual(rules.parse_pid("arxiv:2410.24164v2"), "arxiv:2410.24164")
+        self.assertEqual(rules.parse_pid("DOI:10.1109/CVPR.2024.1"), "doi:10.1109/cvpr.2024.1")
+        self.assertEqual(rules.parse_pid("pdf:abc123"), "pdf:abc123")
+        self.assertIsNone(rules.parse_pid("https://example.com/some-blog"))
+
     def test_quote_page_is_corrected_and_fabrication_rejected(self):
         card = rules.validate_card(CARD, PAGES)
         self.assertEqual(card["results"][0]["page"], 2)
@@ -86,6 +99,24 @@ class Store(unittest.TestCase):
         self.assertIsNone(store.get_capture(self.cid))
         self.assertIsNotNone(store.get_paper("arxiv:2410.24164"))
         self.assertFalse(any(t["capture_id"] == self.cid for t in store.list_thoughts()))
+
+    def test_any_pdf_becomes_a_paper(self):
+        import pymupdf
+
+        from paper2brain import pipeline
+
+        doc = pymupdf.open()
+        doc.new_page().insert_text((72, 72), "Dexterous Hands from Human Videos at Scale")
+        doc.new_page().insert_text((72, 72), "We report a 37% gain on the bimanual benchmark.")
+        data = doc.tobytes()
+        paper = pipeline.paper_from_pdf(data)
+        self.assertTrue(paper["id"].startswith("pdf:"))
+        self.assertEqual(paper["title"], "Dexterous Hands from Human Videos at Scale")
+        self.assertEqual(paper["page_count"], 2)
+        self.assertEqual(pipeline.paper_from_pdf(data)["id"], paper["id"])
+        card = rules.validate_card({**CARD, "results": [{"text": "37%", "quote": "a 37% gain on the bimanual benchmark", "page": 1}]},
+                                   store.pages(paper["id"]))
+        self.assertEqual(card["results"][0]["page"], 2)
 
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}

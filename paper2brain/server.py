@@ -63,8 +63,9 @@ def capture_add(q, body):
         return {**store.get_capture(earlier), "duplicate": True}
     images = []
     for i, img in enumerate(body.get("images") or [], 1):
-        ext = mimetypes.guess_extension(img.get("mime") or "image/png") or ".png"
-        images.append((f"image-{i}{ext}", base64.b64decode(img["data"]), img.get("mime") or "image/png"))
+        mime = img.get("mime") or "image/png"
+        name = img.get("name") or f"file-{i}{mimetypes.guess_extension(mime) or ''}"
+        images.append((f"{i}-{Path(name).name}", base64.b64decode(img["data"]), mime))
     cap, _ = store.add_capture(str(uuid.uuid4()), body.get("text", ""), "web", body.get("thought"), images)
     bg(pipeline.process, cap["id"])
     return cap
@@ -92,11 +93,21 @@ def capture_triage(q, body, cid):
 
 @route("POST", "/api/captures/([^/]+)/link")
 def capture_link(q, body, cid):
-    from .cli import to_pid
-
-    pid = to_pid(body["paper"])
-    pipeline.fetch_paper(pid)
+    pid = pipeline.resolve_paper(body["paper"])["id"]
     store.link(cid, pid, "user", evidence="用户确认")
+    store.update_capture(cid, status="mapped")
+    if cursor_api.status()["enabled"] and not (store.get_paper(pid) or {}).get("card"):
+        bg(cursor_api.process_capture, cid)
+    return store.get_capture(cid)
+
+
+@route("POST", "/api/captures/([^/]+)/pdf")
+def capture_pdf(q, body, cid):
+    data = base64.b64decode(body["data"])
+    if not data.startswith(b"%PDF"):
+        raise rules.Rejected("这不是 PDF 文件")
+    pid = pipeline.paper_from_pdf(data)["id"]
+    store.link(cid, pid, "user", evidence="用户上传的 PDF")
     store.update_capture(cid, status="mapped")
     if cursor_api.status()["enabled"] and not (store.get_paper(pid) or {}).get("card"):
         bg(cursor_api.process_capture, cid)
@@ -155,6 +166,11 @@ def paper_pdf(q, body, pid):
 @route("GET", "/api/papers/([^/]+)/pages")
 def paper_pages(q, body, pid):
     return store.pages(pid)
+
+
+@route("POST", "/api/papers/([^/]+)/pdf")
+def paper_upload_pdf(q, body, pid):
+    return pipeline.attach_pdf(pid, base64.b64decode(body["data"]))
 
 
 @route("POST", "/api/papers/([^/]+)/topics")
@@ -260,10 +276,11 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._json(400, {"error": "请求体不是合法 JSON"})
         for m, pattern, fn in ROUTES:
-            match = pattern.match(path) if m == method else None
+            # match before unquoting: paper IDs such as DOIs contain "/" (sent as %2F)
+            match = pattern.match(url.path) if m == method else None
             if match:
                 try:
-                    out = fn(q, body, *match.groups())
+                    out = fn(q, body, *map(urllib.parse.unquote, match.groups()))
                 except rules.Rejected as e:
                     return self._json(400, {"error": str(e)})
                 except cursor_api.AgentError as e:

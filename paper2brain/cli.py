@@ -10,10 +10,10 @@ from . import pipeline, rules, sources, store
 
 
 def to_pid(s):
-    ids = rules.find_arxiv_ids(s) or rules.find_arxiv_ids("arxiv:" + s.removeprefix("arxiv:"))
-    if not ids:
-        raise rules.Rejected(f"认不出论文 ID：{s}（例：arxiv:2410.24164）")
-    return rules.paper_id(ids[0])
+    pid = rules.parse_pid(s)
+    if not pid:
+        raise rules.Rejected(f"认不出论文 ID：{s}（例：arxiv:2410.24164、doi:10.1109/xxx、pdf:… ；用 ./p2b show capture 查看已有 ID）")
+    return pid
 
 
 def _read_json(path):
@@ -39,16 +39,15 @@ def run(args):
     if cmd == "ingest":
         return pipeline.ingest(args.capture_id)
     if cmd == "fetch":
-        p = pipeline.fetch_paper(to_pid(args.paper))
+        p = pipeline.resolve_paper(args.paper)
         return {k: p[k] for k in ("id", "title", "page_count", "card_rev", "report_rev")}
-    if cmd == "arxiv-search":
-        return sources.arxiv_search(args.title)
+    if cmd == "find":
+        return sources.find_paper(args.title)
     if cmd == "link":
-        pid = to_pid(args.paper)
-        pipeline.fetch_paper(pid)
+        pid = pipeline.resolve_paper(args.paper)["id"]
         store.link(args.capture_id, pid, "agent", evidence=args.evidence)
         store.update_capture(args.capture_id, status="mapped")
-        return {"linked": pid}
+        return {"linked": pid, "has_fulltext": bool(store.pages(pid))}
     if cmd == "unlink":
         store.unlink(args.capture_id, to_pid(args.paper), "agent")
         return {"unlinked": True}
@@ -85,7 +84,7 @@ def run(args):
         pid = to_pid(args.paper)
         pages = store.pages(pid)
         if not pages:
-            raise rules.Rejected("还没有全文，先运行 ./p2b fetch " + pid)
+            raise rules.Rejected("这篇论文还没有全文。用 ./p2b fetch <PDF 链接> 补上，或请用户在网页上传 PDF")
         return [{"page": n, "text": pages[n - 1]} for n in _pages(args.pages, len(pages))]
     if cmd == "papers":
         return store.list_papers("" if args.unsorted else args.topic)
@@ -114,8 +113,8 @@ def parser():
     s.add_argument("--image", action="append", default=[])
 
     sub.add_parser("ingest", help="规则预处理：抓快照、找论文、拉全文").add_argument("capture_id")
-    sub.add_parser("fetch", help="拉取论文元数据与全文").add_argument("paper")
-    sub.add_parser("arxiv-search", help="按标题检索 arXiv").add_argument("title")
+    sub.add_parser("fetch", help="拉取论文元数据与全文：arXiv/DOI/OpenReview 链接或编号，或 PDF 链接").add_argument("paper")
+    sub.add_parser("find", help="按标题检索论文（arXiv + Crossref）").add_argument("title")
 
     s = sub.add_parser("link", help="把捕获关联到论文")
     s.add_argument("capture_id")

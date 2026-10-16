@@ -1,6 +1,7 @@
 """Fetching from the outside world: article pages (WeChat, Xiaohongshu, generic) and arXiv."""
 import difflib
 import html
+import json
 import re
 import time
 import urllib.parse
@@ -81,8 +82,11 @@ def channel_of(url):
 
 
 def fetch_page(url):
-    """Snapshot of an article: title, account/author, plain text, outgoing links. Raises on network failure."""
+    """Snapshot of an article: title, account/author, plain text, outgoing links. A PDF comes back as {"pdf": bytes}.
+    Raises on network failure."""
     final, body, ctype = http_get(url)
+    if body.startswith(b"%PDF"):
+        return {"url": final, "pdf": body}
     page = body.decode("utf-8", errors="replace")
     channel = channel_of(final)
     if channel == "wechat":
@@ -203,8 +207,95 @@ def arxiv_search(title, limit=5):
     return [r for r in sorted(results, key=lambda r: -r["score"]) if r["score"] >= 0.45][:limit]
 
 
-def download(url, path):
+def download(url, path=None):
     _, body, ctype = http_get(url, timeout=90)
     if not body.startswith(b"%PDF"):
         raise RuntimeError(f"下载到的不是 PDF（{ctype}）")
-    path.write_bytes(body)
+    if path:
+        path.write_bytes(body)
+    return body
+
+
+# ---------- DOI, title search beyond arXiv, OpenReview ----------
+
+def _json(url):
+    _, body, _ = http_get(url)
+    return json.loads(body)
+
+
+def _openalex_meta(w):
+    words = w.get("abstract_inverted_index") or {}
+    abstract = " ".join(k for k, _ in sorted(((k, i) for k, v in words.items() for i in v), key=lambda x: x[1])) or None
+    arxiv = None
+    for loc in [w.get("best_oa_location") or {}] + (w.get("locations") or []):
+        ids = rules.find_arxiv_ids((loc or {}).get("landing_page_url") or "")
+        if ids:
+            arxiv = ids[0]
+            break
+    oa = w.get("best_oa_location") or {}
+    return {
+        "title": clean_title(w.get("title") or ""),
+        "authors": [a["author"]["display_name"] for a in w.get("authorships") or [] if a.get("author")],
+        "abstract": abstract,
+        "published": w.get("publication_date"),
+        "pdf_url": oa.get("pdf_url"),
+        "arxiv_id": arxiv,
+    }
+
+
+def doi_lookup(doi):
+    """Metadata for a DOI: OpenAlex first (it also knows open-access PDFs and arXiv copies), Crossref as fallback."""
+    try:
+        meta = _openalex_meta(_json(f"https://api.openalex.org/works/doi:{urllib.parse.quote(doi)}"))
+        if meta["title"]:
+            return {**meta, "url": f"https://doi.org/{doi}"}
+    except Exception:
+        pass
+    m = _json(f"https://api.crossref.org/works/{urllib.parse.quote(doi)}?mailto=paper2brain@localhost")["message"]
+    pdf = next((ln["URL"] for ln in m.get("link") or [] if ln.get("content-type") == "application/pdf"), None)
+    return {
+        "title": clean_title((m.get("title") or [""])[0]),
+        "authors": [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in m.get("author") or []],
+        "abstract": re.sub(r"<[^>]+>", "", m.get("abstract") or "") or None,
+        "published": "-".join(str(x) for x in (m.get("issued", {}).get("date-parts") or [[None]])[0] if x),
+        "pdf_url": pdf, "arxiv_id": None, "url": f"https://doi.org/{doi}",
+    }
+
+
+def crossref_search(title, limit=5):
+    q = urllib.parse.urlencode({"query.bibliographic": title, "rows": limit, "mailto": "paper2brain@localhost",
+                                "select": "DOI,title,author,issued,type"})
+    out = []
+    for m in _json("https://api.crossref.org/works?" + q)["message"]["items"]:
+        t = clean_title((m.get("title") or [""])[0])
+        if not t:
+            continue
+        out.append({
+            "pid": "doi:" + m["DOI"].lower(), "title": t,
+            "authors": [f"{a.get('given', '')} {a.get('family', '')}".strip() for a in m.get("author") or []],
+            "published": "-".join(str(x) for x in (m.get("issued", {}).get("date-parts") or [[None]])[0] if x),
+            "url": f"https://doi.org/{m['DOI']}", "score": round(title_score(title, t), 3), "query": title,
+        })
+    return out
+
+
+def openreview_lookup(note_id):
+    try:
+        note = _json(f"https://api2.openreview.net/notes?id={note_id}")["notes"][0]["content"]
+    except Exception as e:
+        raise RuntimeError(f"OpenReview 访问失败（{e}）。可以在浏览器下载 PDF 后拖进来") from None
+    val = lambda k: (note.get(k) or {}).get("value") if isinstance(note.get(k), dict) else note.get(k)
+    return {"title": clean_title(val("title") or ""), "authors": val("authors") or [], "abstract": val("abstract"),
+            "published": None, "pdf_url": f"https://openreview.net/pdf?id={note_id}", "arxiv_id": None,
+            "url": f"https://openreview.net/forum?id={note_id}"}
+
+
+def find_paper(title, limit=5):
+    """Title search: arXiv first, then Crossref (conference and journal papers with a DOI)."""
+    found = [{**r, "pid": "arxiv:" + r["arxiv_id"]} for r in arxiv_search(title, limit)]
+    if not found or found[0]["score"] < 0.95:
+        try:
+            found += [r for r in crossref_search(title, limit) if r["score"] >= 0.6]
+        except Exception:
+            pass
+    return sorted(found, key=lambda r: -r["score"])[:limit]
