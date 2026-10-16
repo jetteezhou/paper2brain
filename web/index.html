@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>paper2brain</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="side">
+      <div class="brand"><div class="brand-mark">p2</div>paper2brain</div>
+      <div class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="search" placeholder="搜索论文、解读、想法  /" autocomplete="off">
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="agent-status" id="agent-status"></div>
+    </aside>
+    <main id="main">
+      <form id="capture" autocomplete="off">
+        <div class="cap-box" id="cap-box">
+          <div class="cap-row">
+            <textarea id="cap-text" rows="1" placeholder="粘贴公众号 / 小红书 / arXiv 链接、一段文字或截图，回车收下"></textarea>
+            <span class="hint"><kbd>⌘K</kbd></span>
+          </div>
+          <div id="cap-images"></div>
+          <div class="cap-thought"><span>想法</span><input id="cap-thought" placeholder="顺手记一句为什么收（可选）"></div>
+        </div>
+        <button class="btn primary big" type="submit">收下</button>
+      </form>
+      <div id="body">
+        <section id="list"></section>
+        <section id="detail"></section>
+      </div>
+    </main>
+  </div>
+  <div id="reader" hidden></div>
+  <div id="toast"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
