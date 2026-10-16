@@ -210,7 +210,74 @@ def note_add(q, body):
 
 @route("GET", "/api/threads")
 def thread_get(q, body):
-    return store.thread_for(q["scope"])
+    return store.thread_for(q.get("scope"), q.get("id"))
+
+
+@route("GET", "/api/messages/([^/]+)")
+def message_get(q, body, mid):
+    return store.message(mid)
+
+
+# ---------- ideas ----------
+
+@route("GET", "/api/ideas")
+def ideas(q, body):
+    return store.list_ideas("" if q.get("unsorted") else q.get("topic"))
+
+
+@route("POST", "/api/ideas")
+def idea_add(q, body):
+    links = [(x["kind"], x["ref"]) for x in body.get("links") or []]
+    iid = store.add_idea(body.get("title"), "user", body.get("summary"), body.get("topics") or [], links, body.get("stage", "seed"))
+    return store.get_idea(iid)
+
+
+def _idea(iid):
+    i = store.get_idea(iid)
+    if not i:
+        raise rules.Rejected("这个 Idea 不存在或已删除")
+    return i
+
+
+@route("GET", "/api/ideas/([^/]+)")
+def idea_get(q, body, iid):
+    return _idea(iid)
+
+
+@route("POST", "/api/ideas/([^/]+)")
+def idea_update(q, body, iid):
+    fields = {k: body[k] for k in ("title", "summary", "stage", "body") if k in body}
+    store.update_idea(iid, "user", body.get("base_rev"), **fields)
+    return _idea(iid)
+
+
+@route("DELETE", "/api/ideas/([^/]+)")
+def idea_delete(q, body, iid):
+    store.delete_idea(iid)
+    return {"ok": True}
+
+
+@route("POST", "/api/ideas/([^/]+)/topics")
+def idea_topics(q, body, iid):
+    store.set_idea_topics(iid, body.get("topics") or [], "user")
+    return _idea(iid)
+
+
+@route("POST", "/api/ideas/([^/]+)/links")
+def idea_link(q, body, iid):
+    store.link_idea(iid, body["kind"], body["ref"], "user")
+    return _idea(iid)
+
+
+@route("POST", "/api/ideas/([^/]+)/unlink")
+def idea_unlink(q, body, iid):
+    store.unlink_idea(iid, body["kind"], body["ref"])
+    return _idea(iid)
+
+
+@route("POST", "/api/ideas/([^/]+)/refine")
+def idea_refine(q, body, iid):
+    return {"run_id": cursor_api.refine_idea(iid)}
 
 
 @route("POST", "/api/threads")
@@ -224,7 +291,7 @@ def chat(q, body):
     text = (body.get("text") or "").strip()
     if not text:
         raise rules.Rejected("问题不能为空")
-    return {"run_id": cursor_api.discuss(body["scope"], text)}
+    return {"run_id": cursor_api.discuss(body["scope"], text, body.get("thread_id"))}
 
 
 @route("GET", "/api/runs/([^/]+)")

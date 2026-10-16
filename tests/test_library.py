@@ -128,6 +128,32 @@ class Store(unittest.TestCase):
                                    store.pages(paper["id"]))
         self.assertEqual(card["results"][0]["page"], 2)
 
+    def test_idea_links_both_ways_and_inherits_topics(self):
+        store.upsert_paper("arxiv:2501.00001", "one-step policy")
+        store.set_topics("arxiv:2501.00001", ["VLA/推理加速"], "agent")
+        tid = store.add_thought("能不能把动作头蒸馏到一步", "user", paper_id="arxiv:2501.00001")
+        iid = store.add_idea("一步动作头", "user", links=[("thought", tid), ("paper", "arxiv:2501.00001")])
+        idea = store.get_idea(iid)
+        self.assertEqual(idea["topics"], ["VLA/推理加速"])
+        self.assertEqual({l["kind"] for l in idea["links"]}, {"thought", "paper"})
+        self.assertEqual(store.get_paper("arxiv:2501.00001")["ideas"][0]["id"], iid)
+        self.assertTrue(any(t["ideas"] for t in store.list_thoughts() if t["id"] == tid))
+        self.assertEqual([i["id"] for i in store.list_ideas("VLA")], [iid])
+        with self.assertRaisesRegex(rules.Rejected, "不存在"):
+            store.link_idea(iid, "message", "nope", "user")
+
+    def test_idea_revision_and_draft_citations(self):
+        iid = store.add_idea("x", "user")
+        rev = store.update_idea(iid, "user", title="用户改过的标题")
+        with self.assertRaisesRegex(rules.Rejected, "已被修改"):
+            store.update_idea(iid, "agent", rev - 1, stage="refined")
+        draft = {"title": "t", "summary": "s", "problem": "p", "insight": "i", "approach": "a",
+                 "experiment": "e [arxiv:2410.24164 p.3]", "risks": "r [arxiv:9999.99999]"}
+        with self.assertRaisesRegex(rules.Rejected, "库里没有"):
+            rules.validate_idea_draft(draft, store.paper_ids())
+        ok = rules.validate_idea_draft({**draft, "risks": "r"}, store.paper_ids())
+        self.assertEqual(ok["cited"], ["arxiv:2410.24164"])
+
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])

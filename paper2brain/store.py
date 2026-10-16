@@ -16,7 +16,10 @@ TOPIC_TREE = [
     ("WAM", ["世界模型", "表征研究", "WAN base", "V-JEPA"]),
 ]
 TRIAGE = ("inbox", "deep", "archived", "ignored")
-JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta"}
+JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body"}
+IDEA_FIELDS = ("problem", "insight", "approach", "novelty", "experiment", "risks")
+IDEA_STAGES = ("seed", "refined")
+LINK_KINDS = ("paper", "thought", "message", "thread", "capture", "note")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS captures (
@@ -56,6 +59,16 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   target TEXT, detail TEXT);
+CREATE TABLE IF NOT EXISTS ideas (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL, summary TEXT,
+  body TEXT, stage TEXT NOT NULL DEFAULT 'seed', by TEXT NOT NULL, edited_by TEXT, revision INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS idea_topics (
+  idea_id TEXT NOT NULL REFERENCES ideas(id) ON DELETE CASCADE, topic TEXT NOT NULL REFERENCES topics(path),
+  PRIMARY KEY (idea_id, topic));
+CREATE TABLE IF NOT EXISTS idea_links (
+  idea_id TEXT NOT NULL REFERENCES ideas(id) ON DELETE CASCADE, kind TEXT NOT NULL, ref TEXT NOT NULL,
+  by TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (idea_id, kind, ref));
+CREATE INDEX IF NOT EXISTS idea_links_ref ON idea_links(kind, ref);
 CREATE INDEX IF NOT EXISTS captures_triage ON captures(triage, created_at);
 CREATE INDEX IF NOT EXISTS cp_paper ON capture_papers(paper_id);
 CREATE INDEX IF NOT EXISTS runs_ref ON runs(ref, created_at);
@@ -210,6 +223,9 @@ def get_capture(capture_id):
             return None
         cap["attachments"] = _rows(c.execute("SELECT id, filename, mime FROM attachments WHERE capture_id=?", (capture_id,)))
         cap["thoughts"] = _rows(c.execute("SELECT * FROM thoughts WHERE capture_id=? ORDER BY created_at", (capture_id,)))
+        thought_ideas = _ideas_for(c, "thought", [t["id"] for t in cap["thoughts"]])
+        for t in cap["thoughts"]:
+            t["ideas"] = thought_ideas.get(t["id"], [])
         cap["papers"] = _rows(c.execute(
             "SELECT p.id, p.title, p.card IS NOT NULL AS has_card, cp.state, cp.by, cp.evidence "
             "FROM capture_papers cp JOIN papers p ON p.id=cp.paper_id WHERE cp.capture_id=? ORDER BY cp.at",
@@ -275,6 +291,7 @@ def counts():
         ).fetchone()[0]
         out["papers"] = c.execute("SELECT count(DISTINCT paper_id) FROM capture_papers WHERE state='confirmed'").fetchone()[0]
         out["thoughts"] = c.execute("SELECT count(*) FROM thoughts").fetchone()[0]
+        out["ideas"] = c.execute("SELECT count(*) FROM ideas").fetchone()[0]
         out["unsorted"] = c.execute(
             "SELECT count(DISTINCT cp.paper_id) FROM capture_papers cp WHERE cp.state='confirmed' "
             "AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=cp.paper_id)"
@@ -309,6 +326,11 @@ def pages(pid):
     return json.loads(path.read_text()) if path.exists() else []
 
 
+def paper_ids():
+    with tx() as c:
+        return {r["id"] for r in c.execute("SELECT id FROM papers")}
+
+
 def get_paper(pid):
     with tx() as c:
         p = _row(c.execute("SELECT * FROM papers WHERE id=?", (pid,)).fetchone())
@@ -327,6 +349,10 @@ def get_paper(pid):
             f"SELECT * FROM thoughts WHERE paper_id=? OR capture_id IN ({q}) ORDER BY created_at", (pid, *cap_ids)
         ))
         p["notes"] = _rows(c.execute("SELECT * FROM notes WHERE paper_id=? ORDER BY created_at", (pid,)))
+        p["ideas"] = _ideas_for(c, "paper", [pid]).get(pid, [])
+        thought_ideas = _ideas_for(c, "thought", [t["id"] for t in p["thoughts"]])
+        for t in p["thoughts"]:
+            t["ideas"] = thought_ideas.get(t["id"], [])
         p["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (pid,)))
     return p
 
@@ -473,13 +499,17 @@ def add_thought(text, by, capture_id=None, paper_id=None):
 
 def list_thoughts():
     with tx() as c:
-        return _rows(c.execute(
+        out = _rows(c.execute(
             "SELECT t.*, coalesce(p.title, (SELECT p2.title FROM capture_papers cp JOIN papers p2 ON p2.id=cp.paper_id "
             "WHERE cp.capture_id=t.capture_id AND cp.state='confirmed' LIMIT 1)) AS paper_title, "
             "coalesce(t.paper_id, (SELECT cp.paper_id FROM capture_papers cp WHERE cp.capture_id=t.capture_id AND cp.state='confirmed' LIMIT 1)) AS about_paper, "
             "c.title AS capture_title FROM thoughts t LEFT JOIN papers p ON p.id=t.paper_id "
             "LEFT JOIN captures c ON c.id=t.capture_id ORDER BY t.created_at DESC"
         ))
+        ideas = _ideas_for(c, "thought", [t["id"] for t in out])
+    for t in out:
+        t["ideas"] = ideas.get(t["id"], [])
+    return out
 
 
 def add_note(text, by, paper_id=None, topic=None, thread_id=None):
@@ -493,9 +523,15 @@ def add_note(text, by, paper_id=None, topic=None, thread_id=None):
 
 # ---------- discussion ----------
 
-def thread_for(scope):
+def thread_for(scope=None, thread_id=None):
+    """The latest thread of a scope (created on first use), or a specific one when jumping back to an old discussion."""
     with tx() as c:
-        t = _row(c.execute("SELECT * FROM threads WHERE scope=? ORDER BY created_at DESC LIMIT 1", (scope,)).fetchone())
+        if thread_id:
+            t = _row(c.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone())
+            if not t:
+                raise rules.Rejected("这段讨论不存在了")
+        else:
+            t = _row(c.execute("SELECT * FROM threads WHERE scope=? ORDER BY created_at DESC LIMIT 1", (scope,)).fetchone())
         if not t:
             t = {"id": new_id(), "created_at": now(), "scope": scope, "title": None, "agent_id": None}
             c.execute("INSERT INTO threads VALUES (?,?,?,?,?)", tuple(t.values()))
@@ -503,10 +539,23 @@ def thread_for(scope):
             "SELECT m.*, r.status AS run_status, r.text AS run_text, r.tools AS run_tools, r.error AS run_error "
             "FROM messages m LEFT JOIN runs r ON r.id=m.run_id WHERE m.thread_id=? ORDER BY m.created_at", (t["id"],),
         ))
+        ideas = _ideas_for(c, "message", [m["id"] for m in t["messages"]])
     for m in t["messages"]:
         if m["run_tools"]:
             m["run_tools"] = json.loads(m["run_tools"])
+        m["ideas"] = ideas.get(m["id"], [])
     return t
+
+
+def message(mid):
+    with tx() as c:
+        m = _row(c.execute(
+            "SELECT m.*, t.scope, r.text AS run_text FROM messages m JOIN threads t ON t.id=m.thread_id "
+            "LEFT JOIN runs r ON r.id=m.run_id WHERE m.id=?", (mid,),
+        ).fetchone())
+    if not m:
+        raise rules.Rejected("这条讨论消息不存在了")
+    return m
 
 
 def new_thread(scope):
@@ -524,6 +573,182 @@ def add_message(thread_id, role, text, run_id=None):
     with tx() as c:
         c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
     return mid
+
+
+# ---------- ideas ----------
+
+def _ideas_for(c, kind, refs):
+    """Reverse links: which ideas cite each of these objects."""
+    out = {}
+    if refs:
+        q = ",".join("?" * len(refs))
+        for r in c.execute(
+            f"SELECT l.ref, i.id, i.title, i.stage FROM idea_links l JOIN ideas i ON i.id=l.idea_id "
+            f"WHERE l.kind=? AND l.ref IN ({q}) ORDER BY i.updated_at DESC", (kind, *refs),
+        ):
+            out.setdefault(r["ref"], []).append({"id": r["id"], "title": r["title"], "stage": r["stage"]})
+    return out
+
+
+def _check_topics(c, paths):
+    known = {r["path"] for r in c.execute("SELECT path FROM topics")}
+    unknown = [t for t in paths if t not in known]
+    if unknown:
+        raise rules.Rejected(f"未知主题：{unknown}。可用主题见 ./p2b topics")
+
+
+def _check_link(c, kind, ref):
+    if kind not in LINK_KINDS:
+        raise rules.Rejected(f"不能关联 {kind}，可选：{', '.join(LINK_KINDS)}")
+    table = {"paper": "papers", "thought": "thoughts", "message": "messages", "thread": "threads",
+             "capture": "captures", "note": "notes"}[kind]
+    if not c.execute(f"SELECT 1 FROM {table} WHERE id=?", (ref,)).fetchone():
+        raise rules.Rejected(f"要关联的 {kind} {ref} 不存在")
+
+
+def add_idea(title, by, summary=None, topics=(), links=(), stage="seed"):
+    """links: [(kind, ref)]. Without explicit topics the idea inherits the topics of the papers it cites."""
+    if not (title or "").strip():
+        raise rules.Rejected("Idea 需要一个标题")
+    if stage not in IDEA_STAGES:
+        raise rules.Rejected(f"未知阶段：{stage}")
+    iid = new_id()
+    with tx() as c:
+        for kind, ref in links:
+            _check_link(c, kind, ref)
+        topics = list(topics)
+        papers = [ref for kind, ref in links if kind == "paper"]
+        if not topics and papers:
+            q = ",".join("?" * len(papers))
+            topics = [r["topic"] for r in c.execute(f"SELECT DISTINCT topic FROM paper_topics WHERE paper_id IN ({q})", papers)]
+        _check_topics(c, topics)
+        c.execute(
+            "INSERT INTO ideas (id, created_at, updated_at, title, summary, stage, by) VALUES (?,?,?,?,?,?,?)",
+            (iid, now(), now(), title.strip(), (summary or "").strip() or None, stage, by),
+        )
+        for t in dict.fromkeys(topics):
+            c.execute("INSERT INTO idea_topics VALUES (?,?)", (iid, t))
+        for kind, ref in dict.fromkeys(links):
+            c.execute("INSERT INTO idea_links VALUES (?,?,?,?,?)", (iid, kind, ref, by, now()))
+        _event(c, by, "idea.add", iid)
+    return iid
+
+
+def update_idea(iid, by, base_rev=None, **fields):
+    """title / summary / stage / body ({problem, insight, ...}). Guarded by revision so a late agent draft cannot
+    overwrite what the user edited meanwhile."""
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM ideas WHERE id=?", (iid,)).fetchone()
+        if not cur:
+            raise rules.Rejected("Idea 不存在")
+        rules.check_revision(cur["revision"], base_rev)
+        if "stage" in fields and fields["stage"] not in IDEA_STAGES:
+            raise rules.Rejected(f"未知阶段：{fields['stage']}")
+        if "title" in fields and not (fields["title"] or "").strip():
+            raise rules.Rejected("Idea 需要一个标题")
+        if "body" in fields:
+            fields["body"] = json.dumps({k: (fields["body"] or {}).get(k) for k in IDEA_FIELDS}, ensure_ascii=False)
+        sets = ", ".join(f"{k}=?" for k in fields)
+        c.execute(
+            f"UPDATE ideas SET {sets}, updated_at=?, edited_by=?, revision=revision+1 WHERE id=?",
+            (*fields.values(), now(), by, iid),
+        )
+        _event(c, by, "idea.update", iid, fields=list(fields))
+        return cur["revision"] + 1
+
+
+def set_idea_topics(iid, topics, by):
+    with tx() as c:
+        _check_topics(c, topics)
+        c.execute("DELETE FROM idea_topics WHERE idea_id=?", (iid,))
+        for t in dict.fromkeys(topics):
+            c.execute("INSERT INTO idea_topics VALUES (?,?)", (iid, t))
+        c.execute("UPDATE ideas SET updated_at=? WHERE id=?", (now(), iid))
+
+
+def link_idea(iid, kind, ref, by):
+    with tx() as c:
+        if not c.execute("SELECT 1 FROM ideas WHERE id=?", (iid,)).fetchone():
+            raise rules.Rejected("Idea 不存在")
+        _check_link(c, kind, ref)
+        c.execute("INSERT OR IGNORE INTO idea_links VALUES (?,?,?,?,?)", (iid, kind, ref, by, now()))
+        c.execute("UPDATE ideas SET updated_at=? WHERE id=?", (now(), iid))
+
+
+def unlink_idea(iid, kind, ref):
+    with tx() as c:
+        c.execute("DELETE FROM idea_links WHERE idea_id=? AND kind=? AND ref=?", (iid, kind, ref))
+
+
+def delete_idea(iid):
+    with tx() as c:
+        c.execute("DELETE FROM ideas WHERE id=?", (iid,))
+        _event(c, "user", "idea.delete", iid)
+
+
+def _resolve_link(c, kind, ref):
+    """What a source looks like in the idea's provenance list; None when it has been deleted since."""
+    if kind == "paper":
+        r = c.execute("SELECT title FROM papers WHERE id=?", (ref,)).fetchone()
+        return r and {"label": r["title"]}
+    if kind == "thought":
+        r = c.execute(
+            "SELECT t.text, t.created_at, t.capture_id, coalesce(t.paper_id, (SELECT cp.paper_id FROM capture_papers cp "
+            "WHERE cp.capture_id=t.capture_id AND cp.state='confirmed' LIMIT 1)) AS paper_id FROM thoughts t WHERE t.id=?", (ref,),
+        ).fetchone()
+        return r and {"label": r["text"], "at": r["created_at"], "paper_id": r["paper_id"], "capture_id": r["capture_id"]}
+    if kind == "message":
+        r = c.execute(
+            "SELECT m.role, coalesce(nullif(m.text, ''), r.text) AS text, m.created_at, t.scope, t.id AS thread_id "
+            "FROM messages m JOIN threads t ON t.id=m.thread_id LEFT JOIN runs r ON r.id=m.run_id WHERE m.id=?", (ref,),
+        ).fetchone()
+        return r and {"label": (r["text"] or "")[:200], "at": r["created_at"], "role": r["role"], "scope": r["scope"], "thread_id": r["thread_id"]}
+    if kind == "thread":
+        r = c.execute(
+            "SELECT t.scope, t.created_at, (SELECT text FROM messages WHERE thread_id=t.id AND role='user' ORDER BY created_at LIMIT 1) AS first "
+            "FROM threads t WHERE t.id=?", (ref,),
+        ).fetchone()
+        return r and {"label": r["first"] or "一段讨论", "at": r["created_at"], "scope": r["scope"]}
+    if kind == "capture":
+        r = c.execute("SELECT coalesce(title, substr(raw,1,120)) AS label, created_at FROM captures WHERE id=?", (ref,)).fetchone()
+        return r and {"label": r["label"], "at": r["created_at"]}
+    r = c.execute("SELECT text, created_at, paper_id FROM notes WHERE id=?", (ref,)).fetchone()
+    return r and {"label": r["text"][:200], "at": r["created_at"], "paper_id": r["paper_id"]}
+
+
+def get_idea(iid):
+    with tx() as c:
+        i = _row(c.execute("SELECT * FROM ideas WHERE id=?", (iid,)).fetchone())
+        if not i:
+            return None
+        i["topics"] = [r["topic"] for r in c.execute("SELECT topic FROM idea_topics WHERE idea_id=? ORDER BY topic", (iid,))]
+        i["links"] = []
+        for r in c.execute("SELECT * FROM idea_links WHERE idea_id=? ORDER BY at", (iid,)).fetchall():
+            info = _resolve_link(c, r["kind"], r["ref"])
+            i["links"].append({"kind": r["kind"], "ref": r["ref"], "by": r["by"], "missing": info is None, **(info or {})})
+        i["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (iid,)))
+    return i
+
+
+def list_ideas(topic=None):
+    """topic=None: all; '': ideas without a topic; a path includes its children."""
+    sql = "SELECT i.id, i.title, i.summary, i.stage, i.by, i.updated_at, i.created_at, " \
+          "(SELECT count(*) FROM idea_links l WHERE l.idea_id=i.id) AS link_count FROM ideas i "
+    args = ()
+    if topic == "":
+        sql += "WHERE NOT EXISTS (SELECT 1 FROM idea_topics t WHERE t.idea_id=i.id) "
+    elif topic:
+        sql += "WHERE EXISTS (SELECT 1 FROM idea_topics t WHERE t.idea_id=i.id AND (t.topic=? OR t.topic LIKE ?)) "
+        args = (topic, topic + "/%")
+    sql += "ORDER BY i.stage='refined' DESC, i.updated_at DESC"
+    with tx() as c:
+        out = _rows(c.execute(sql, args))
+        for i in out:
+            i["topics"] = [r["topic"] for r in c.execute("SELECT topic FROM idea_topics WHERE idea_id=? ORDER BY topic", (i["id"],))]
+            i["papers"] = [r["title"] for r in c.execute(
+                "SELECT p.title FROM idea_links l JOIN papers p ON p.id=l.ref WHERE l.idea_id=? AND l.kind='paper'", (i["id"],)
+            )]
+    return out
 
 
 # ---------- agent runs ----------

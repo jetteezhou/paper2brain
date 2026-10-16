@@ -20,7 +20,7 @@ const post = (u, b = {}) => api('POST', u, b);
 const S = {
   view: 'inbox', arg: null, state: null, list: [], sel: null, detail: null,
   open: new Set(['VLM', 'VLA', 'WAM']), images: [], reader: null, threads: {},
-  picker: null, scope: 'library', thoughts: [], search: null, seen: {},
+  picker: null, scope: 'library', thoughts: [], search: null, seen: {}, scopeTitles: {},
 };
 
 const VIEWS = {
@@ -33,6 +33,7 @@ const VIEWS = {
   topic: { kind: 'papers', empty: ['这个主题下还没有论文', 'agent 会自动归类；你也可以在论文卡片上手动调整主题。'] },
   unsorted: { title: '未归类', kind: 'papers', empty: ['都归好类了', 'agent 拿不准的论文会留在这里。'] },
   thoughts: { title: '想法', kind: 'page' },
+  ideas: { title: 'Idea', kind: 'ideas', empty: ['还没有 Idea', '在想法、讨论消息或论文卡片上点“存为 Idea”，或者在上面直接记一个。<br>初步的先放着，想清楚了再凝练。'] },
   discuss: { title: '讨论', kind: 'page' },
   search: { title: '搜索', kind: 'search' },
 };
@@ -44,6 +45,7 @@ const ICON = {
   papers: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
   thoughts: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3z"/>',
   discuss: '<path d="M4 5h16v11H9l-5 4z"/>',
+  ideas: '<path d="M12 3l2.2 5.6L20 9.3l-4.5 3.8 1.4 5.9L12 15.9 7.1 19l1.4-5.9L4 9.3l5.8-.7z"/>',
   unsorted: '<path d="M4 7h16M4 12h10M4 17h6"/>',
   archived: '<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10h14V9M10 13h4"/>',
   ignored: '<circle cx="12" cy="12" r="9"/><path d="m8 8 8 8"/>',
@@ -189,15 +191,23 @@ async function load() {
     else if (v.kind === 'papers') {
       const q = S.view === 'topic' ? `?topic=${enc(S.arg)}` : S.view === 'unsorted' ? '?unsorted=1' : '';
       S.list = await get('/api/papers' + q);
-    } else if (S.view === 'search') S.search = await get(`/api/search?q=${enc(S.arg || '')}`);
+    } else if (v.kind === 'ideas') S.list = await get('/api/ideas' + (S.arg ? `?topic=${enc(S.arg)}` : ''));
+    else if (S.view === 'search') S.search = await get(`/api/search?q=${enc(S.arg || '')}`);
     else if (S.view === 'thoughts') S.thoughts = await get('/api/thoughts');
-    else if (S.view === 'discuss') await loadThread(scopeKey());
+    else if (S.view === 'discuss') { await loadThread(scopeKey(), S.threadId); S.threadId = null; }
+    if ((S.view === 'topic' || S.view === 'ideas') && S.arg) {
+      const other = await get(S.view === 'topic' ? `/api/ideas?topic=${enc(S.arg)}` : `/api/papers?topic=${enc(S.arg)}`);
+      S.otherCount = other.length;
+    }
   } catch (e) { fail(e); }
   renderBody();
-  if (!S.sel && v.kind !== 'page' && S.list.length && innerWidth > 900) select(itemKind(S.list[0]), S.list[0].id);
+  const want = S.wantSel;
+  S.wantSel = null;
+  if (want) select(want.kind, want.id);
+  else if (!S.sel && v.kind !== 'page' && S.list.length && innerWidth > 900) select(itemKind(S.list[0]), S.list[0].id);
 }
 
-const itemKind = (x) => (x.raw !== undefined ? 'capture' : 'paper');
+const itemKind = (x) => (x.stage !== undefined ? 'idea' : x.raw !== undefined ? 'capture' : 'paper');
 
 async function select(kind, id) {
   S.sel = { kind, id };
@@ -216,7 +226,8 @@ async function loadDetail(force) {
       const cap = await get(`/api/captures/${enc(S.sel.id)}`);
       const papers = await Promise.all(cap.papers.filter((p) => p.state === 'confirmed').map((p) => get(`/api/papers/${enc(p.id)}`)));
       d = { cap, papers };
-    } else d = { papers: [await get(`/api/papers/${enc(S.sel.id)}`)] };
+    } else if (S.sel.kind === 'idea') d = { idea: await get(`/api/ideas/${enc(S.sel.id)}`) };
+    else d = { papers: [await get(`/api/papers/${enc(S.sel.id)}`)] };
     if (force || changed('detail', d)) { S.detail = d; renderDetail(); }
   } catch (e) {
     S.detail = { error: e.message };
@@ -231,9 +242,12 @@ function changed(key, value) {
   return true;
 }
 
-async function loadThread(scope) {
-  S.threads[scope] = await get(`/api/threads?scope=${enc(scope)}`);
-  return S.threads[scope];
+async function loadThread(scope, threadId) {
+  const keep = !threadId && S.threads[scope]?.pinned ? S.threads[scope].id : threadId;
+  const t = await get(keep ? `/api/threads?id=${enc(keep)}` : `/api/threads?scope=${enc(scope)}`);
+  t.pinned = !!keep;
+  S.threads[scope] = t;
+  return t;
 }
 
 // ---------- sidebar ----------
@@ -241,17 +255,18 @@ async function loadThread(scope) {
 function renderSide() {
   const c = S.state.counts;
   const item = (view, label, n, hot) =>
-    `<div class="nav-item ${S.view === view ? 'on' : ''}" data-action="go" data-view="${view}">${icon(view)}<span>${label}</span>${n ? `<span class="n ${hot ? 'hot' : ''}">${n}</span>` : ''}</div>`;
+    `<div class="nav-item ${S.view === view && !(view === 'ideas' && S.arg) ? 'on' : ''}" data-action="go" data-view="${view}">${icon(view)}<span>${label}</span>${n ? `<span class="n ${hot ? 'hot' : ''}">${n}</span>` : ''}</div>`;
+  const inTopic = (path) => (S.view === 'topic' || S.view === 'ideas') && S.arg === path;
   const tree = S.state.topics.map((t) => {
     const open = S.open.has(t.path);
-    const on = S.view === 'topic' && S.arg === t.path;
+    const on = inTopic(t.path);
     return `<div class="nav-item ${on ? 'on' : ''}" data-action="go" data-view="topic" data-arg="${esc(t.path)}">
         <span class="caret ${open ? 'open' : ''}" data-action="toggle-tree" data-path="${esc(t.path)}"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>${esc(t.name)}</span>${t.count ? `<span class="n">${t.count}</span>` : ''}</div>` +
-      (open ? t.children.map((ch) => `<div class="nav-item tree-child ${S.view === 'topic' && S.arg === ch.path ? 'on' : ''}" data-action="go" data-view="topic" data-arg="${esc(ch.path)}"><span>${esc(ch.name)}</span>${ch.count ? `<span class="n">${ch.count}</span>` : ''}</div>`).join('') : '');
+      (open ? t.children.map((ch) => `<div class="nav-item tree-child ${inTopic(ch.path) ? 'on' : ''}" data-action="go" data-view="topic" data-arg="${esc(ch.path)}"><span>${esc(ch.name)}</span>${ch.count ? `<span class="n">${ch.count}</span>` : ''}</div>`).join('') : '');
   }).join('');
   $('#nav').innerHTML =
     item('inbox', '收件箱', c.inbox) + item('pending', '待处理', c.pending, true) + item('deep', '待深读', c.deep) +
-    item('papers', '全部论文', c.papers) + item('thoughts', '想法', c.thoughts) + item('discuss', '讨论') +
+    item('papers', '全部论文', c.papers) + item('thoughts', '想法', c.thoughts) + item('ideas', 'Idea', c.ideas) + item('discuss', '讨论') +
     `<div class="nav-label">主题</div>${tree}${item('unsorted', '未归类', c.unsorted)}` +
     `<div class="nav-label">归档</div>${item('archived', '已存档', c.archived)}${item('ignored', '已忽略', c.ignored)}`;
   const a = S.state.agent;
@@ -280,13 +295,46 @@ function listHead(title, sub, keys) {
   return `<div class="list-head"><h2>${esc(title)}</h2><span class="sub">${sub}</span>${keys ? `<span class="keys hint">${keys}</span>` : ''}</div>`;
 }
 
+function topicTabs() {
+  if (!(S.view === 'topic' || S.view === 'ideas') || !S.arg) return '';
+  const papers = S.view === 'topic' ? S.list.length : S.otherCount, ideas = S.view === 'ideas' ? S.list.length : S.otherCount;
+  return `<div class="seg"><button class="${S.view === 'topic' ? 'on' : ''}" data-action="go" data-view="topic" data-arg="${esc(S.arg)}">论文 ${papers ?? ''}</button>
+    <button class="${S.view === 'ideas' ? 'on' : ''}" data-action="go" data-view="ideas" data-arg="${esc(S.arg)}">Idea ${ideas ?? ''}</button></div>`;
+}
+
 function listHtml() {
   const v = VIEWS[S.view];
-  const title = S.view === 'topic' ? S.arg.replace('/', ' / ') : v.title;
+  const title = S.arg && (S.view === 'topic' || S.view === 'ideas') ? S.arg.replace('/', ' / ') : v.title;
+  if (v.kind === 'ideas') return ideasList(title);
   const keys = v.kind === 'captures' && ['inbox', 'pending'].includes(S.view) ? '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>D</kbd> 深读 <kbd>A</kbd> 存档' : '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>↵</kbd> 阅读';
-  const head = listHead(title, S.list.length ? `${S.list.length} 条` : '', S.list.length ? keys : '');
+  const head = listHead(title, S.list.length ? `${S.list.length} 条` : '', S.list.length ? keys : '') + topicTabs();
   if (!S.list.length) return head + `<div class="empty"><b>${v.empty[0]}</b>${v.empty[1]}</div>`;
   return head + S.list.map((x) => (v.kind === 'captures' ? captureItem(x) : paperItem(x))).join('');
+}
+
+const STAGE = { seed: ['初步', 'chip amber'], refined: ['凝练', 'chip green-solid'] };
+const stageChip = (s) => `<span class="${STAGE[s][1]}">${STAGE[s][0]}</span>`;
+
+function ideasList(title) {
+  const placeholder = S.arg ? `记一个 idea 到 ${S.arg.replace('/', ' / ')}…（回车）` : '记一个 idea…（回车）';
+  let h = listHead(title, S.list.length ? `${S.list.length} 个 Idea` : '', '') + topicTabs() +
+    `<form class="add-line idea-new" data-form="idea-new" data-topic="${esc(S.arg || '')}"><input placeholder="${esc(placeholder)}"></form>`;
+  if (!S.list.length) return h + `<div class="empty"><b>${S.arg ? '这个主题下还没有 Idea' : VIEWS.ideas.empty[0]}</b>${VIEWS.ideas.empty[1]}</div>`;
+  for (const stage of ['refined', 'seed']) {
+    const items = S.list.filter((i) => i.stage === stage);
+    if (!items.length) continue;
+    h += `<div class="group-label">${stage === 'refined' ? '凝练 · 问题、方法、实验都想清楚了' : '初步 · 一句话的方向或猜想'}　${items.length}</div>` + items.map(ideaItem).join('');
+  }
+  return h;
+}
+
+function ideaItem(i) {
+  return `<div class="item ${S.sel?.id === i.id ? 'on' : ''}" data-action="select" data-kind="idea" data-id="${i.id}">
+    <div class="item-meta">${stageChip(i.stage)}${i.by === 'agent' ? '<span>agent 记录</span>' : ''}<time>${ago(i.updated_at)}</time></div>
+    <div class="item-title">${esc(i.title)}</div>
+    ${i.summary ? `<div class="item-tldr">${esc(i.summary)}</div>` : ''}
+    <div class="item-tags">${i.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${i.link_count ? `<span class="chip">${i.link_count} 个来源</span>` : ''}</div>
+  </div>`;
 }
 
 function statusChip(c) {
@@ -350,8 +398,68 @@ function renderDetail() {
   if (!S.sel || !d) { el.innerHTML = S.list.length ? '<div class="empty" style="padding-top:120px">选择左侧一条查看</div>' : ''; return; }
   if (d.error) { el.innerHTML = `<div class="empty"><b>打不开</b>${esc(d.error)}</div>`; return; }
   const back = innerWidth <= 900 ? '<button class="btn sm ghost" data-action="back">← 返回列表</button>' : '';
-  el.innerHTML = `<div class="detail">${back}${d.cap ? captureDetail(d.cap, d.papers) : paperDetail(d.papers[0])}</div>`;
+  el.innerHTML = `<div class="detail">${back}${d.idea ? ideaDetail(d.idea) : d.cap ? captureDetail(d.cap, d.papers) : paperDetail(d.papers[0])}</div>`;
 }
+
+const FIELDS = [
+  ['problem', '问题', '要解决什么，为什么现有方法不够'],
+  ['insight', '核心洞见', '别人没想到或没做到的那个关键点'],
+  ['approach', '方法思路', '2–5 步：输入输出、关键模块'],
+  ['novelty', '与已有工作的区别', '逐篇对比，可以引用 [arxiv:2410.24164 p.3]'],
+  ['experiment', '最小验证实验', '数据 / 平台、对比谁、看什么指标、多大算成功'],
+  ['risks', '风险与未知', '最可能失败的原因、需要先确认的假设'],
+];
+
+function ideaDetail(i) {
+  const run = i.runs.find((r) => live(r.status));
+  const stageBtn = (s) => `<button class="${i.stage === s ? 'on' : ''}" data-action="idea-stage" data-id="${i.id}" data-stage="${s}">${STAGE[s][0]}</button>`;
+  const canRefine = agentOn() && !run;
+  let h = `<div class="src-bar"><div class="seg sm" title="初步：一句话的方向；凝练：问题、方法、实验都想清楚了">${stageBtn('seed')}${stageBtn('refined')}</div>
+    <span>${i.by === 'agent' ? 'agent 记录 · ' : ''}更新于 ${ago(i.updated_at)}${i.edited_by === 'agent' ? '（agent 起草）' : ''}</span><span class="grow"></span>
+    <button class="btn sm" data-action="idea-discuss" data-id="${i.id}" ${agentOn() ? '' : 'disabled'}>讨论这个 Idea</button>
+    <button class="btn sm ${i.stage === 'seed' ? 'primary' : ''}" data-action="idea-refine" data-id="${i.id}" ${canRefine ? '' : 'disabled'} title="${agentOn() ? '让 agent 基于来源和库里的论文起草凝练版' : '需要先连接 agent'}">${run ? '<span class="spin"></span>凝练中' : '帮我凝练'}</button>
+    <button class="btn sm" data-action="idea-edit" data-id="${i.id}">${S.editIdea === i.id ? '取消编辑' : '编辑'}</button>
+    <button class="btn sm ghost" data-action="idea-delete" data-id="${i.id}">删除</button></div>`;
+  if (S.editIdea === i.id) h += ideaForm(i);
+  else {
+    h += `<h1 class="idea-title">${esc(i.title)}</h1>${i.summary ? `<div class="idea-summary">${inline(i.summary)}</div>` : ''}${topicsRow(i, 'idea')}`;
+    if (run) h += '<div class="card-wait"><span class="spin"></span>Agent 正在凝练：读来源、查库里的相关工作…</div>';
+    const filled = FIELDS.filter(([k]) => i.body?.[k]);
+    if (filled.length) h += `<div class="idea-body">${filled.map(([k, label]) => `<div class="section"><h3>${label}</h3>${md(i.body[k])}</div>`).join('')}</div>`;
+    else if (!run) {
+      h += `<div class="notice info"><b>还只是一个初步想法。</b>想清楚以后补全这几项，就可以拿去组会讨论：${FIELDS.map((f) => f[1]).join('、')}。
+        <div style="margin-top:10px;display:flex;gap:8px"><button class="btn sm" data-action="idea-edit" data-id="${i.id}">自己补全</button>
+        <button class="btn sm primary" data-action="idea-refine" data-id="${i.id}" ${canRefine ? '' : 'disabled'}>让 agent 起草</button>${agentOn() ? '' : '<span class="hint">起草需要先连接 agent</span>'}</div></div>`;
+    }
+  }
+  h += sourcesBlock(i);
+  if (i.runs.length) h += `<details class="runs" ${run ? 'open' : ''}><summary>凝练记录 · ${i.runs.length} 次 <span class="hint">（调优：改 librarian/idea.md）</span></summary>${i.runs.map((r) => runCard(r, '凝练')).join('')}</details>`;
+  return h;
+}
+
+function ideaForm(i) {
+  return `<form class="idea-form" data-form="idea-edit" data-id="${i.id}" data-rev="${i.revision}">
+    <input name="title" class="idea-title-input" value="${esc(i.title)}" placeholder="Idea 名称">
+    <textarea name="summary" rows="2" placeholder="一句话：做什么、为什么可能有效">${esc(i.summary || '')}</textarea>
+    ${FIELDS.map(([k, label, hint]) => `<label>${label}<span class="hint">　${hint}</span></label><textarea name="${k}" rows="3">${esc(i.body?.[k] || '')}</textarea>`).join('')}
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px"><button class="btn primary">保存</button>
+      ${i.stage === 'seed' ? '<button class="btn" data-stage="refined">保存并标为凝练</button>' : ''}
+      <button type="button" class="btn ghost" data-action="idea-edit" data-id="${i.id}">取消</button></div></form>`;
+}
+
+function sourcesBlock(i) {
+  const kindLabel = (l) => ({ paper: '论文', thought: '想法', message: l.role === 'user' ? '你在讨论里说' : 'agent 在讨论里说', thread: '讨论', capture: '收下的内容', note: '笔记' }[l.kind]);
+  const rows = i.links.map((l) => `<div class="source ${l.missing ? 'missing' : ''}" ${l.missing ? '' : `data-action="open-source" data-kind="${l.kind}" data-ref="${esc(l.ref)}" data-paper="${esc(l.paper_id || '')}" data-capture="${esc(l.capture_id || '')}" data-scope="${esc(l.scope || '')}" data-thread="${esc(l.thread_id || '')}"`} title="${l.missing ? '' : '跳过去看'}">
+      <span class="source-kind">${kindLabel(l)}</span><span class="source-label ${l.kind === 'paper' ? 'serif' : ''}">${esc(l.missing ? '（已删除）' : short(l.label, 160))}</span>
+      ${l.at ? `<time>${ago(l.at)}</time>` : ''}<button class="x" data-action="idea-unlink" data-id="${i.id}" data-kind="${l.kind}" data-ref="${esc(l.ref)}" title="移除这个来源">×</button></div>`).join('');
+  return `<div class="block"><div class="block-title">来源 · ${i.links.length}<span class="line"></span><button class="btn sm ghost" data-action="idea-add-paper" data-id="${i.id}">+ 关联库里的论文</button></div>
+    ${rows || '<div class="hint">还没有来源。在想法、讨论消息或论文卡片上点“存为 Idea / 加入 Idea”，来源就会出现在这里，点一下能跳回去。</div>'}</div>`;
+}
+
+const plain = (s) => (s || '').replace(/\[(?:arxiv|doi|openreview|pdf):[^\]]*?(?:\s*p\.?\s*(\d+))?\]/gi, (m, p) => (p ? `(p.${p})` : ''))
+  .replace(/[*`#>]+/g, '').replace(/\s+/g, ' ').trim();
+const ideaChip = (x) => `<a href="#" class="chip idea-chip" data-action="open-idea" data-id="${x.id}" title="打开这个 Idea">${STAGE[x.stage][0]} · ${esc(short(x.title, 22))}</a>`;
+const thoughtIdea = (t, paperId) => `${(t.ideas || []).map(ideaChip).join('')}<button class="btn sm ghost" data-action="thought-idea" data-id="${t.id}" data-paper="${esc(paperId || t.about_paper || t.paper_id || '')}" data-text="${esc(t.text)}" title="把这个想法发展成 Idea">→ Idea</button>`;
 
 function captureDetail(c, papers) {
   const triage = { inbox: '收件箱', deep: '待深读', archived: '已存档', ignored: '已忽略' };
@@ -368,7 +476,8 @@ function captureDetail(c, papers) {
   if (c.attachments.length) h += `<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">${c.attachments.map((a) => a.mime.startsWith('image/')
     ? `<a href="/api/attachments/${a.id}" target="_blank" class="thumb" style="width:96px;height:96px"><img src="/api/attachments/${a.id}"></a>`
     : `<a href="/api/attachments/${a.id}" target="_blank" class="chip">${esc(a.filename.replace(/^\d+-/, ''))} ↗</a>`).join('')}</div>`;
-  h += `<div class="thoughts">${c.thoughts.map((t) => `<div class="thought">${esc(t.text)}<small>${t.by === 'agent' ? 'agent 记录 · ' : ''}${ago(t.created_at)}</small></div>`).join('')}
+  const capPaper = papers[0]?.id;
+  h += `<div class="thoughts">${c.thoughts.map((t) => `<div class="thought"><span>${esc(t.text)}<small>${t.by === 'agent' ? 'agent 记录 · ' : ''}${ago(t.created_at)}</small></span><span class="thought-acts">${thoughtIdea(t, capPaper)}</span></div>`).join('')}
     <form class="add-line" data-form="thought" data-capture="${c.id}"><input placeholder="${c.thoughts.length ? '再补一句想法…' : '补一句想法：为什么收它？'}"><button class="btn sm">记下</button></form></div>`;
 
   if (c.status === 'needs_confirm' && !papers.length) {
@@ -439,7 +548,7 @@ function paperDetail(p) {
 
 function notesBlock(p) {
   return `<div class="block"><div class="block-title">想法与笔记<span class="line"></span></div>
-    ${p.thoughts.map((t) => `<div class="thought">${esc(t.text)}<small>${ago(t.created_at)}</small></div>`).join('')}
+    ${p.thoughts.map((t) => `<div class="thought"><span>${esc(t.text)}<small>${ago(t.created_at)}</small></span><span class="thought-acts">${thoughtIdea(t, p.id)}</span></div>`).join('')}
     ${p.notes.map((n) => `<div class="run" style="margin-top:6px">${md(n.text)}<div class="hint">${n.by === 'agent' ? 'agent 记录的讨论结论' : '笔记'} · ${ago(n.created_at)}</div></div>`).join('')}
     <form class="add-line" data-form="thought" data-paper="${esc(p.id)}"><input placeholder="记一个想法，会和这篇论文绑在一起"><button class="btn sm">记下</button></form></div>`;
 }
@@ -481,6 +590,8 @@ function paperCard(p, { capture, inReader } = {}) {
     ${topicsRow(p)}
     ${p.page_count ? '' : `<div class="notice" style="margin-top:12px">没下载到这篇论文的 PDF（可能需要登录或不公开）。上传 PDF 后才能写快读卡、深读和对照原文。<br>${pdfButton({ paper: p.id })}</div>`}
     ${body}
+    <div class="idea-row"><span class="hint">Idea</span>${(p.ideas || []).map(ideaChip).join('') || '<span class="hint">还没有</span>'}
+      <button class="btn sm ghost" data-action="paper-idea" data-pid="${esc(p.id)}">+ 加入 Idea</button></div>
     ${inReader ? '' : `<div class="paper-actions">
       <button class="btn primary" data-action="read" data-pid="${esc(p.id)}">进入深读 →</button>
       <button class="btn" data-action="read" data-pid="${esc(p.id)}" data-tab="chat">讨论这篇</button>
@@ -488,16 +599,17 @@ function paperCard(p, { capture, inReader } = {}) {
   </article>`;
 }
 
-function topicsRow(p) {
+function topicsRow(p, kind = 'paper') {
   const open = S.picker === p.id;
-  const chips = p.topics.map((t) => `<span class="chip topic">${esc(t)}<button data-action="topic-remove" data-pid="${esc(p.id)}" data-topic="${esc(t)}" title="移除">×</button></span>`).join('');
+  const attrs = (topic) => `data-kind="${kind}" data-pid="${esc(p.id)}" data-topic="${esc(topic)}"`;
+  const chips = p.topics.map((t) => `<span class="chip topic">${esc(t)}<button data-action="topic-remove" ${attrs(t)} title="移除">×</button></span>`).join('');
   const picker = open ? `<div class="picker" data-stop>${S.state.topics.map((t) => `
-      <label><input type="checkbox" data-action="topic-toggle" data-pid="${esc(p.id)}" data-topic="${esc(t.path)}" ${p.topics.includes(t.path) ? 'checked' : ''}>${esc(t.name)}</label>
-      ${t.children.map((ch) => `<label class="child"><input type="checkbox" data-action="topic-toggle" data-pid="${esc(p.id)}" data-topic="${esc(ch.path)}" ${p.topics.includes(ch.path) ? 'checked' : ''}>${esc(ch.name)}</label>`).join('')}`).join('')}
-      <div class="foot">你调整后，agent 不会再改这篇论文的主题。</div></div>` : '';
+      <label><input type="checkbox" data-action="topic-toggle" ${attrs(t.path)} ${p.topics.includes(t.path) ? 'checked' : ''}>${esc(t.name)}</label>
+      ${t.children.map((ch) => `<label class="child"><input type="checkbox" data-action="topic-toggle" ${attrs(ch.path)} ${p.topics.includes(ch.path) ? 'checked' : ''}>${esc(ch.name)}</label>`).join('')}`).join('')}
+      ${kind === 'paper' ? '<div class="foot">你调整后，agent 不会再改这篇论文的主题。</div>' : ''}</div>` : '';
+  const hint = kind === 'idea' ? '' : p.topics_locked ? '<span class="hint">· 你调整过</span>' : p.topics.length ? '<span class="hint">· agent 归类</span>' : '';
   return `<div class="topics-row">${chips || '<span class="chip">未归类</span>'}
-    <button class="btn sm ghost" data-action="picker" data-pid="${esc(p.id)}">${p.topics.length ? '调整' : '+ 归类'}</button>
-    ${p.topics_locked ? '<span class="hint">· 你调整过</span>' : p.topics.length ? '<span class="hint">· agent 归类</span>' : ''}${picker}</div>`;
+    <button class="btn sm ghost" data-action="picker" data-pid="${esc(p.id)}">${p.topics.length ? '调整' : '+ 归类'}</button>${hint}${picker}</div>`;
 }
 
 // ---------- reader ----------
@@ -584,11 +696,13 @@ const SUGGEST = {
   topic: ['这个方向最近在解决什么问题？', '列出代表性方法和它们的关键区别'],
   thoughts: ['把我最近的想法归纳成几个方向', '哪些想法和库里的论文有关？'],
   library: ['最近收的论文里，哪几篇值得深读？', '库里有谁做过灵巧手相关的工作？'],
+  idea: ['这个 idea 的问题成立吗？最强的反对意见是什么？', '和库里最接近的工作相比，区别在哪？', '设计一个最小验证实验'],
 };
 
 function scopeLabel(scope) {
   const [k, ...rest] = scope.split(':');
   const ref = rest.join(':');
+  if (k === 'idea') return `Idea《${S.scopeTitles[scope] || '…'}》`;
   return k === 'paper' ? '这篇论文' : k === 'topic' ? `主题 ${ref}` : k === 'thoughts' ? '我的想法' : '整个论文库';
 }
 
@@ -603,7 +717,8 @@ function chatHtml(scope) {
   } else msgs = t.messages.map((m) => msgHtml(m, scope)).join('');
   const disabled = !agentOn();
   return `<div class="chat" data-scope="${esc(scope)}">
-    <div class="chat-head">范围：${esc(scopeLabel(scope))}<span class="grow"></span>
+    <div class="chat-head">范围：${esc(scopeLabel(scope))}${t?.pinned ? `<span class="chip amber">${ago(t.created_at)}的一段讨论</span>` : ''}<span class="grow"></span>
+      ${t?.pinned ? `<button class="btn sm ghost" data-action="chat-latest" data-scope="${esc(scope)}">回到最新对话</button>` : ''}
       ${t?.agent_id ? `<a class="btn sm ghost" href="https://cursor.com/agents/${esc(t.agent_id)}" target="_blank">在 Cursor 中继续 ↗</a>` : ''}
       ${t?.messages.length ? `<button class="btn sm ghost" data-action="chat-new" data-scope="${esc(scope)}">新对话</button>` : ''}</div>
     <div class="msgs">${msgs}</div>
@@ -613,18 +728,27 @@ function chatHtml(scope) {
 }
 
 function msgHtml(m, scope) {
-  if (m.role === 'user') return `<div class="msg user">${esc(m.text)}</div>`;
+  const flash = S.highlight === m.id ? ' flash' : '';
+  const ideaActs = `${(m.ideas || []).map(ideaChip).join('')}<button class="btn sm ghost" data-action="msg-idea" data-scope="${esc(scope)}" data-mid="${m.id}">存为 Idea</button>`;
+  if (m.role === 'user') return `<div class="msg-wrap user" id="m-${m.id}"><div class="msg user${flash}">${esc(m.text)}</div><div class="msg-foot right">${ideaActs}</div></div>`;
   const text = m.run_text || m.text;
   const running = live(m.run_status);
   const tools = m.run_tools || [];
-  return `<div class="msg bot">${text ? md(text) : ''}
+  return `<div class="msg bot${flash}" id="m-${m.id}">${text ? md(text) : ''}
     ${running ? `<div class="typing"><span class="spin"></span>${text ? '还在写…' : tools.length ? '正在查阅论文库…' : 'Agent 启动中…'}</div>
       ${tools.length ? `<div class="tools">${tools.slice(-3).map((x) => `<div>${x.status === 'running' ? '…' : '✓'} ${esc(x.name)} ${esc(x.args || '')}</div>`).join('')}</div>` : ''}` : ''}
     ${m.run_status === 'ERROR' ? `<div class="hint" style="color:var(--red)">agent 出错了${m.run_error ? '：' + esc(m.run_error) : ''}</div>` : ''}
-    ${!running && text ? `<div class="msg-foot"><button class="btn sm ghost" data-action="save-note" data-scope="${esc(scope)}" data-mid="${m.id}">存为笔记</button></div>` : ''}</div>`;
+    ${!running && text ? `<div class="msg-foot"><button class="btn sm ghost" data-action="save-note" data-scope="${esc(scope)}" data-mid="${m.id}">存为笔记</button>${ideaActs}</div>` : ''}</div>`;
 }
 
 function scrollChat() {
+  const target = S.highlight && document.getElementById(`m-${S.highlight}`);
+  if (target) {
+    target.scrollIntoView({ block: 'center' });
+    clearTimeout(S.flashTimer);
+    S.flashTimer = setTimeout(() => (S.highlight = null), 4000);
+    return;
+  }
   document.querySelectorAll('.msgs').forEach((el) => (el.scrollTop = el.scrollHeight));
 }
 
@@ -635,7 +759,7 @@ function discussPage() {
   const scope = S.scope;
   const chip = (s, label) => `<button class="scope ${scope === s ? 'on' : ''}" data-action="scope" data-scope="${esc(s)}">${esc(label)}</button>`;
   return `<div class="page"><div style="padding:18px 20px 10px"><h2 class="page-title">讨论</h2>
-    <div class="scope-bar">${chip('library', '整个论文库')}${chip('thoughts', '我的想法')}
+    <div class="scope-bar">${chip('library', '整个论文库')}${chip('thoughts', '我的想法')}${scope.startsWith('idea:') ? chip(scope, scopeLabel(scope)) : ''}
       <select class="scope ${scope.startsWith('topic:') ? 'on' : ''}" data-change="scope"><option value="">按主题…</option>
       ${topics.map((t) => `<option value="topic:${esc(t.path)}" ${scope === 'topic:' + t.path ? 'selected' : ''}>${t.path.includes('/') ? '　' : ''}${esc(t.name)}</option>`).join('')}</select></div></div>
     <div style="flex:1;min-height:0;border-top:1px solid var(--line)">${chatHtml(scope)}</div></div>`;
@@ -644,7 +768,8 @@ function discussPage() {
 async function sendChat(scope, text) {
   if (!text.trim()) return;
   try {
-    await post('/api/chat', { scope, text });
+    const t = S.threads[scope];
+    await post('/api/chat', { scope, text, thread_id: t?.pinned ? t.id : null });
     await loadThread(scope);
     refreshChat(scope);
   } catch (e) {
@@ -678,7 +803,7 @@ function thoughtsPage() {
     const about = t.about_paper
       ? `<a href="#" data-action="read" data-pid="${esc(t.about_paper)}" data-tab="notes">${esc(short(t.paper_title, 60))}</a>`
       : t.capture_id ? `<a href="#" data-action="goto-capture" data-id="${t.capture_id}">${esc(short(t.capture_title || '来自一条捕获', 50))}</a>` : '<span>独立想法</span>';
-    return `${head}<div class="t-item"><div class="t-text">${esc(t.text)}</div><div class="t-meta"><span>${ago(t.created_at)}</span>·${about}${t.by === 'agent' ? '<span class="chip">agent 记录</span>' : ''}</div></div>`;
+    return `${head}<div class="t-item"><div class="t-text">${esc(t.text)}</div><div class="t-meta"><span>${ago(t.created_at)}</span>·${about}${t.by === 'agent' ? '<span class="chip">agent 记录</span>' : ''}<span class="grow"></span>${thoughtIdea(t)}</div></div>`;
   }).join('');
   return `<div class="page pad"><h2 class="page-title">想法</h2><p class="hint" style="margin:0 0 12px">一闪念都在这里。和论文绑在一起的，会在深读和讨论时被调出来。</p>
     <form class="add-line" data-form="thought"><input placeholder="记一个想法…（回车保存）" style="padding:9px 12px;font-size:14.5px"><button class="btn primary">记下</button></form>
@@ -794,14 +919,91 @@ async function triage(id, t, quiet) {
   loadDetail(true);
 }
 
-async function saveTopics(pid, topics) {
+async function saveTopics(kind, id, topics) {
   try {
-    await post(`/api/papers/${enc(pid)}/topics`, { topics });
+    await post(`/api/${kind === 'idea' ? 'ideas' : 'papers'}/${enc(id)}/topics`, { topics });
     await loadState();
-    if (S.reader?.pid === pid) { S.reader.paper = await get(`/api/papers/${enc(pid)}`); renderPanel(); }
+    if (S.reader?.pid === id) { S.reader.paper = await get(`/api/papers/${enc(id)}`); renderPanel(); }
     loadDetail(true);
     if (VIEWS[S.view].kind !== 'page') load();
   } catch (e) { fail(e); }
+}
+
+const topicOwner = (el) => (el.dataset.kind === 'idea' ? S.detail.idea
+  : S.reader?.paper?.id === el.dataset.pid ? S.reader.paper : S.detail.papers.find((x) => x.id === el.dataset.pid));
+
+// ---------- ideas: create from anywhere, jump back to sources ----------
+
+const firstSentence = (s, n = 30) => short((s || '').replace(/[#*`>\-\[\]]/g, '').split(/[。！？\n.!?]/).find((x) => x.trim())?.trim() || '', n);
+
+async function ideaPicker(ctx) {
+  S.pickerCtx = ctx;
+  const ideas = await get('/api/ideas').catch(() => []);
+  const row = (i) => `<div class="pick" data-action="idea-join" data-id="${i.id}" data-name="${esc(i.title.toLowerCase())}">${stageChip(i.stage)}<span class="pick-title">${esc(i.title)}</span><span class="hint">${esc(i.topics.join(' '))}</span></div>`;
+  modal(`<h3>${esc(ctx.heading || '存为 Idea')}</h3>
+    <form class="idea-create" data-form="idea-create">
+      <input name="title" value="${esc(ctx.title || '')}" placeholder="Idea 名称（30 字以内，比如“用 latent action 做 VLA tokenizer”）">
+      <textarea name="summary" rows="3" placeholder="一句话：做什么、为什么可能有效（可以先空着）">${esc(ctx.summary || '')}</textarea>
+      <p class="hint">先存成<b>初步 Idea</b>，想清楚了再凝练。${ctx.topics?.length ? `主题：${esc(ctx.topics.join('、'))}。` : '主题跟随关联的论文，之后可以改。'}来源会自动关联，随时能跳回去。</p>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn" data-action="close-modal">取消</button><button class="btn primary">新建初步 Idea</button></div>
+    </form>
+    ${ideas.length ? `<div class="block-title" style="margin-top:18px">或者加入已有的 Idea<span class="line"></span></div>
+      <input class="picker-filter" data-filter="pick" placeholder="筛选…"><div class="pick-list">${ideas.map(row).join('')}</div>` : ''}`);
+  $('.idea-create input').focus();
+}
+
+function afterIdea(id, message) {
+  closeModal();
+  toast(message, '查看', () => openItem('idea', id, 'ideas'));
+  loadState();
+  if (S.reader) get(`/api/papers/${enc(S.reader.pid)}`).then((p) => { S.reader.paper = p; S.reader.tab === 'chat' ? null : renderPanel(); });
+  for (const scope of Object.keys(S.threads)) loadThread(scope).then(() => refreshChat(scope));
+  if (S.view === 'thoughts') get('/api/thoughts').then((t) => { S.thoughts = t; renderBody(); });
+  loadDetail(true);
+}
+
+function openItem(kind, id, view) {
+  const fromReader = !!S.reader;
+  if (fromReader) closeReader(false);
+  if (S.view === view && !S.arg) { if (fromReader) go(view); select(kind, id); return; }
+  S.wantSel = { kind, id };
+  go(view);
+}
+
+async function openThreadAt(scope, threadId, mid) {
+  S.highlight = mid || null;
+  if (scope.startsWith('paper:')) {
+    const pid = scope.slice(6);
+    await loadThread(scope, threadId);
+    if (S.reader?.pid === pid) { S.reader.tab = 'chat'; renderPanel(); } else { S.pendingTab = 'chat'; openReader(pid); }
+    return;
+  }
+  if (scope.startsWith('idea:')) {
+    const i = await get(`/api/ideas/${enc(scope.slice(5))}`).catch(() => null);
+    if (i) S.scopeTitles[scope] = i.title;
+  }
+  S.scope = scope;
+  S.threadId = threadId;
+  const fromReader = !!S.reader;
+  if (fromReader) closeReader(false);
+  if (S.view === 'discuss') { if (fromReader) go('discuss'); load(); } else go('discuss');
+}
+
+const openSource = {
+  paper: (el) => openReader(el.dataset.ref),
+  thought: (el) => (el.dataset.paper ? (S.pendingTab = 'notes', openReader(el.dataset.paper)) : openItem('capture', el.dataset.capture, 'inbox')),
+  message: async (el) => openThreadAt(el.dataset.scope, el.dataset.thread, el.dataset.ref),
+  thread: (el) => openThreadAt(el.dataset.scope, el.dataset.ref),
+  capture: (el) => openItem('capture', el.dataset.ref, 'inbox'),
+  note: (el) => el.dataset.paper && (S.pendingTab = 'notes', openReader(el.dataset.paper)),
+};
+
+async function libraryPaperPicker(iid) {
+  const papers = await get('/api/papers');
+  S.pickerCtx = { iid };
+  modal(`<h3>关联库里的论文</h3><input class="picker-filter" data-filter="pick" placeholder="按标题筛选…">
+    <div class="pick-list">${papers.map((p) => `<div class="pick" data-action="idea-pick-paper" data-pid="${esc(p.id)}" data-name="${esc(p.title.toLowerCase())}"><span class="pick-title serif">${esc(p.title)}</span><span class="hint">${esc(idLabel(p.id))}</span></div>`).join('') || '<p class="hint">库里还没有论文</p>'}</div>`);
+  $('.picker-filter').focus();
 }
 
 const actions = {
@@ -848,16 +1050,71 @@ const actions = {
   },
   picker: (el, e) => { e.stopPropagation(); S.picker = S.picker === el.dataset.pid ? null : el.dataset.pid; S.reader ? renderPanel() : renderDetail(); },
   'topic-toggle': (el) => {
-    const p = (S.reader?.paper?.id === el.dataset.pid ? S.reader.paper : S.detail.papers.find((x) => x.id === el.dataset.pid));
-    const set = new Set(p.topics);
+    const set = new Set(topicOwner(el).topics);
     el.checked ? set.add(el.dataset.topic) : set.delete(el.dataset.topic);
-    saveTopics(el.dataset.pid, [...set]);
+    saveTopics(el.dataset.kind, el.dataset.pid, [...set]);
   },
   'topic-remove': (el, e) => {
     e.stopPropagation();
-    const p = (S.reader?.paper?.id === el.dataset.pid ? S.reader.paper : S.detail.papers.find((x) => x.id === el.dataset.pid));
-    saveTopics(el.dataset.pid, p.topics.filter((t) => t !== el.dataset.topic));
+    saveTopics(el.dataset.kind, el.dataset.pid, topicOwner(el).topics.filter((t) => t !== el.dataset.topic));
   },
+  'open-idea': (el, e) => { e.preventDefault(); e.stopPropagation(); openItem('idea', el.dataset.id, 'ideas'); },
+  'open-source': (el, e) => { if (e.target.closest('.x')) return; openSource[el.dataset.kind](el); },
+  'thought-idea': (el, e) => {
+    e.stopPropagation();
+    const links = [{ kind: 'thought', ref: el.dataset.id }, ...(el.dataset.paper ? [{ kind: 'paper', ref: el.dataset.paper }] : [])];
+    ideaPicker({ heading: '把这个想法发展成 Idea', title: firstSentence(el.dataset.text), summary: el.dataset.text, links });
+  },
+  'msg-idea': (el) => {
+    const scope = el.dataset.scope, m = S.threads[scope].messages.find((x) => x.id === el.dataset.mid);
+    const text = m.run_text || m.text, [k, ...rest] = scope.split(':'), ref = rest.join(':');
+    const links = [{ kind: 'message', ref: m.id }, ...(k === 'paper' ? [{ kind: 'paper', ref }] : [])];
+    ideaPicker({ heading: '把这段讨论存为 Idea', title: firstSentence(text), summary: short(text, 300), links, topics: k === 'topic' ? [ref] : [] });
+  },
+  'paper-idea': (el) => ideaPicker({ heading: '把这篇论文加入 Idea', links: [{ kind: 'paper', ref: el.dataset.pid }] }),
+  'idea-join': async (el) => {
+    try {
+      for (const l of S.pickerCtx.links) await post(`/api/ideas/${enc(el.dataset.id)}/links`, l);
+      afterIdea(el.dataset.id, `已加入「${el.querySelector('.pick-title').textContent}」`);
+    } catch (e) { fail(e); }
+  },
+  'idea-edit': (el) => { S.editIdea = S.editIdea === el.dataset.id ? null : el.dataset.id; renderDetail(); $('.idea-form textarea[name="problem"]')?.focus(); },
+  'idea-stage': async (el) => {
+    const i = S.detail.idea;
+    if (el.dataset.stage === i.stage) return;
+    if (el.dataset.stage === 'refined' && !FIELDS.some(([k]) => i.body?.[k])) {
+      S.editIdea = i.id; renderDetail();
+      toast('先补全问题、方法和验证实验，再标为凝练');
+      return;
+    }
+    await post(`/api/ideas/${enc(i.id)}`, { stage: el.dataset.stage, base_rev: i.revision }).catch(fail);
+    loadDetail(true); load();
+  },
+  'idea-refine': async (el) => {
+    try { await post(`/api/ideas/${enc(el.dataset.id)}/refine`); toast('已交给 agent 凝练，完成后会更新在这里'); loadDetail(true); }
+    catch (e) { fail(e); }
+  },
+  'idea-discuss': (el) => {
+    const scope = `idea:${el.dataset.id}`;
+    S.scopeTitles[scope] = S.detail.idea.title;
+    openThreadAt(scope);
+  },
+  'idea-delete': async (el) => {
+    if (!confirm('删除这个 Idea？它的来源（论文、想法、讨论）都会保留。')) return;
+    await api('DELETE', `/api/ideas/${enc(el.dataset.id)}`).catch(fail);
+    S.sel = null; S.detail = null; toast('已删除'); load(); loadState(); renderDetail();
+  },
+  'idea-unlink': async (el, e) => {
+    e.stopPropagation();
+    await post(`/api/ideas/${enc(el.dataset.id)}/unlink`, { kind: el.dataset.kind, ref: el.dataset.ref }).catch(fail);
+    loadDetail(true);
+  },
+  'idea-add-paper': (el) => libraryPaperPicker(el.dataset.id),
+  'idea-pick-paper': async (el) => {
+    await post(`/api/ideas/${enc(S.pickerCtx.iid)}/links`, { kind: 'paper', ref: el.dataset.pid }).catch(fail);
+    closeModal(); toast('已关联'); loadDetail(true);
+  },
+  'chat-latest': async (el) => { S.threads[el.dataset.scope].pinned = false; await loadThread(el.dataset.scope); refreshChat(el.dataset.scope); },
   'paper-deep': async (el) => {
     await post(`/api/papers/${enc(el.dataset.pid)}/triage`, { triage: el.dataset.on ? 'deep' : 'inbox' }).catch(fail);
     toast(el.dataset.on ? '已加入待深读' : '已移回收件箱');
@@ -884,7 +1141,7 @@ const actions = {
   },
   scope: async (el) => { S.scope = el.dataset.scope; renderBody(); await loadThread(S.scope); renderBody(); },
   'discuss-thoughts': async () => { S.scope = 'thoughts'; go('discuss'); },
-  'goto-capture': (el, e) => { e.preventDefault(); go('inbox'); setTimeout(() => select('capture', el.dataset.id), 300); },
+  'goto-capture': (el, e) => { e.preventDefault(); openItem('capture', el.dataset.id, 'inbox'); },
   'rm-image': (el) => { S.images.splice(+el.dataset.i, 1); renderImages(); },
   'close-modal': closeModal,
 };
@@ -916,10 +1173,47 @@ document.addEventListener('change', async (e) => {
   }
 });
 
+document.addEventListener('input', (e) => {
+  if (e.target.dataset.filter !== 'pick') return;
+  const q = e.target.value.trim().toLowerCase();
+  document.querySelectorAll('.pick').forEach((el) => (el.style.display = !q || el.dataset.name.includes(q) ? '' : 'none'));
+});
+
+async function submitIdeaForm(form, submitter) {
+  const kind = form.dataset.form, f = new FormData(form);
+  if (kind === 'idea-new') {
+    const title = form.querySelector('input').value.trim();
+    if (!title) return;
+    const i = await post('/api/ideas', { title, topics: form.dataset.topic ? [form.dataset.topic] : [] });
+    form.querySelector('input').value = '';
+    toast('已记下初步 Idea');
+    S.wantSel = { kind: 'idea', id: i.id };
+    loadState(); load();
+  } else if (kind === 'idea-create') {
+    const title = (f.get('title') || '').trim();
+    if (!title) { toast('给这个 Idea 起个名字'); return; }
+    const c = S.pickerCtx;
+    const i = await post('/api/ideas', { title, summary: f.get('summary'), topics: c.topics || [], links: c.links || [] });
+    afterIdea(i.id, '已存为初步 Idea');
+  } else if (kind === 'idea-edit') {
+    const body = Object.fromEntries(FIELDS.map(([k]) => [k, (f.get(k) || '').trim() || null]));
+    const payload = { title: f.get('title'), summary: f.get('summary'), body, base_rev: +form.dataset.rev };
+    if (submitter?.dataset.stage) payload.stage = submitter.dataset.stage;
+    await post(`/api/ideas/${enc(form.dataset.id)}`, payload);
+    S.editIdea = null;
+    toast(payload.stage === 'refined' ? '已保存并标为凝练' : '已保存');
+    loadDetail(true); load();
+  }
+}
+
 document.addEventListener('submit', async (e) => {
   const form = e.target.closest('[data-form]');
   if (!form) return;
   e.preventDefault();
+  if (form.dataset.form.startsWith('idea-')) {
+    try { await submitIdeaForm(form, e.submitter); } catch (err) { fail(err); if (/已被修改/.test(err.message)) loadDetail(true); }
+    return;
+  }
   const input = form.querySelector('input, textarea');
   const value = input.value.trim();
   if (!value) return;
@@ -994,7 +1288,7 @@ function detailLive() {
   const d = S.detail;
   if (!d || d.error) return false;
   const capLive = d.cap && (['saved', 'resolving'].includes(d.cap.status) || d.cap.runs.some((r) => live(r.status)));
-  return capLive || d.papers?.some((p) => p.runs?.some((r) => live(r.status)));
+  return capLive || d.idea?.runs.some((r) => live(r.status)) || d.papers?.some((p) => p.runs?.some((r) => live(r.status)));
 }
 
 async function refresh(force) {
@@ -1002,11 +1296,14 @@ async function refresh(force) {
     await loadState();
     const v = VIEWS[S.view];
     const editing = document.activeElement?.closest?.('#list, #detail') && document.activeElement.matches('input, textarea, select');
-    if (v.kind === 'captures' || v.kind === 'papers') {
-      const list = v.kind === 'captures' ? await get(`/api/captures?view=${S.view}`) : await get('/api/papers' + (S.view === 'topic' ? `?topic=${enc(S.arg)}` : S.view === 'unsorted' ? '?unsorted=1' : ''));
-      if (force || changed('list', list)) { S.list = list; renderBody(); }
+    if (['captures', 'papers', 'ideas'].includes(v.kind)) {
+      const list = v.kind === 'captures' ? await get(`/api/captures?view=${S.view}`)
+        : v.kind === 'ideas' ? await get('/api/ideas' + (S.arg ? `?topic=${enc(S.arg)}` : ''))
+          : await get('/api/papers' + (S.view === 'topic' ? `?topic=${enc(S.arg)}` : S.view === 'unsorted' ? '?unsorted=1' : ''));
+      const typingInList = document.activeElement?.closest?.('#list') && document.activeElement.matches('input');
+      if ((force || changed('list', list)) && !typingInList) { S.list = list; renderBody(); }
     }
-    if (S.sel && (force || detailLive()) && !editing && !S.picker) await loadDetail(force);
+    if (S.sel && (force || detailLive()) && !editing && !S.picker && !S.editIdea) await loadDetail(force);
     if (S.view === 'thoughts' && force) { S.thoughts = await get('/api/thoughts'); renderBody(); }
     if (S.reader) {
       const p = await get(`/api/papers/${enc(S.reader.pid)}`);

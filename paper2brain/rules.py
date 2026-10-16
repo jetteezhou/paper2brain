@@ -159,6 +159,29 @@ def validate_report(report, pages):
     return {"sections": sections}
 
 
+IDEA_LABELS = {
+    "problem": "问题", "insight": "核心洞见", "approach": "方法思路",
+    "novelty": "与已有工作的区别", "experiment": "最小验证实验", "risks": "风险与未知",
+}
+_PAPER_CITE = re.compile(r"\[((?:arxiv|doi|openreview|pdf):[^\s\]]+?)(?:\s*p\.?\s*\d+)?\]", re.I)
+
+
+def validate_idea_draft(draft, known_papers):
+    """An agent's refined idea: every section filled, and every [paper p.N] citation pointing at a paper in the library."""
+    if not isinstance(draft, dict):
+        raise Rejected("Idea 草稿必须是 JSON 对象")
+    errors = []
+    title, summary = _text(draft, "title", errors), _text(draft, "summary", errors)
+    body = {k: _text(draft, k, errors, required=k != "novelty") for k in IDEA_LABELS}
+    cited = {parse_pid(m) for v in [summary or "", *filter(None, body.values())] for m in _PAPER_CITE.findall(v)}
+    missing = sorted(p for p in cited if p and p not in known_papers)
+    if missing:
+        errors.append(f"引用了库里没有的论文：{missing}（先用 ./p2b fetch 入库，或去掉引用）")
+    if errors:
+        raise Rejected("Idea 草稿未通过校验：\n- " + "\n- ".join(errors))
+    return {"title": title, "summary": summary, "body": body, "cited": sorted(p for p in cited if p)}
+
+
 def check_link(existing, by):
     """The user's word on a capture–paper link is final: the agent may neither re-add a link the user removed
     nor change one the user confirmed."""

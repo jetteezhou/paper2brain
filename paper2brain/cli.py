@@ -69,6 +69,26 @@ def run(args):
         return {"id": store.add_thought(args.text, "agent", args.capture, args.paper and to_pid(args.paper))}
     if cmd == "note":
         return {"id": store.add_note(args.text, "agent", args.paper and to_pid(args.paper), args.topic, args.thread)}
+    if cmd == "idea":
+        if args.action == "add":
+            links = [("paper", to_pid(p)) for p in args.paper] + [("thought", t) for t in args.thought] + \
+                    [("thread", t) for t in args.thread] + [("capture", t) for t in args.capture]
+            return {"id": store.add_idea(args.title, "agent", args.summary, args.topic, links)}
+        if args.action == "show":
+            return store.get_idea(args.id)
+        if args.action == "link":
+            ref = to_pid(args.ref) if args.kind == "paper" else args.ref
+            store.link_idea(args.id, args.kind, ref, "agent")
+            return {"linked": [args.kind, ref]}
+        if args.action == "put":
+            draft = rules.validate_idea_draft(_read_json(args.file), store.paper_ids())
+            rev = store.update_idea(args.id, "agent", args.base_rev, title=draft["title"], summary=draft["summary"],
+                                    body=draft["body"], stage=args.stage)
+            for pid in draft["cited"]:
+                store.link_idea(args.id, "paper", pid, "agent")
+            return {"accepted": True, "revision": rev}
+    if cmd == "ideas":
+        return store.list_ideas("" if args.unsorted else args.topic)
     if cmd == "show":
         if args.kind == "capture":
             cap = store.get_capture(args.id)
@@ -148,6 +168,25 @@ def parser():
     s.add_argument("--paper")
     s.add_argument("--topic")
     s.add_argument("--thread")
+
+    s = sub.add_parser("idea", help="研究 idea：add 新建初步 idea / show / link 关联来源 / put 提交凝练稿")
+    s.add_argument("action", choices=["add", "show", "link", "put"])
+    s.add_argument("id", nargs="?", help="show/link/put 时的 idea id")
+    s.add_argument("kind", nargs="?", choices=["paper", "thought", "message", "thread", "capture", "note"])
+    s.add_argument("ref", nargs="?")
+    s.add_argument("--title")
+    s.add_argument("--summary")
+    s.add_argument("--topic", action="append", default=[])
+    s.add_argument("--paper", action="append", default=[])
+    s.add_argument("--thought", action="append", default=[])
+    s.add_argument("--thread", action="append", default=[])
+    s.add_argument("--capture", action="append", default=[])
+    s.add_argument("--file", help="put：JSON 文件路径，- 表示标准输入")
+    s.add_argument("--base-rev", type=int)
+    s.add_argument("--stage", choices=["seed", "refined"], default="refined")
+    s = sub.add_parser("ideas", help="列出 idea")
+    s.add_argument("--topic")
+    s.add_argument("--unsorted", action="store_true")
 
     s = sub.add_parser("show")
     s.add_argument("kind", choices=["capture", "paper"])

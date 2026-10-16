@@ -201,20 +201,39 @@ def scope_text(scope):
         return f"主题「{ref}」下的论文。先运行 `./p2b papers --topic '{ref}'`。"
     if kind == "thoughts":
         return "用户记下的想法。先运行 `./p2b thoughts`，再结合相关论文回答。"
+    if kind == "idea":
+        i = store.get_idea(ref)
+        return (
+            f"研究 idea《{i['title'] if i else ''}》（{ref}）。先运行 `./p2b idea show {ref}` 看它的内容和来源，"
+            f"再读相关论文；帮用户把它想清楚：问题是否成立、和已有工作的区别、最小验证实验、风险。"
+        )
     return "整个论文库。用 `./p2b search` 和 `./p2b papers` 检索。"
 
 
-def discuss(scope, text):
-    thread = store.thread_for(scope)
+def discuss(scope, text, thread_id=None):
+    """Continue the scope's latest discussion, or an older one the user jumped back to."""
+    thread = store.thread_for(scope, thread_id)
     if thread["agent_id"]:
         agent_id, run_id = start("chat", thread["id"], text, agent_id=thread["agent_id"])
     else:
-        prompt = f"先读 librarian/README.md 和 librarian/discuss.md。\n讨论范围：{scope_text(scope)}\n\n用户的问题：{text}"
+        prompt = (
+            f"先读 librarian/README.md 和 librarian/discuss.md。\n讨论范围：{scope_text(scope)}\n"
+            f"讨论线程 ID：{thread['id']}（记 idea 或笔记时用 --thread 关联）\n\n用户的问题：{text}"
+        )
         agent_id, run_id = start("chat", thread["id"], prompt, name=f"讨论：{text[:40]}")
         store.set_thread_agent(thread["id"], agent_id)
     store.add_message(thread["id"], "user", text)
     store.add_message(thread["id"], "assistant", "", run_id)
     return run_id
+
+
+def refine_idea(iid):
+    i = store.get_idea(iid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/idea.md，把研究 idea {iid}《{i['title']}》凝练成可以拿去组会讨论的版本，"
+        f"用 ./p2b idea put {iid} --base-rev {i['revision']} 提交，直到校验通过。"
+    )
+    return start("refine", iid, text, name=f"凝练：{i['title'][:60]}")[1]
 
 
 def deep_read(pid):
