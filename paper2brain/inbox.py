@@ -2,6 +2,7 @@
 offline. Files: <capture_id>.json ({"id", "text", "thought"}) plus images named <capture_id>-<n>.<ext>."""
 import json
 import mimetypes
+import os
 import shutil
 import subprocess
 import time
@@ -9,7 +10,8 @@ from pathlib import Path
 
 from . import pipeline, store
 
-INBOX = Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/paper2brain-inbox"
+# Test servers on a scratch P2B_HOME must point this elsewhere, or they would take the real captures.
+INBOX = Path(os.environ.get("P2B_INBOX") or Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/paper2brain-inbox")
 # The shortcut also calls the API right away; give that agent time to take the capture before we start a second one.
 GRACE_SECONDS = 180
 

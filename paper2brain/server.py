@@ -89,6 +89,7 @@ def capture_delete(q, body, cid):
 @route("POST", "/api/captures/([^/]+)/triage")
 def capture_triage(q, body, cid):
     store.set_triage(cid, body["triage"])
+    _queue_deepread(body["triage"])
     return {"ok": True}
 
 
@@ -203,7 +204,16 @@ def paper_topics(q, body, pid):
 def paper_triage(q, body, pid):
     for c in _paper(pid)["captures"]:
         store.set_triage(c["id"], body["triage"])
+    _queue_deepread(body["triage"])
     return {"ok": True}
+
+
+def _queue_deepread(triage):
+    if triage == "deep":
+        try:
+            cursor_api.deepread_pending()
+        except cursor_api.AgentError:
+            traceback.print_exc()
 
 
 @route("POST", "/api/papers/([^/]+)/deepread")
@@ -543,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _poll_inbox():
     while True:
-        for job in (inbox.drain, cursor_api.distill_pending):
+        for job in (inbox.drain, cursor_api.distill_pending, cursor_api.deepread_pending):
             try:
                 job()
             except Exception:

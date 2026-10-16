@@ -276,6 +276,33 @@ class Store(unittest.TestCase):
         store.delete_anchor(aid)
         self.assertFalse(any(x["id"] == aid for x in store.anchors_for("arxiv:2410.24164")))
 
+    def test_marking_deep_queues_one_report_at_a_time(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api
+
+        pid = "arxiv:2410.24164"
+        store.set_fulltext(pid, "/tmp/none.pdf", PAGES)
+        store.link(self.cid, pid, "user")
+        self.assertEqual(store.deep_queue(), [])
+        store.set_triage(self.cid, "deep")
+        self.assertEqual(store.deep_queue(), [pid])
+        started = []
+
+        def fake_deep_read(p):
+            started.append(p)
+            store.add_run(f"r{len(started)}", "", "deepread", p, "", "CREATING")
+
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "deep_read", side_effect=fake_deep_read):
+            cursor_api.deepread_pending()
+            cursor_api.deepread_pending()
+            self.assertEqual(started, [pid])
+            self.assertEqual(next(p for p in store.list_papers() if p["id"] == pid)["report_status"], "running")
+            store.update_run("r1", status="ERROR")
+            cursor_api.deepread_pending()
+            self.assertEqual(started, [pid])
+
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])

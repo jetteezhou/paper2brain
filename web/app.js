@@ -363,7 +363,7 @@ function captureItem(c) {
   const title = c.title || firstLine(c.raw) || (c.image_count ? `附件 ${c.image_count} 个` : c.thought ? '一个想法' : '');
   const topics = [...new Set(c.papers.flatMap((x) => x.topics))];
   const triageBtns = S.view === 'inbox' || S.view === 'pending'
-    ? `<div class="item-actions"><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="deep" title="待深读 (D)">深读</button><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="archived" title="存档 (A)">存档</button><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="ignored" title="忽略 (X)">忽略</button></div>`
+    ? `<div class="item-actions"><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="deep" title="稍后深读 (D)：agent 先把报告写好">稍后深读</button><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="archived" title="存档 (A)">存档</button><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="ignored" title="忽略 (X)">忽略</button></div>`
     : VIEWS[S.view].kind === 'captures' ? `<div class="item-actions"><button class="btn sm ghost" data-action="triage" data-id="${c.id}" data-t="inbox">移回收件箱</button></div>` : '';
   return `<div class="item ${S.sel?.id === c.id ? 'on' : ''}" data-action="select" data-kind="capture" data-id="${c.id}">
     <div class="item-meta"><span class="src">${esc(channel(c))}${c.author ? ' · ' + esc(c.author) : ''}</span><time>${ago(c.created_at)}</time></div>
@@ -371,7 +371,7 @@ function captureItem(c) {
     ${p ? `<div class="item-paper"><span>${esc(p.title)}${c.papers.length > 1 ? ` <span class="hint">等 ${c.papers.length} 篇</span>` : ''}</span></div>` : ''}
     ${p?.tldr ? `<div class="item-tldr">${esc(p.tldr)}</div>` : ''}
     ${c.thought ? `<div class="item-thought">${esc(c.thought)}</div>` : ''}
-    <div class="item-tags">${topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${statusChip(c)}</div>
+    <div class="item-tags">${topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${statusChip(c)}${p ? reportChip(p) : ''}</div>
     ${triageBtns}
   </div>`;
 }
@@ -382,7 +382,7 @@ function paperItem(p) {
     <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${esc(p.title)}</div>
     <div class="item-meta" style="margin:3px 0 0">${esc(authors(p.authors))}</div>
     ${p.tldr ? `<div class="item-tldr">${esc(p.tldr)}</div>` : ''}
-    <div class="item-tags">${p.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${p.deep ? '<span class="chip amber">待深读</span>' : ''}${p.has_report ? '<span class="chip green">有深读报告</span>' : ''}</div>
+    <div class="item-tags">${p.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${p.deep ? '<span class="chip amber">待深读</span>' : ''}${reportChip(p)}</div>
   </div>`;
 }
 
@@ -759,12 +759,26 @@ function paperCard(p, { capture, inReader } = {}) {
     <div class="research-row"><span class="hint">研究</span>${(p.research || []).map(researchChip).join('') || '<span class="hint">还没有用到这篇</span>'}
       <button class="btn sm ghost" data-action="paper-research" data-pid="${esc(p.id)}">+ 加入研究</button></div>
     ${inReader ? '' : `<div class="paper-actions">
-      <button class="btn primary" data-action="read" data-pid="${esc(p.id)}">进入深读 →</button>
+      ${deepButton(p)}
       <button class="btn" data-action="read" data-pid="${esc(p.id)}" data-tab="chat">讨论这篇</button>
       <button class="btn" data-action="compose-paper" data-pid="${esc(p.id)}" data-label="${esc(p.title)}">以这篇开始研究</button>
-      <button class="btn ${deep ? 'primary' : ''}" data-action="paper-deep" data-pid="${esc(p.id)}" data-on="${deep ? '' : '1'}">${deep ? '已在待深读' : '加入待深读'}</button></div>`}
+      <button class="btn" data-action="paper-deep" data-pid="${esc(p.id)}" data-on="${deep ? '' : '1'}" title="${deep ? '移回收件箱' : 'agent 会先把深读报告写好，你有空时直接看'}">${deep ? '✓ 已在待深读' : '稍后深读'}</button></div>`}
   </article>`;
 }
+
+/** 'done' | 'running' | null — works for full papers and for list rows (report_status). */
+const reportState = (p) => (p.report ? 'done' : p.runs?.some((r) => r.kind === 'deepread' && live(r.status)) ? 'running' : p.report_status || null);
+
+function deepButton(p) {
+  const state = reportState(p), pid = esc(p.id);
+  if (state === 'done') return `<button class="btn primary" data-action="read" data-pid="${pid}" data-tab="report">看深读报告 →</button>`;
+  if (state === 'running') return `<button class="btn primary" data-action="read" data-pid="${pid}" data-tab="report"><span class="spin"></span>报告生成中，进入深读 →</button>`;
+  if (agentOn() && p.page_count) return `<button class="btn primary" data-action="read-deep" data-pid="${pid}" title="打开原文，agent 同时开始写深读报告">进入深读 →</button>`;
+  return `<button class="btn primary" data-action="read" data-pid="${pid}">进入深读 →</button>`;
+}
+
+const deepToast = () => (agentOn() ? '已加入待深读，agent 会先把深读报告写好' : '已加入待深读');
+const reportChip = (p) => ({ done: '<span class="chip green">有深读报告</span>', running: '<span class="chip violet">报告生成中</span>' })[reportState(p)] || '';
 
 function topicsRow(p, kind = 'paper') {
   const open = S.picker === p.id;
@@ -784,12 +798,13 @@ function topicsRow(p, kind = 'paper') {
 async function openReader(pid, page, push = true) {
   if (push) { S.pushing = true; location.hash = `#/read/${enc(pid)}${page ? '@' + page : ''}`; return; }
   const fresh = S.reader?.pid !== pid;
-  S.reader = { ...(fresh ? { tab: S.pendingTab || 'card', anchor: S.pendingAnchor } : S.reader), pid, page: page || S.reader?.page || 1 };
+  S.reader = { ...(fresh ? { tab: S.pendingTab, anchor: S.pendingAnchor } : S.reader), pid, page: page || S.reader?.page || 1 };
   S.pendingTab = null;
   S.pendingAnchor = null;
   try {
     S.reader.paper = await get(`/api/papers/${enc(pid)}`);
   } catch (e) { fail(e); return; }
+  S.reader.tab ||= reportState(S.reader.paper) ? 'report' : 'card';
   renderReader(fresh);
   if (S.reader.tab === 'chat') await loadThread(`paper:${pid}`).then(renderPanel);
   if (S.reader.tab === 'anchor' && S.reader.anchor) await loadThread(`anchor:${S.reader.anchor}`).then(renderPanel);
@@ -1093,7 +1108,10 @@ function renderPanel() {
 
 function reportHtml(p) {
   const run = p.runs.find((x) => x.kind === 'deepread' && live(x.status));
-  if (run) return `<div class="card-wait"><span class="spin"></span>Agent 正在写深读报告，通常需要几分钟…</div>${runCard(run, '深读')}`;
+  if (run) {
+    return `<div class="card-wait"><span class="spin"></span>Agent 正在写深读报告，通常需要几分钟。可以先读左边的原文，写好后会自动出现在这里。</div>
+      ${p.card?.tldr ? `<div class="tldr">${esc(p.card.tldr)}</div>` : ''}${runCard(run, '深读')}`;
+  }
   if (!p.report) {
     const last = p.runs.find((x) => x.kind === 'deepread');
     return `<div class="chat-empty" style="margin-top:40px"><b>还没有深读报告</b>
@@ -1372,7 +1390,7 @@ async function triage(id, t, quiet) {
   const prev = (S.list.find((x) => x.id === id) || S.detail?.cap || {}).triage;
   const idx = S.list.findIndex((x) => x.id === id);
   await post(`/api/captures/${enc(id)}/triage`, { triage: t });
-  const label = { deep: '已加入待深读', archived: '已存档', ignored: '已忽略', inbox: '已移回收件箱' }[t];
+  const label = { deep: deepToast(), archived: '已存档', ignored: '已忽略', inbox: '已移回收件箱' }[t];
   if (!quiet) toast(label, prev && prev !== t ? '撤销' : null, async () => { await post(`/api/captures/${enc(id)}/triage`, { triage: prev }); refresh(true); });
   await loadState();
   const v = VIEWS[S.view];
@@ -1639,7 +1657,7 @@ const actions = {
     setTimeout(() => refresh(true), 600);
   },
   'cancel-run': async (el) => { await post(`/api/runs/${enc(el.dataset.id)}/cancel`).catch(fail); refresh(true); },
-  read: (el, e) => { e.preventDefault(); S.pendingTab = el.dataset.tab || null; if (S.reader && S.reader.pid === el.dataset.pid) { S.reader.tab = el.dataset.tab || 'card'; renderPanel(); } else openReader(el.dataset.pid); },
+  read: (el, e) => { e.preventDefault(); S.pendingTab = el.dataset.tab || null; if (S.reader && S.reader.pid === el.dataset.pid) { S.reader.tab = el.dataset.tab || (reportState(S.reader.paper) ? 'report' : 'card'); renderPanel(); } else openReader(el.dataset.pid); },
   'close-reader': () => closeReader(),
   wide: () => {
     S.wide = !S.wide;
@@ -1825,8 +1843,16 @@ const actions = {
   'chat-latest': async (el) => { S.threads[el.dataset.scope].pinned = false; await loadThread(el.dataset.scope); refreshChat(el.dataset.scope); },
   'paper-deep': async (el) => {
     await post(`/api/papers/${enc(el.dataset.pid)}/triage`, { triage: el.dataset.on ? 'deep' : 'inbox' }).catch(fail);
-    toast(el.dataset.on ? '已加入待深读' : '已移回收件箱');
+    toast(el.dataset.on ? deepToast() : '已移回收件箱');
     refresh(true);
+  },
+  'read-deep': async (el, e) => {
+    e.preventDefault();
+    const pid = el.dataset.pid;
+    el.disabled = true;
+    S.pendingTab = 'report';
+    try { await post(`/api/papers/${enc(pid)}/deepread`); } catch (err) { fail(err); S.pendingTab = 'card'; }
+    openReader(pid);
   },
   deepread: async (el) => {
     el.disabled = true;
@@ -2064,6 +2090,9 @@ async function refresh(force) {
     if (S.reader) {
       const p = await get(`/api/papers/${enc(S.reader.pid)}`);
       if (force || changed('reader', p)) {
+        if (reportState(S.reader.paper) === 'running' && reportState(p) === 'done' && S.reader.tab !== 'report') {
+          toast('深读报告写好了', '去看', () => { S.reader.tab = 'report'; renderPanel(); });
+        }
         S.reader.paper = p;
         const typing = document.activeElement?.closest?.('#panel') && document.activeElement.matches('input, textarea');
         if (!typing && !S.picker && !['chat', 'anchor'].includes(S.reader.tab)) renderPanel();

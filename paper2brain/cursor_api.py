@@ -323,6 +323,26 @@ def distill_pending():
                 on_agent=lambda aid: store.kv_set(DISTILL_AGENT, aid))
 
 
+DEEP_TRIED = "deepread_tried"
+_deep_lock = threading.Lock()
+
+
+def deepread_pending():
+    """Marking a paper "待深读" asks the agent to have its report ready before the user opens it. Reports are
+    written one at a time, and each paper is tried automatically only once; regenerating stays a manual action."""
+    if not status()["enabled"]:
+        return None
+    with _deep_lock:
+        if any(r["kind"] == "deepread" for r in store.unfinished_runs()):
+            return None
+        tried = set(json.loads(store.kv_get(DEEP_TRIED) or "[]"))
+        pid = next((p for p in store.deep_queue() if p not in tried), None)
+        if not pid:
+            return None
+        store.kv_set(DEEP_TRIED, json.dumps(sorted(tried | {pid})))
+        return deep_read(pid)
+
+
 def structure_experiment(eid):
     e = store.get_experiment(eid)
     text = (

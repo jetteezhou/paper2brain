@@ -310,10 +310,36 @@ def list_captures(view="inbox", limit=200):
                 links.setdefault(r["capture_id"], []).append(
                     {"id": r["id"], "title": r["title"], "state": r["state"], "tldr": card and card.get("tldr")}
                 )
-        topics = _topics_of(c, sorted({p["id"] for ps in links.values() for p in ps}))
+        pids = sorted({p["id"] for ps in links.values() for p in ps})
+        topics = _topics_of(c, pids)
+        reports = _report_status(c, pids)
     for x in caps:
-        x["papers"] = [{**p, "topics": topics.get(p["id"], [])} for p in links.get(x["id"], [])]
+        x["papers"] = [{**p, "topics": topics.get(p["id"], []), "report_status": reports.get(p["id"])} for p in links.get(x["id"], [])]
     return caps
+
+
+def _report_status(c, pids):
+    """'done' when the paper has a deep-read report, 'running' while one is being written."""
+    if not pids:
+        return {}
+    q = ",".join("?" * len(pids))
+    out = {r[0]: "running" for r in c.execute(
+        f"SELECT DISTINCT ref FROM runs WHERE kind='deepread' AND status IN ('CREATING','RUNNING','QUEUED') AND ref IN ({q})", pids)}
+    out.update({r[0]: "done" for r in c.execute(f"SELECT id FROM papers WHERE report IS NOT NULL AND id IN ({q})", pids)})
+    return out
+
+
+def deep_queue():
+    """Papers the user marked for deep reading that have full text but no report and no report being written,
+    most recently marked first."""
+    with tx() as c:
+        return [r[0] for r in c.execute(
+            "SELECT p.id FROM papers p JOIN capture_papers cp ON cp.paper_id=p.id AND cp.state='confirmed' "
+            "JOIN captures c ON c.id=cp.capture_id AND c.triage='deep' "
+            "WHERE p.report IS NULL AND p.page_count > 0 "
+            "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ref=p.id AND r.kind='deepread' AND r.status IN ('CREATING','RUNNING','QUEUED')) "
+            "GROUP BY p.id ORDER BY max(COALESCE((SELECT max(e.at) FROM events e WHERE e.action='capture.triage' AND e.target=c.id), c.created_at)) DESC"
+        )]
 
 
 def counts():
@@ -413,10 +439,12 @@ def list_papers(topic=None):
     with tx() as c:
         out = _rows(c.execute(sql, args))
         topics = _topics_of(c, [p["id"] for p in out])
+        reports = _report_status(c, [p["id"] for p in out])
     for p in out:
         card = p.pop("card")
         p["tldr"] = card and card.get("tldr")
         p["topics"] = topics[p["id"]]
+        p["report_status"] = reports.get(p["id"])
     return out
 
 
