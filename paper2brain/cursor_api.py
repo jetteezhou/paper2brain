@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from . import store
 
@@ -36,7 +37,7 @@ class AgentError(RuntimeError):
     pass
 
 
-def _request(method, path, body=None, accept="application/json"):
+def _request(method, path, body=None, accept="application/json", timeout=None):
     cfg = config()
     if not cfg["api_key"]:
         raise AgentError("未配置 CURSOR_API_KEY")
@@ -47,14 +48,22 @@ def _request(method, path, body=None, accept="application/json"):
         headers={"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json", "Accept": accept},
     )
     try:
-        return urllib.request.urlopen(req, timeout=60 if accept == "application/json" else 900)
+        return urllib.request.urlopen(req, timeout=timeout or (60 if accept == "application/json" else 900))
     except urllib.error.HTTPError as e:
         raise AgentError(f"Cursor API {e.code}：{e.read().decode(errors='replace')[:300]}") from None
 
 
-def _json(method, path, body=None):
-    with _request(method, path, body) as r:
+def _json(method, path, body=None, timeout=None):
+    with _request(method, path, body, timeout=timeout) as r:
         return json.loads(r.read() or b"{}")
+
+
+def _latest_run(agent_id):
+    """After a create or follow-up whose response never arrived: the run it started, if it went through."""
+    info = _json("GET", f"/agents/{agent_id}")
+    if not info.get("latestRunId"):
+        raise AgentError("Cursor 没有收到这次请求，请重试")
+    return {"id": info["latestRunId"], "status": "RUNNING"}
 
 
 def _prompt(text, images):
@@ -70,10 +79,17 @@ def start(kind, ref, text, images=(), name=None, agent_id=None):
     cfg = config()
     if not cfg["machine"]:
         raise AgentError("未配置 P2B_MACHINE（本机 worker 的名字）")
+    # Creating an agent on a machine can take longer than the response timeout even though it succeeds; choosing the
+    # agent id ourselves lets us find the run afterwards instead of losing track of a running agent.
     if agent_id:
-        run = _json("POST", f"/agents/{agent_id}/runs", {"prompt": _prompt(text, images)})["run"]
+        try:
+            run = _json("POST", f"/agents/{agent_id}/runs", {"prompt": _prompt(text, images)}, timeout=180)["run"]
+        except (TimeoutError, urllib.error.URLError, ConnectionError):
+            run = _latest_run(agent_id)
     else:
+        agent_id = f"bc-{uuid.uuid4()}"
         body = {
+            "agentId": agent_id,
             "prompt": _prompt(text, images),
             "env": {"type": "machine", "name": cfg["machine"]},
             "repos": [{"url": cfg["repo"]}],
@@ -82,8 +98,10 @@ def start(kind, ref, text, images=(), name=None, agent_id=None):
             body["name"] = name[:100]
         if cfg["model"]:
             body["model"] = {"id": cfg["model"]}
-        res = _json("POST", "/agents", body)
-        run, agent_id = res["run"], res["agent"]["id"]
+        try:
+            run = _json("POST", "/agents", body, timeout=180)["run"]
+        except (TimeoutError, urllib.error.URLError, ConnectionError):
+            run = _latest_run(agent_id)
     store.add_run(run["id"], agent_id, kind, ref, text, run.get("status", "CREATING"))
     watch(agent_id, run["id"])
     return agent_id, run["id"]

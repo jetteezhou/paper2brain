@@ -19,4 +19,10 @@ BIN="$(agent_bin)"
 [ -n "$BIN" ] || { echo "找不到 Cursor CLI，请先运行：curl https://cursor.com/install -fsS | bash"; sleep 300; exit 1; }
 NAME="$(read_cfg machine)"
 echo "$(date '+%F %T') 启动 worker：$BIN（名字 ${NAME:-p2b-mac}）"
-CURSOR_API_KEY="$(read_cfg cursor_api_key)" exec "$BIN" worker --worker-dir "$PWD" --name "${NAME:-p2b-mac}" --idle-release-timeout 0 start
+DATA="${P2B_HOME:-$HOME/paper2brain-data}/worker"
+mkdir -p "$DATA"
+# clean environment: when launched from inside another Cursor agent session, inherited CURSOR_* variables would
+# make this worker share that session's worker id and lock
+exec env -i HOME="$HOME" USER="$USER" PATH="$PATH" LANG="${LANG:-en_US.UTF-8}" TMPDIR="${TMPDIR:-/tmp}" \
+  CURSOR_API_KEY="$(read_cfg cursor_api_key)" \
+  "$BIN" worker --worker-dir "$PWD" --data-dir "$DATA" --name "${NAME:-p2b-mac}" --idle-release-timeout 0 start
