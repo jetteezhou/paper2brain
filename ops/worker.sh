@@ -1,4 +1,22 @@
 #!/bin/sh
-# Cursor worker for this repo: agents started through the API (env.type "machine") run their tools here.
+# Cursor worker for this repo, kept connected: agents started through the API (env.type "machine") run their tools here.
+# Waits until ~/paper2brain-data/config.json has a cursor_api_key, so it can be installed before the key exists.
 cd "$(dirname "$0")/.." || exit 1
-exec agent worker start --name "${P2B_MACHINE:-p2b-mac}" --worker-dir "$PWD"
+CONFIG="${P2B_HOME:-$HOME/paper2brain-data}/config.json"
+read_cfg() { "$PWD/.venv/bin/python" -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or '')" "$CONFIG" "$1" 2>/dev/null; }
+
+agent_bin() {
+  for b in agent cursor-agent "$HOME/.local/bin/agent"; do command -v "$b" >/dev/null 2>&1 && { command -v "$b"; return; }; done
+  # the CLI bundled with the Cursor app, newest version first
+  ls -d "$HOME/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/share/cursor-agent/versions/"*/cursor-agent 2>/dev/null | sort | tail -1
+}
+
+while [ -z "$(read_cfg cursor_api_key)" ]; do
+  echo "$(date '+%F %T') 等待 $CONFIG 里的 cursor_api_key …"
+  sleep 30
+done
+BIN="$(agent_bin)"
+[ -n "$BIN" ] || { echo "找不到 Cursor CLI，请先运行：curl https://cursor.com/install -fsS | bash"; sleep 300; exit 1; }
+NAME="$(read_cfg machine)"
+echo "$(date '+%F %T') 启动 worker：$BIN（名字 ${NAME:-p2b-mac}）"
+CURSOR_API_KEY="$(read_cfg cursor_api_key)" exec "$BIN" worker --worker-dir "$PWD" --name "${NAME:-p2b-mac}" --idle-release-timeout 0 start
