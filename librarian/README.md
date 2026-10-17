@@ -18,6 +18,8 @@
 ./p2b show paper <paper_id>    # 论文详情：元数据、快读卡、主题、来源、想法、笔记
 ./p2b text <paper_id> --pages 1-3
 ./p2b find "English title"     # 按标题检索（arXiv + Crossref），返回 pid 和相似度
+./p2b find --keywords "flow matching VLA"   # 按关键词检索 arXiv（全部命中），找论文时用（见 librarian/find.md）
+./p2b figures <paper_id>       # 从 PDF 裁出的插图（编号、页码、图注、图片路径）和章节目录
 ./p2b fetch <论文>              # 拉取元数据和全文
 ./p2b link <capture_id> <论文> --evidence "为什么判定是这篇"
 ./p2b card put <arxiv:id> --file /tmp/card.json

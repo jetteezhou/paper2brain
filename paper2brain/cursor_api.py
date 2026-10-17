@@ -249,6 +249,15 @@ def scope_text(scope):
         return f"主题「{ref}」下的论文。先运行 `./p2b papers --topic '{ref}'`。"
     if kind == "thoughts":
         return "用户记下的想法。先运行 `./p2b thoughts`，再结合相关论文回答。"
+    if kind == "find":
+        cap = store.get_capture(ref) or {}
+        return (
+            f"用户请你找的一组论文（捕获 {ref}）：「{cap.get('raw', '')}」。先运行 `./p2b show capture {ref}` 看已找到的论文；"
+            f"比较时一点对应一篇。还要补找时按 librarian/find.md 关联到这个捕获。"
+        )
+    if kind == "papers":
+        listed = "；".join(f"{pid}《{(store.get_paper(pid, with_anchors=False) or {}).get('title', '')}》" for pid in ref.split("|"))
+        return f"用户选中一起讨论的几篇论文：{listed}。先逐篇运行 `./p2b show paper <id>`；比较时一点对应一篇，引用页码。"
     if kind == "anchor":
         a = store.get_anchor(ref) or {}
         pid, page, section = a.get("paper_id"), a.get("page"), a.get("section")
@@ -300,6 +309,36 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
 
     return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare,
                        on_agent=None if thread["agent_id"] else lambda aid: store.set_thread_agent(thread["id"], aid))
+
+
+def find_papers(capture_id):
+    """The request opens the discussion of the found set (scope find:<capture>): the same agent searches, links its
+    picks to the capture, then compares them; follow-ups continue with it."""
+    cap = store.get_capture(capture_id)
+    thread = store.thread_for(f"find:{capture_id}")
+    prompt = (
+        f"先读 librarian/README.md、librarian/find.md 和 librarian/discuss.md。\n"
+        f"用户请你找论文（捕获 ID：{capture_id}，讨论线程 ID：{thread['id']}）。\n\n用户的原话：{cap['raw']}"
+    )
+
+    def prepare(placeholder):
+        store.add_message(thread["id"], "user", cap["raw"])
+        store.add_message(thread["id"], "assistant", "", placeholder)
+
+    def on_agent(aid):
+        store.set_thread_agent(thread["id"], aid)
+        store.update_capture(capture_id, agent_id=aid)
+
+    return start_async("find", capture_id, prompt, name=f"找论文：{cap['raw'][:40]}", prepare=prepare, on_agent=on_agent)
+
+
+def write_card(pid):
+    p = store.get_paper(pid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/capture.md，按第 3、4 节为论文 {pid}《{p['title']}》写快读卡并归入主题"
+        f"（这篇已经在库里，不用关联捕获）。用 ./p2b card put 提交，直到校验通过。"
+    )
+    return start_async("card", pid, text, name=f"快读卡：{p['title'][:60]}")
 
 
 DISTILL_AGENT, DISTILL_TRIED = "distill_agent", "distill_tried"

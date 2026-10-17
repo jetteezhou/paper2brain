@@ -101,7 +101,8 @@ def _text(d, key, errors, required=True):
     return None
 
 
-def validate_card(card, pages):
+def validate_card(card, pages, figures=()):
+    """figures: the figures extracted from the PDF ({n, ...}); the card may pick up to four of them by number."""
     if not isinstance(card, dict):
         raise Rejected("快读卡必须是 JSON 对象")
     if not pages:
@@ -132,6 +133,19 @@ def validate_card(card, pages):
         for t in takes
         if isinstance(t, dict) and isinstance(t.get("take"), str) and t["take"].strip()
     ]
+    picks, known = card.get("figures") or [], sorted(f["n"] for f in figures)
+    if not isinstance(picks, list) or len(picks) > 4:
+        errors.append("figures 是数组，最多 4 项 [{n, note}]：只放方法 / 架构图和最能说明结果的图")
+        picks = []
+    out["figures"] = []
+    for f in picks:
+        n = f.get("n") if isinstance(f, dict) else f
+        if n not in known:
+            errors.append(f"figures 里的图 {n} 不存在。可用：{known}（./p2b figures <论文> 查看）" if known
+                          else "这篇论文没有提取到插图，figures 留空")
+            continue
+        note = str(f.get("note") or "").strip() if isinstance(f, dict) else ""
+        out["figures"].append({"n": n, "note": note or None})
     if errors:
         raise Rejected("快读卡未通过校验：\n- " + "\n- ".join(errors))
     return out

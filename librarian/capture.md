@@ -46,12 +46,14 @@
   ],
   "resources": {"code": "https://github.com/... 或 null", "project": null, "data": null, "real_robot": true, "platform": "Franka / ALOHA / 未知"},
   "relevance": "和用户的关系：回应用户的想法；它在主题树里的位置；和库里哪几篇接近（用 ./p2b search 查）",
-  "takes": [{"capture_id": "<捕获 id>", "take": "这篇解读的核心观点一句话", "consistent": true}]
+  "takes": [{"capture_id": "<捕获 id>", "take": "这篇解读的核心观点一句话", "consistent": true}],
+  "figures": [{"n": 3, "note": "方法总览：看 VLM 和 action expert 怎么接，噪声从哪进"}]
 }
 ```
 
 - `results` 至少 1 条，最好 2-4 条。`quote` 必须**逐字**来自原文（空白差异无所谓），`page` 写页码。校验会逐条核对，找不到就拒绝。
 - `takes`：每条关联到这篇论文的解读，用一句话总结它的观点；解读说法和原文明显不符时，`consistent` 写 `false`。
+- `figures`：卡片上左右翻看的插图，1–3 张，按阅读顺序。`./p2b figures <id>` 列出从 PDF 裁出的图（编号、页码、图注、图片路径，图片可以直接打开看）。首选**方法 / 架构总览图**，其次是最能说明核心结果的一张；数据集展示、任务截图一般不选。`n` 必须是列出的编号；`note` 一句话告诉用户看图时该看哪里。没有提取到插图就省略这个字段。
 - 提交：`./p2b card put <arxiv:id> --file /tmp/card.json`。如果已有卡片（`show paper` 里的 `card_rev` > 0），只有新解读带来新观点时才更新，提交时带上 `--base-rev`。
 
 ## 4. 归入主题

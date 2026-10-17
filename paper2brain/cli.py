@@ -6,7 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import pipeline, repos, rules, sources, store
+from . import pipeline, repos, rules, sources, store, structure
 
 
 def to_pid(s):
@@ -42,7 +42,14 @@ def run(args):
         p = pipeline.resolve_paper(args.paper)
         return {k: p[k] for k in ("id", "title", "page_count", "card_rev", "report_rev")}
     if cmd == "find":
+        if args.keywords:
+            return sources.keyword_search(args.title.split())
         return sources.find_paper(args.title)
+    if cmd == "figures":
+        pid = to_pid(args.paper)
+        s = structure.get(pid)
+        figdir = store.paper_dir(pid) / "figures"
+        return {"figures": [{**f, "image": str(figdir / f"{f['n']}.png")} for f in s["figures"]], "outline": s["outline"]}
     if cmd == "link":
         pid = pipeline.resolve_paper(args.paper)["id"]
         store.link(args.capture_id, pid, "agent", evidence=args.evidence)
@@ -55,7 +62,8 @@ def run(args):
         pid = to_pid(args.paper)
         pages = store.pages(pid)
         if cmd == "card":
-            rev = store.put_card(pid, rules.validate_card(_read_json(args.file), pages), "agent", args.base_rev)
+            card = rules.validate_card(_read_json(args.file), pages, structure.get(pid)["figures"])
+            rev = store.put_card(pid, card, "agent", args.base_rev)
         else:
             rev = store.put_report(pid, rules.validate_report(_read_json(args.file), pages), "agent", args.base_rev)
         return {"accepted": True, "revision": rev}
@@ -177,7 +185,10 @@ def parser():
 
     sub.add_parser("ingest", help="规则预处理：抓快照、找论文、拉全文").add_argument("capture_id")
     sub.add_parser("fetch", help="拉取论文元数据与全文：arXiv/DOI/OpenReview 链接或编号，或 PDF 链接").add_argument("paper")
-    sub.add_parser("find", help="按标题检索论文（arXiv + Crossref）").add_argument("title")
+    s = sub.add_parser("find", help="按标题检索论文（arXiv + Crossref）；--keywords 按关键词（全部命中）检索 arXiv")
+    s.add_argument("title")
+    s.add_argument("--keywords", action="store_true")
+    sub.add_parser("figures", help="论文插图（编号、页码、图注、图片路径）和章节目录").add_argument("paper")
 
     s = sub.add_parser("link", help="把捕获关联到论文")
     s.add_argument("capture_id")

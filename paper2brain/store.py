@@ -120,9 +120,10 @@ def new_id():
     return str(uuid.uuid4())
 
 
-def paper_dir(paper_id):
+def paper_dir(paper_id, create=True):
     path = home() / "papers" / paper_id.replace(":", "_").replace("/", "_")
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -313,8 +314,10 @@ def list_captures(view="inbox", limit=200):
         pids = sorted({p["id"] for ps in links.values() for p in ps})
         topics = _topics_of(c, pids)
         reports = _report_status(c, pids)
+        jumps = _jumps(c, pids)
     for x in caps:
-        x["papers"] = [{**p, "topics": topics.get(p["id"], []), "report_status": reports.get(p["id"])} for p in links.get(x["id"], [])]
+        x["papers"] = [{**p, "topics": topics.get(p["id"], []), "report_status": reports.get(p["id"]), "jumps": jumps.get(p["id"])}
+                       for p in links.get(x["id"], [])]
     return caps
 
 
@@ -326,6 +329,27 @@ def _report_status(c, pids):
     out = {r[0]: "running" for r in c.execute(
         f"SELECT DISTINCT ref FROM runs WHERE kind='deepread' AND status IN ('CREATING','RUNNING','QUEUED') AND ref IN ({q})", pids)}
     out.update({r[0]: "done" for r in c.execute(f"SELECT id FROM papers WHERE report IS NOT NULL AND id IN ({q})", pids)})
+    return out
+
+
+def _jumps(c, pids):
+    """Where a title card can take the reader directly: report sections, the PDF's method / experiments / conclusion,
+    figures, pinned passages and the paper's discussion."""
+    if not pids:
+        return {}
+    q = ",".join("?" * len(pids))
+    heads = {r["id"]: [s["heading"] for s in json.loads(r["report"])["sections"]]
+             for r in c.execute(f"SELECT id, report FROM papers WHERE report IS NOT NULL AND id IN ({q})", pids)}
+    anchors = {r[0]: r[1] for r in c.execute(f"SELECT paper_id, count(*) FROM anchors WHERE paper_id IN ({q}) GROUP BY paper_id", pids)}
+    chats = {r[0][6:]: r[1] for r in c.execute(
+        f"SELECT t.scope, count(*) FROM threads t JOIN messages m ON m.thread_id=t.id WHERE m.role='user' AND t.scope IN ({q}) "
+        f"GROUP BY t.scope", [f"paper:{p}" for p in pids])}
+    out = {}
+    for pid in pids:
+        path = paper_dir(pid, create=False) / "structure.json"
+        s = json.loads(path.read_text()) if path.exists() else {}
+        out[pid] = {"report": heads.get(pid, []), "sections": s.get("key", {}), "figures": len(s.get("figures", [])),
+                    "anchors": anchors.get(pid, 0), "chat": chats.get(pid, 0)}
     return out
 
 
@@ -378,6 +402,7 @@ def upsert_paper(pid, title, authors=None, abstract=None, published=None, url=No
 
 def set_fulltext(pid, pdf_path, pages):
     (paper_dir(pid) / "pages.json").write_text(json.dumps(pages, ensure_ascii=False))
+    (paper_dir(pid) / "structure.json").unlink(missing_ok=True)  # figures and outline come from the PDF
     with tx() as c:
         c.execute("UPDATE papers SET pdf_path=?, page_count=? WHERE id=?", (str(pdf_path), len(pages), pid))
 
@@ -440,11 +465,13 @@ def list_papers(topic=None):
         out = _rows(c.execute(sql, args))
         topics = _topics_of(c, [p["id"] for p in out])
         reports = _report_status(c, [p["id"] for p in out])
+        jumps = _jumps(c, [p["id"] for p in out])
     for p in out:
         card = p.pop("card")
         p["tldr"] = card and card.get("tldr")
         p["topics"] = topics[p["id"]]
         p["report_status"] = reports.get(p["id"])
+        p["jumps"] = jumps[p["id"]]
     return out
 
 

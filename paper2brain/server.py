@@ -11,7 +11,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import cursor_api, export, inbox, pipeline, repos, rules, store
+from . import cursor_api, export, inbox, pipeline, repos, rules, store, structure
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 mimetypes.add_type("text/javascript", ".mjs")  # ES modules (PDF.js) must not be served as octet-stream
@@ -70,6 +70,23 @@ def capture_add(q, body):
     cap, _ = store.add_capture(str(uuid.uuid4()), body.get("text", ""), "web", body.get("thought"), images)
     bg(pipeline.process, cap["id"])
     return cap
+
+
+@route("POST", "/api/find")
+def find(q, body):
+    """"帮我找……的论文": the agent searches, adds what it picks to the library under one capture, and opens a
+    discussion of the set. Without the agent, the request is an ordinary capture and rules search arXiv by keyword."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise rules.Rejected("说说想找什么样的论文")
+    if not cursor_api.status()["enabled"]:
+        cap, _ = store.add_capture(str(uuid.uuid4()), text, "web")
+        bg(pipeline.process, cap["id"], False)
+        return {**cap, "agent": False}
+    cap, _ = store.add_capture(str(uuid.uuid4()), text, "find")
+    store.update_capture(cap["id"], status="finding", channel="find", title="找论文：" + pipeline.short_title(text, 60))
+    cursor_api.find_papers(cap["id"])
+    return {**store.get_capture(cap["id"]), "agent": True}
 
 
 @route("GET", "/api/captures/([^/]+)")
@@ -154,7 +171,20 @@ def _paper(pid):
 
 @route("GET", "/api/papers/([^/]+)")
 def paper_get(q, body, pid):
-    return _paper(pid)
+    p = _paper(pid)
+    s = structure.get(pid)
+    return {**p, "figures": s["figures"], "key_figures": structure.key_figures(s, p["card"]), "outline": s["outline"],
+            "key_sections": s["key"]}
+
+
+@route("GET", r"/api/papers/([^/]+)/figures/(\d+)")
+def paper_figure(q, body, pid, n):
+    return Reply(store.paper_dir(pid, create=False) / "figures" / f"{int(n)}.png", "image/png")
+
+
+@route("POST", "/api/papers/([^/]+)/card")
+def paper_card(q, body, pid):
+    return {"run_id": cursor_api.write_card(_paper(pid)["id"])}
 
 
 @route("GET", "/api/papers/([^/]+)/pdf")
@@ -553,7 +583,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _poll_inbox():
     while True:
-        for job in (inbox.drain, cursor_api.distill_pending, cursor_api.deepread_pending):
+        for job in (inbox.drain, cursor_api.distill_pending, cursor_api.deepread_pending, structure.backfill):
             try:
                 job()
             except Exception:

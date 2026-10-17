@@ -303,6 +303,40 @@ class Store(unittest.TestCase):
             cursor_api.deepread_pending()
             self.assertEqual(started, [pid])
 
+    def test_figures_are_cropped_from_captions_and_picked_by_number(self):
+        import pymupdf
+
+        from paper2brain import pipeline, structure
+
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 60), "Flow Policies for Bimanual Robots")
+        page.insert_textbox(pymupdf.Rect(72, 80, 540, 200), "Body text. " * 60)
+        page.draw_rect(pymupdf.Rect(150, 230, 460, 420), color=(0, 0, 1), fill=(0.8, 0.9, 1))
+        page.insert_textbox(pymupdf.Rect(72, 430, 540, 470), "Figure 1: Overview of our architecture, from images to actions.")
+        page.insert_textbox(pymupdf.Rect(72, 480, 540, 600), "More body text that discusses the results. " * 12)
+        paper = pipeline.paper_from_pdf(doc.tobytes())
+        s = structure.extract(paper["id"])
+        self.assertEqual([(f["n"], f["page"]) for f in s["figures"]], [(1, 1)])
+        self.assertTrue((store.paper_dir(paper["id"]) / "figures" / "1.png").exists())
+        self.assertEqual(structure.key_figures(s)[0]["n"], 1)
+        card = rules.validate_card({**CARD, "results": [{"text": "x", "quote": "discusses the results", "page": 1}],
+                                    "figures": [{"n": 1, "note": "先看动作头"}]}, store.pages(paper["id"]), s["figures"])
+        self.assertEqual(card["figures"], [{"n": 1, "note": "先看动作头"}])
+        self.assertEqual(structure.key_figures(s, card)[0]["note"], "先看动作头")
+        with self.assertRaisesRegex(rules.Rejected, r"图 7 不存在"):
+            rules.validate_card({**card, "figures": [{"n": 7}]}, store.pages(paper["id"]), s["figures"])
+
+    def test_title_card_knows_where_to_jump(self):
+        pid = "arxiv:2410.24164"
+        store.link(self.cid, pid, "user")
+        store.put_report(pid, {"sections": [{"heading": "方法", "body": "b", "citations": []}]}, "agent")
+        store.add_anchor(pid, "card", "flow matching", "user")
+        store.add_message(store.thread_for(f"paper:{pid}")["id"], "user", "为什么用 flow matching？")
+        j = next(p for p in store.list_papers() if p["id"] == pid)["jumps"]
+        self.assertEqual((j["report"], j["anchors"], j["chat"]), (["方法"], 1, 1))
+        self.assertEqual(store.list_captures("inbox")[0]["papers"][0]["jumps"]["report"], ["方法"])
+
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])
