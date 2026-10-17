@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
 import { html, get, post, del, enc, short, idLabel, href, Md, citeHtml } from './lib.js';
 import {
-  route, baseRoute, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, modalSig, registerAction, openReader,
+  route, baseRoute, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, registerAction, openReader,
 } from './state.js';
 import { PaperCard, PaperNotes, PdfButton, RunCard, reportState } from './papers.js';
 import { Chat } from './discuss.js';
@@ -257,16 +257,7 @@ export function Reader() {
     if (prevReport.current === 'running' && state === 'done' && view.tab !== 'report') toast('深读报告写好了', '去看', () => setView((v) => ({ ...v, tab: 'report' })));
     prevReport.current = state;
   }, [p]);
-  useEffect(() => {
-    const key = (e) => {
-      if (e.key !== 'Escape' || modalSig.value) return;
-      if (e.target instanceof Element && e.target.closest('input, textarea')) return e.target.blur();
-      closeReader();
-    };
-    document.addEventListener('keydown', key);
-    return () => document.removeEventListener('keydown', key);
-  }, []);
-  if (!p) return html`<div id="reader"><div class="reader-top"><button class="btn sm ghost" onClick=${closeReader}>← 返回 <kbd>Esc</kbd></button><div class="title"><span class="spin"></span></div></div></div>`;
+  if (!p) return html`<div id="reader"><div class="reader-top"><button class="btn sm ghost" onClick=${closeReader}>← 返回</button><div class="title"><span class="spin"></span></div></div></div>`;
   const tab = view.tab || (reportState(p) ? 'report' : 'card');
   const setTab = (t, extra = {}) => setView((v) => ({ ...v, tab: t, ...extra }));
   const locate = (a) => {
@@ -285,7 +276,7 @@ export function Reader() {
   else body = html`<${PaperNotes} p=${p} flush />`;
   return html`<div id="reader">
     <div class="reader-top">
-      <button class="btn sm ghost" onClick=${closeReader}>← 返回 <kbd>Esc</kbd></button>
+      <button class="btn sm ghost" onClick=${closeReader}>← 返回</button>
       <div class="title">${p.title}</div>
       ${p.pdf_path && p.outline?.length ? html`<select class="toc" title="跳到原文的某一节" onChange=${(e) => { const [pg, ...t] = e.target.value.split('|'); e.target.value = ''; if (pg) jumpPdf(+pg, t.join('|')); }}>
         <option value="">原文目录…</option>${p.outline.map((s) => html`<option value=${`${s.page}|${s.title}`}>${'　'.repeat(Math.min(s.level, 3) - 1)}${short(s.title, 48)}　p.${s.page}</option>`)}</select>` : null}

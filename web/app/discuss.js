@@ -405,7 +405,6 @@ function Outline({ list, selId, onSelect }) {
     }
     if (k === 'e' || k === 'F2') { e.preventDefault(); return setRenaming(cur.id); }
     if (k === 'z') { e.preventDefault(); zoom.value = cur.id; return; }
-    if (k === 'Escape' && zoom.value) { e.preventDefault(); zoom.value = tree.byId[zoom.value]?.parent_id || null; return; }
     if (k === 'Enter') { e.preventDefault(); document.querySelector('#detail .chat-input textarea')?.focus(); return; }
     if (k === 'b') {
       e.preventDefault();
