@@ -104,17 +104,20 @@ def extract(pid):
     if p and p["pdf_path"]:
         figdir = folder / "figures"
         figdir.mkdir(exist_ok=True)
-        with pymupdf.open(p["pdf_path"]) as doc:
-            seen = set()
-            for number, page in enumerate(doc, 1):
-                for n, caption, box in _figures(page):
-                    if n in seen:
-                        continue
-                    seen.add(n)
-                    pix = page.get_pixmap(clip=box, dpi=150)
-                    pix.save(figdir / f"{n}.png")
-                    out["figures"].append({"n": n, "page": number, "caption": caption[:600], "w": pix.width, "h": pix.height})
-            out["outline"] = _outline(doc)
+        try:
+            with pymupdf.open(p["pdf_path"]) as doc:
+                seen = set()
+                for number, page in enumerate(doc, 1):
+                    for n, caption, box in _figures(page):
+                        if n in seen:
+                            continue
+                        seen.add(n)
+                        pix = page.get_pixmap(clip=box, dpi=150)
+                        pix.save(figdir / f"{n}.png")
+                        out["figures"].append({"n": n, "page": number, "caption": caption[:600], "w": pix.width, "h": pix.height})
+                out["outline"] = _outline(doc)
+        except Exception as e:  # unreadable PDF: cache the failure so neither page views nor the backfill retry it
+            out["error"] = str(e)[:300]
         out["key"] = _key_sections(out["outline"])
     (folder / "structure.json").write_text(json.dumps(out, ensure_ascii=False))
     return out

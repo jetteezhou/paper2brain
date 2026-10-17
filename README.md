@@ -50,7 +50,7 @@ launchctl load ~/Library/LaunchAgents/com.paper2brain.server.plist
 
 ```
 paper2brain/   代码：store（唯一碰 SQLite）、rules（写入校验）、sources（抓取）、pipeline（规则预处理）、
-               cursor_api（agent）、server（Web API）、cli（./p2b）、inbox（iCloud 收件箱）
+               structure（插图与目录）、cursor_api（agent）、server（Web API）、cli（./p2b）、inbox（iCloud 收件箱）
 librarian/     agent 工作规范
 web/           Web 界面（无构建步骤）
 shortcuts/     iPhone 快捷指令搭建说明
