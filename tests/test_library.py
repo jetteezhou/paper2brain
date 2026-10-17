@@ -8,6 +8,7 @@ os.environ["P2B_HOME"] = tempfile.mkdtemp(prefix="p2b-test-")
 
 from paper2brain import rules, store  # noqa: E402
 
+AGENT_CFG = {"machine": "m", "repo": "r", "model": None, "api_key": "k", "max_agents": 2, "run_timeout_min": 60}
 PAGES = [
     "Intro. We propose a flow matching action expert.",
     "Results. Our model controls robots at frequencies of up to 50 Hz for dexterous tasks such as laundry folding.",
@@ -393,14 +394,17 @@ class Store(unittest.TestCase):
         from paper2brain import cursor_api, server
 
         with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
-                mock.patch.object(cursor_api, "config", return_value={"machine": "m"}), \
-                mock.patch.object(cursor_api, "start", return_value=("bc-1", "run-1")):
+                mock.patch.object(cursor_api, "config", return_value=AGENT_CFG), \
+                mock.patch.object(cursor_api, "_spawn"):
             cap = server.find({}, {"text": "帮我找 flow matching 做动作头的论文"})
         self.assertEqual((cap["source"], cap["channel"], cap["status"]), ("find", "find", "finding"))
         self.assertEqual(cap["runs"][0]["kind"], "find")
-        msgs = store.thread_for(f"find:{cap['id']}")["messages"]
+        thread = store.thread_for(f"find:{cap['id']}")
+        msgs = thread["messages"]
         self.assertEqual([m["role"] for m in msgs], ["user", "assistant"])
         self.assertEqual(msgs[1]["run_id"], cap["runs"][0]["id"])
+        self.assertEqual(thread["agent_id"], cap["runs"][0]["agent_id"])
+        self.assertEqual(cap["agent_id"], cap["runs"][0]["agent_id"])
         self.assertIn("flow matching 做动作头", cursor_api.scope_text(f"find:{cap['id']}"))
 
     def test_topic_tree_is_seeded(self):
@@ -455,6 +459,83 @@ class scratch_home:
 
     def __exit__(self, *exc):
         os.environ["P2B_HOME"] = self.old
+
+
+class Agents(unittest.TestCase):
+    """Run queue, timeouts and restart recovery, with the Cursor API mocked out."""
+    def setUp(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api
+        self.api, self.home = cursor_api, scratch_home()
+        self.home.__enter__()
+        self.cfg = dict(AGENT_CFG)
+        self.spawned = []
+        self.patches = [mock.patch.object(cursor_api, "config", side_effect=lambda: self.cfg),
+                        mock.patch.object(cursor_api, "_spawn", side_effect=lambda fn, *a: self.spawned.append((fn.__name__, a)))]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.home.__exit__()
+
+    status = staticmethod(lambda rid: store.get_run(rid)["status"])
+
+    def test_queue_holds_runs_beyond_the_limit_and_one_per_agent(self):
+        self.cfg["max_agents"] = 1
+        a = self.api.start_async("card", "p1", "写卡 1")
+        b = self.api.start_async("card", "p2", "写卡 2")
+        self.assertEqual((self.status(a), self.status(b)), ("CREATING", "WAITING"))
+        self.assertEqual(len(self.spawned), 1)
+        store.update_run(a, status="FINISHED")
+        self.api.pump()
+        self.assertEqual((self.status(b), len(self.spawned)), ("CREATING", 2))
+        self.cfg["max_agents"] = 5
+        c = self.api.start_async("chat", "t1", "问 1", agent_id="bc-same")
+        d = self.api.start_async("chat", "t1", "问 2", agent_id="bc-same")
+        self.assertEqual((self.status(c), self.status(d)), ("CREATING", "WAITING"))
+
+    def test_new_agent_is_bound_at_once_and_forgotten_if_never_created(self):
+        from unittest import mock
+        t = store.thread_for("library")
+        pid = self.api.start_async("chat", t["id"], "你好")
+        aid = store.get_run(pid)["agent_id"]
+        self.assertEqual(store.thread_for(thread_id=t["id"])["agent_id"], aid)
+        with mock.patch.object(self.api, "_send", side_effect=self.api.AgentError("Cursor API 500")):
+            self.api._launch(store.get_run(pid))
+        self.assertEqual(self.status(pid), "ERROR")
+        self.assertIsNone(store.thread_for(thread_id=t["id"])["agent_id"])
+
+    def test_stuck_runs_expire(self):
+        from unittest import mock
+        store.add_run("run-old", "bc-o", "deepread", "p", "", "RUNNING")
+        store.update_run("run-old", started_at="2000-01-01T00:00:00+00:00")
+        store.add_run("run-new", "bc-n", "deepread", "q", "", "RUNNING")
+        store.update_run("run-new", started_at=store.now())
+        with mock.patch.object(self.api, "cancel") as cancel:
+            self.api.expire_stale()
+        self.assertEqual((self.status("run-old"), self.status("run-new")), ("EXPIRED", "RUNNING"))
+        cancel.assert_called_once_with("bc-o", "run-old")
+
+    def test_restart_recovers_runs_that_were_being_started(self):
+        from unittest import mock
+        store.add_run("pending-landed", "bc-landed", "card", "p", "写卡", "CREATING", launch={"new": True})
+        store.add_run("pending-lost", "bc-lost", "card", "q", "写卡", "CREATING", launch={"new": True})
+        store.add_run("pending-old", "", "card", "r", "写卡", "CREATING")
+
+        def fake(method, path, body=None, timeout=None):
+            if path == "/agents/bc-landed":
+                return {"latestRunId": "run-landed"}
+            raise self.api.AgentError("Cursor API 404")
+
+        with mock.patch.object(self.api, "_json", side_effect=fake):
+            self.api.resume_watchers()
+        self.assertEqual((self.status("run-landed"), store.get_run("run-landed")["agent_id"]), ("RUNNING", "bc-landed"))
+        self.assertEqual(self.status("pending-lost"), "CREATING")  # requeued and sent again with the same agent id
+        self.assertEqual(self.status("pending-old"), "ERROR")
+        self.assertEqual(sorted(name for name, _ in self.spawned), ["_launch", "_watch"])
 
 
 class Migrations(unittest.TestCase):

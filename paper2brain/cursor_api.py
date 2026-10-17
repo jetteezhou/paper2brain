@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from . import store
 
@@ -24,6 +25,8 @@ def config():
         "repo": cfg.get("repo") or "https://github.com/jetteezhou/paper2brain",
         "model": cfg.get("model"),
         "auto_agent": cfg.get("auto_agent", True),
+        "max_agents": int(cfg.get("max_agents", 2)),
+        "run_timeout_min": int(cfg.get("run_timeout_min", 60)),
     }
 
 
@@ -59,9 +62,10 @@ def _json(method, path, body=None, timeout=None):
 
 
 def _latest_run(agent_id):
-    """After a create or follow-up whose response never arrived: the run it started, if it went through."""
+    """After a create or follow-up whose response never arrived: the run it started, if it went through. A latest run
+    we already track is an earlier one, so the request did not land."""
     info = _json("GET", f"/agents/{agent_id}")
-    if not info.get("latestRunId"):
+    if not info.get("latestRunId") or store.get_run(info["latestRunId"]):
         raise AgentError("Cursor 没有收到这次请求，请重试")
     return {"id": info["latestRunId"], "status": "RUNNING"}
 
@@ -73,73 +77,135 @@ def _prompt(text, images):
     return p
 
 
-def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, on_agent=None):
-    """Like start(), but returns at once with a placeholder run the UI can show as "starting": creating an agent on a
-    machine takes about a minute. prepare(placeholder) runs before the request is sent (e.g. to add chat messages)."""
+LIVE = ("CREATING", "RUNNING", "QUEUED")
+# ponytail: images of a waiting run live only in memory; after a restart that run starts without them.
+_images = {}
+_pump_lock = threading.Lock()
+
+
+def _spawn(fn, *args):
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def _bind(kind, ref, agent_id):
+    """Remember which agent works on what, so the next message continues the same conversation."""
+    if kind in ("capture", "find"):
+        store.update_capture(ref, agent_id=agent_id)
+    if kind == "chat":
+        store.set_thread_agent(ref, agent_id)
+    if kind == "find":
+        store.set_thread_agent(store.thread_for(f"find:{ref}")["id"], agent_id)
+    if kind == "distill":
+        store.kv_set(DISTILL_AGENT, agent_id)
+
+
+def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None):
+    """Queue a run and return its placeholder id at once; the UI shows it as waiting / starting. Follows up on
+    agent_id when given, otherwise creates a new agent on this Mac (about a minute). The new agent's id is chosen
+    here and stored with the placeholder, so a restart mid-create can still find it. prepare(placeholder) runs
+    before anything is sent (e.g. to add the chat messages)."""
     if not config()["machine"]:
         raise AgentError("未配置 P2B_MACHINE（本机 worker 的名字）")
-    placeholder = f"pending-{uuid.uuid4()}"
-    store.add_run(placeholder, agent_id or "", kind, ref, text, "CREATING")
+    placeholder, new = f"pending-{uuid.uuid4()}", not agent_id
+    agent_id = agent_id or f"bc-{uuid.uuid4()}"
+    store.add_run(placeholder, agent_id, kind, ref, text, "WAITING", launch={"name": name, "new": new})
+    if images:
+        _images[placeholder] = list(images)
     if prepare:
         prepare(placeholder)
-
-    def go():
-        try:
-            aid, _ = start(kind, ref, text, images, name, agent_id, placeholder)
-            if on_agent:
-                on_agent(aid)
-        except Exception as e:
-            store.update_run(placeholder, status="ERROR", error=str(e))
-
-    threading.Thread(target=go, daemon=True).start()
+    if new:
+        _bind(kind, ref, agent_id)
+    pump()
     return placeholder
 
 
-def start(kind, ref, text, images=(), name=None, agent_id=None, placeholder=None):
-    """Follow up on agent_id when given, otherwise create a new agent on this Mac. Returns (agent_id, run_id).
-    The run is watched in the background; its progress lands in the runs table."""
+def pump():
+    """Start waiting runs, oldest first, while fewer than max_agents are live; at most one live run per agent
+    (Cursor answers a second one with 409 agent_busy)."""
+    with _pump_lock:
+        runs = store.unfinished_runs()
+        busy = {r["agent_id"] for r in runs if r["status"] in LIVE}
+        room = config()["max_agents"] - sum(r["status"] in LIVE for r in runs)
+        for r in runs:
+            if room <= 0:
+                break
+            if r["status"] != "WAITING" or r["agent_id"] in busy:
+                continue
+            busy.add(r["agent_id"])
+            room -= 1
+            store.update_run(r["id"], status="CREATING", started_at=store.now())
+            _spawn(_launch, r)
+
+
+def _send(agent_id, text, images=(), name=None, new=False):
     cfg = config()
-    if not cfg["machine"]:
-        raise AgentError("未配置 P2B_MACHINE（本机 worker 的名字）")
-    # Creating an agent on a machine can take longer than the response timeout even though it succeeds; choosing the
-    # agent id ourselves lets us find the run afterwards instead of losing track of a running agent.
-    if agent_id:
-        try:
-            run = _json("POST", f"/agents/{agent_id}/runs", {"prompt": _prompt(text, images)}, timeout=180)["run"]
-        except (TimeoutError, urllib.error.URLError, ConnectionError):
-            run = _latest_run(agent_id)
-    else:
-        agent_id = f"bc-{uuid.uuid4()}"
-        body = {
-            "agentId": agent_id,
-            "prompt": _prompt(text, images),
-            "env": {"type": "machine", "name": cfg["machine"]},
-            "repos": [{"url": cfg["repo"]}],
-        }
+    try:
+        if not new:
+            return _json("POST", f"/agents/{agent_id}/runs", {"prompt": _prompt(text, images)}, timeout=180)["run"]
+        body = {"agentId": agent_id, "prompt": _prompt(text, images), "env": {"type": "machine", "name": cfg["machine"]},
+                "repos": [{"url": cfg["repo"]}]}
         if name:
             body["name"] = name[:100]
         if cfg["model"]:
             body["model"] = {"id": cfg["model"]}
+        return _json("POST", "/agents", body, timeout=180)["run"]
+    except (TimeoutError, urllib.error.URLError, ConnectionError):
+        # creating an agent can outlast the response timeout and still succeed
+        return _latest_run(agent_id)
+    except AgentError as e:
+        if new and "agent_id_conflict" in str(e):  # our agent id already exists: an earlier attempt went through
+            return _latest_run(agent_id)
+        raise
+
+
+def _launch(r):
+    placeholder, launch = r["id"], r["launch"] or {}
+    try:
+        run = _send(r["agent_id"], r["prompt"], _images.pop(placeholder, ()), launch.get("name"), launch.get("new"))
+    except Exception as e:
+        store.update_run(placeholder, status="ERROR", error=str(e))
+        if launch.get("new"):
+            store.forget_agent(r["agent_id"])
+        pump()
+        return
+    stopped = (store.get_run(placeholder) or {}).get("status") in ("CANCELLED", "EXPIRED")
+    store.replace_run(placeholder, run["id"], r["agent_id"], store.get_run(placeholder)["status"] if stopped else run.get("status", "CREATING"))
+    if stopped:
         try:
-            run = _json("POST", "/agents", body, timeout=180)["run"]
-        except (TimeoutError, urllib.error.URLError, ConnectionError):
-            run = _latest_run(agent_id)
-    if placeholder:
-        cancelled = (store.get_run(placeholder) or {}).get("status") == "CANCELLED"
-        store.replace_run(placeholder, run["id"], agent_id, run.get("status", "CREATING"))
-        if cancelled:
-            cancel(agent_id, run["id"])
-    else:
-        store.add_run(run["id"], agent_id, kind, ref, text, run.get("status", "CREATING"))
-    watch(agent_id, run["id"])
-    return agent_id, run["id"]
+            cancel(r["agent_id"], run["id"])
+        except AgentError:
+            pass
+        pump()
+        return
+    watch(r["agent_id"], run["id"])
+
+
+def expire_stale():
+    """A run still live after run_timeout_min (hung, or an API that keeps failing) is stopped, so queues move on."""
+    minutes = config()["run_timeout_min"]
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    for r in store.stale_runs(cutoff):
+        store.update_run(r["id"], status="EXPIRED", error=f"超过 {minutes} 分钟没有完成，已停止")
+        if not r["id"].startswith("pending-"):
+            try:
+                cancel(r["agent_id"], r["id"])
+            except Exception:
+                pass
+    pump()
 
 
 def watch(agent_id, run_id):
-    threading.Thread(target=_watch, args=(agent_id, run_id), daemon=True).start()
+    _spawn(_watch, agent_id, run_id)
 
 
 def _watch(agent_id, run_id):
+    try:
+        _follow(agent_id, run_id)
+    finally:
+        pump()
+
+
+def _follow(agent_id, run_id):
     text, tools, last_flush = "", {}, 0.0
 
     def flush(force=False, **extra):
@@ -179,6 +245,8 @@ def _watch(agent_id, run_id):
     except Exception:
         pass  # stream dropped or expired: fall back to polling the run
     while True:
+        if (store.get_run(run_id) or {}).get("status") not in LIVE:
+            return  # stopped here (timed out, deleted)
         try:
             run = _json("GET", f"/agents/{agent_id}/runs/{run_id}")
         except Exception as e:
@@ -212,11 +280,22 @@ def cancel(agent_id, run_id):
 
 
 def resume_watchers():
-    for run in store.unfinished_runs():
-        if run["id"].startswith("pending-"):
-            store.update_run(run["id"], status="ERROR", error="服务重启时 agent 还没创建完成，请重试")
-        else:
-            watch(run["agent_id"], run["id"])
+    """After a restart: keep watching live runs; a run whose request was in flight is found by its agent id or, when
+    it never reached Cursor, queued to be sent again (a repeated create is idempotent); waiting runs wait on."""
+    for r in store.unfinished_runs():
+        if not r["id"].startswith("pending-"):
+            watch(r["agent_id"], r["id"])
+        elif r["status"] != "WAITING" and not r["agent_id"]:
+            store.update_run(r["id"], status="ERROR", error="服务重启时 agent 还没创建完成，请重试")
+        elif r["status"] != "WAITING":
+            try:
+                run = _latest_run(r["agent_id"])
+            except Exception:
+                store.update_run(r["id"], status="WAITING")
+                continue
+            store.replace_run(r["id"], run["id"], r["agent_id"], run["status"])
+            watch(r["agent_id"], run["id"])
+    pump()
 
 
 # ---------- what we ask the librarian agent to do; the details live in librarian/*.md ----------
@@ -233,8 +312,7 @@ def process_capture(capture_id):
         f"你是 paper2brain 的论文管理员。先读 librarian/README.md 和 librarian/capture.md，"
         f"然后处理捕获 {capture_id}（已入库并做过规则预处理，用 ./p2b show capture {capture_id} 查看）。"
     )
-    return start_async("capture", capture_id, text, images, name=f"收下：{label}",
-                       on_agent=lambda aid: store.update_capture(capture_id, agent_id=aid))
+    return start_async("capture", capture_id, text, images, name=f"收下：{label}")
 
 
 def scope_text(scope):
@@ -307,8 +385,7 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
         store.add_message(thread["id"], "user", text)
         store.add_message(thread["id"], "assistant", "", placeholder)
 
-    return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare,
-                       on_agent=None if thread["agent_id"] else lambda aid: store.set_thread_agent(thread["id"], aid))
+    return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare)
 
 
 def find_papers(capture_id):
@@ -325,11 +402,7 @@ def find_papers(capture_id):
         store.add_message(thread["id"], "user", cap["raw"])
         store.add_message(thread["id"], "assistant", "", placeholder)
 
-    def on_agent(aid):
-        store.set_thread_agent(thread["id"], aid)
-        store.update_capture(capture_id, agent_id=aid)
-
-    return start_async("find", capture_id, prompt, name=f"找论文：{cap['raw'][:40]}", prepare=prepare, on_agent=on_agent)
+    return start_async("find", capture_id, prompt, name=f"找论文：{cap['raw'][:40]}", prepare=prepare)
 
 
 def write_card(pid):
@@ -358,8 +431,7 @@ def distill_pending():
         store.kv_set(DISTILL_AGENT, "")  # that agent is gone (archived or expired); start a fresh one
     store.kv_set(DISTILL_TRIED, json.dumps({**tried, **{i: tried.get(i, 0) + 1 for i in ids}}))
     text = f"先读 librarian/README.md 和 librarian/thought.md，按“提炼想法”一节处理这些想法：{' '.join(ids)}"
-    start_async("distill", "thoughts", text, name="提炼想法", agent_id=store.kv_get(DISTILL_AGENT) or None,
-                on_agent=lambda aid: store.kv_set(DISTILL_AGENT, aid))
+    start_async("distill", "thoughts", text, name="提炼想法", agent_id=store.kv_get(DISTILL_AGENT) or None)
 
 
 DEEP_TRIED = "deepread_tried"

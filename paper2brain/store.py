@@ -17,7 +17,10 @@ TOPIC_TREE = [
     ("WAM", ["世界模型", "表征研究", "WAN base", "V-JEPA"]),
 ]
 TRIAGE = ("inbox", "deep", "archived", "ignored")
-JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows"}
+JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch"}
+# WAITING: queued here until there is room to start it; the others are Cursor's own statuses of a live run.
+UNFINISHED = ("WAITING", "CREATING", "RUNNING", "QUEUED")
+_UNFINISHED_SQL = "('WAITING','CREATING','RUNNING','QUEUED')"
 RESEARCH_ELEMENTS = ("problem", "method", "validation")
 RESEARCH_FIELDS = RESEARCH_ELEMENTS + ("notes",)
 LINK_KINDS = ("paper", "thought", "message", "thread", "capture", "note", "doc")
@@ -139,9 +142,16 @@ def _v2_indexes(c):
         c.execute(stmt)
 
 
+def _v3_run_queue(c):
+    """Runs wait their turn (status WAITING) with what is needed to start them later; started_at times them out."""
+    c.execute("ALTER TABLE runs ADD COLUMN started_at TEXT")
+    c.execute("ALTER TABLE runs ADD COLUMN launch TEXT")
+    c.execute("CREATE INDEX IF NOT EXISTS runs_status ON runs(status)")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
-MIGRATIONS = [_v1_baseline, _v2_indexes]
+MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue]
 
 
 def home():
@@ -488,7 +498,7 @@ def _report_status(c, pids):
         return {}
     q = ",".join("?" * len(pids))
     out = {r[0]: "running" for r in c.execute(
-        f"SELECT DISTINCT ref FROM runs WHERE kind='deepread' AND status IN ('CREATING','RUNNING','QUEUED') AND ref IN ({q})", pids)}
+        f"SELECT DISTINCT ref FROM runs WHERE kind='deepread' AND status IN {_UNFINISHED_SQL} AND ref IN ({q})", pids)}
     out.update({r[0]: "done" for r in c.execute(f"SELECT id FROM papers WHERE report IS NOT NULL AND id IN ({q})", pids)})
     return out
 
@@ -522,7 +532,7 @@ def deep_queue():
             "SELECT p.id FROM papers p JOIN capture_papers cp ON cp.paper_id=p.id AND cp.state='confirmed' "
             "JOIN captures c ON c.id=cp.capture_id AND c.triage='deep' "
             "WHERE p.report IS NULL AND p.page_count > 0 "
-            "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ref=p.id AND r.kind='deepread' AND r.status IN ('CREATING','RUNNING','QUEUED')) "
+            f"AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ref=p.id AND r.kind='deepread' AND r.status IN {_UNFINISHED_SQL}) "
             "GROUP BY p.id ORDER BY max(COALESCE((SELECT max(e.at) FROM events e WHERE e.action='capture.triage' AND e.target=c.id), c.created_at)) DESC"
         )]
 
@@ -1344,11 +1354,11 @@ def delete_anchor(aid):
 
 # ---------- agent runs ----------
 
-def add_run(run_id, agent_id, kind, ref, prompt, status):
+def add_run(run_id, agent_id, kind, ref, prompt, status, launch=None):
     with tx() as c:
         c.execute(
-            "INSERT OR IGNORE INTO runs (id, created_at, updated_at, agent_id, kind, ref, prompt, status) VALUES (?,?,?,?,?,?,?,?)",
-            (run_id, now(), now(), agent_id, kind, ref, prompt, status),
+            "INSERT OR IGNORE INTO runs (id, created_at, updated_at, agent_id, kind, ref, prompt, status, launch) VALUES (?,?,?,?,?,?,?,?,?)",
+            (run_id, now(), now(), agent_id, kind, ref, prompt, status, launch and json.dumps(launch, ensure_ascii=False)),
         )
 
 
@@ -1379,8 +1389,24 @@ def last_run(kind):
 
 
 def unfinished_runs():
+    """Oldest first, so waiting runs start in the order they were asked for."""
     with tx() as c:
-        return _rows(c.execute("SELECT * FROM runs WHERE status IN ('CREATING','RUNNING','QUEUED')"))
+        return _rows(c.execute(f"SELECT * FROM runs WHERE status IN {_UNFINISHED_SQL} ORDER BY created_at, rowid"))
+
+
+def stale_runs(cutoff):
+    """Live runs started before cutoff (ISO time)."""
+    with tx() as c:
+        return _rows(c.execute("SELECT * FROM runs WHERE status IN ('CREATING','RUNNING','QUEUED') "
+                               "AND coalesce(started_at, created_at) < ?", (cutoff,)))
+
+
+def forget_agent(agent_id):
+    """An agent that was never created: threads and captures must not keep following up on it."""
+    with tx() as c:
+        c.execute("UPDATE threads SET agent_id=NULL WHERE agent_id=?", (agent_id,))
+        c.execute("UPDATE captures SET agent_id=NULL WHERE agent_id=?", (agent_id,))
+        c.execute("UPDATE kv SET value='' WHERE value=?", (agent_id,))
 
 
 # ---------- search ----------

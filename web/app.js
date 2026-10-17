@@ -82,7 +82,7 @@ const channel = (c) => CHANNEL[c.channel] || (c.source === 'shortcut' ? 'iPhone'
 const authors = (a) => (a || []).length ? a.slice(0, 3).join(', ') + (a.length > 3 ? ' 等' : '') : '';
 const firstLine = (s) => (s || '').split('\n').find((l) => l.trim()) || '';
 const short = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s || '');
-const live = (status) => status === 'CREATING' || status === 'RUNNING';
+const live = (status) => ['WAITING', 'CREATING', 'RUNNING', 'QUEUED'].includes(status);
 const agentOn = () => S.state?.agent?.enabled;
 
 function inline(s) {
@@ -700,7 +700,7 @@ function runsBlock(c) {
 }
 
 function runStatus(r) {
-  if (live(r.status)) return `<span class="chip violet"><span class="spin"></span>${r.status === 'CREATING' ? '启动中' : '运行中'}</span>`;
+  if (live(r.status)) return `<span class="chip violet"><span class="spin"></span>${{ WAITING: '排队中', CREATING: '启动中' }[r.status] || '运行中'}</span>`;
   return { FINISHED: '<span class="chip green">完成</span>', ERROR: '<span class="chip red">出错</span>', CANCELLED: '<span class="chip">已取消</span>', EXPIRED: '<span class="chip">已过期</span>' }[r.status] || `<span class="chip">${esc(r.status)}</span>`;
 }
 
@@ -1284,7 +1284,7 @@ function msgHtml(m, scope) {
   const running = live(m.run_status);
   const tools = m.run_tools || [];
   return `<div class="msg bot${flash}" id="m-${m.id}">${text ? md(text) : ''}
-    ${running ? `<div class="typing"><span class="spin"></span>${text ? '还在写…' : tools.length ? '正在查阅论文库…' : 'Agent 启动中…'}</div>
+    ${running ? `<div class="typing"><span class="spin"></span>${text ? '还在写…' : tools.length ? '正在查阅论文库…' : m.run_status === 'WAITING' ? '排队中：前面还有 agent 在运行…' : 'Agent 启动中…'}</div>
       ${tools.length ? `<div class="tools">${tools.slice(-3).map((x) => `<div>${x.status === 'running' ? '…' : '✓'} ${esc(x.name)} ${esc(x.args || '')}</div>`).join('')}</div>` : ''}` : ''}
     ${m.run_status === 'ERROR' ? `<div class="hint" style="color:var(--red)">agent 出错了${m.run_error ? '：' + esc(m.run_error) : ''}</div>` : ''}
     ${!running && text ? `<div class="msg-foot"><button class="btn sm ghost" data-action="save-note" data-scope="${esc(scope)}" data-mid="${m.id}">存为笔记</button>${researchActs}</div>` : ''}</div>`;

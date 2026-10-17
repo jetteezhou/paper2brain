@@ -32,7 +32,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
    {"cursor_api_key": "key_...", "machine": "p2b-mac"}
    ```
 
-   可选字段：`"model"` 指定模型；`"auto_agent": false` 关闭收下后的自动整理。
+   可选字段：`"model"` 指定模型；`"auto_agent": false` 关闭收下后的自动整理；`"max_agents"`（默认 2）同时运行的 agent 上限，多出的排队（iCloud 收件箱一次补处理多条时也一样）；`"run_timeout_min"`（默认 60）超过这么久还没结束的运行会被停止，后面的队列照常往下走。
 4. 重启 `./p2b serve`。左下角显示"Agent 已连接"。
 
 **调优 agent**：修改 `librarian/capture.md`、`discuss.md`、`deepread.md`，然后在捕获详情里点"重新整理"。每次运行的提示词、调用了哪些工具、最终回复，都能在"处理记录"里看到。
