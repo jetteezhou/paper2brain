@@ -337,6 +337,22 @@ class Store(unittest.TestCase):
         self.assertEqual((j["report"], j["anchors"], j["chat"]), (["方法"], 1, 1))
         self.assertEqual(store.list_captures("inbox")[0]["papers"][0]["jumps"]["report"], ["方法"])
 
+    def test_find_request_becomes_a_capture_with_its_own_discussion(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "config", return_value={"machine": "m"}), \
+                mock.patch.object(cursor_api, "start", return_value=("bc-1", "run-1")):
+            cap = server.find({}, {"text": "帮我找 flow matching 做动作头的论文"})
+        self.assertEqual((cap["source"], cap["channel"], cap["status"]), ("find", "find", "finding"))
+        self.assertEqual(cap["runs"][0]["kind"], "find")
+        msgs = store.thread_for(f"find:{cap['id']}")["messages"]
+        self.assertEqual([m["role"] for m in msgs], ["user", "assistant"])
+        self.assertEqual(msgs[1]["run_id"], cap["runs"][0]["id"])
+        self.assertIn("flow matching 做动作头", cursor_api.scope_text(f"find:{cap['id']}"))
+
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])

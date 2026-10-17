@@ -21,13 +21,13 @@
       <form id="capture" autocomplete="off">
         <div class="cap-box" id="cap-box">
           <div class="cap-row">
-            <textarea id="cap-text" rows="1" placeholder="粘贴任意链接、一段文字、截图或 PDF，回车收下"></textarea>
+            <textarea id="cap-text" rows="1" placeholder="粘贴任意链接、一段文字、截图或 PDF，回车收下；也可以说“帮我找……的论文”"></textarea>
             <span class="hint"><kbd>⌘K</kbd></span>
           </div>
           <div id="cap-images"></div>
           <div class="cap-thought"><span>想法</span><input id="cap-thought" placeholder="顺手记一句为什么收（可选）"></div>
         </div>
-        <div class="cap-acts"><button class="btn primary big" type="submit">收下</button><button class="btn ghost sm" type="button" data-action="compose-capture" title="把这段内容作为一个研究的开端">开研究</button></div>
+        <div class="cap-acts"><button class="btn primary big" type="submit">收下</button><button class="btn ghost sm" type="button" data-action="find-capture" title="让 agent 按这段描述找几篇论文，入库后直接开始讨论这组论文">找论文</button><button class="btn ghost sm" type="button" data-action="compose-capture" title="把这段内容作为一个研究的开端">开研究</button></div>
       </form>
       <div id="body">
         <section id="list"></section>

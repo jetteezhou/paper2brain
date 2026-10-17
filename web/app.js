@@ -20,7 +20,7 @@ const post = (u, b = {}) => api('POST', u, b);
 const S = {
   view: 'inbox', arg: null, state: null, list: [], sel: null, detail: null,
   open: new Set(['VLM', 'VLA', 'WAM']), images: [], reader: null, threads: {},
-  picker: null, scope: 'library', thoughts: [], search: null, seen: {}, scopeTitles: {}, researchTab: {},
+  picker: null, scope: 'library', thoughts: [], search: null, seen: {}, scopeTitles: {}, scopePapers: {}, researchTab: {},
 };
 
 const VIEWS = {
@@ -70,7 +70,7 @@ const day = (iso) => {
   if (d.toDateString() === new Date(Date.now() - 864e5).toDateString()) return '昨天';
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 };
-const CHANNEL = { wechat: '公众号', xhs: '小红书', arxiv: 'arXiv', doi: 'DOI', openreview: 'OpenReview', web: '网页' };
+const CHANNEL = { wechat: '公众号', xhs: '小红书', arxiv: 'arXiv', doi: 'DOI', openreview: 'OpenReview', web: '网页', find: '找论文' };
 const idLabel = (pid) => {
   const [k, ...r] = pid.split(':');
   const ref = r.join(':');
@@ -233,7 +233,7 @@ async function loadDetail(force) {
       if (!S.threads[`thought:${S.sel.id}`]) await loadThread(`thought:${S.sel.id}`);
     }
     else d = { papers: [await get(`/api/papers/${enc(S.sel.id)}`)] };
-    if (force || changed('detail', d)) { S.detail = d; renderDetail(); }
+    if (changed('detail', d) || force) { S.detail = d; renderDetail(); }
   } catch (e) {
     S.detail = { error: e.message };
     renderDetail();
@@ -254,6 +254,11 @@ async function loadThread(scope, threadId) {
   if (scope.startsWith('research:')) {
     const x = await get(`/api/research/${enc(scope.slice(9))}`).catch(() => null);
     if (x) { S.scopeTitles[scope] = x.title; t.proposal = !!x.proposal; }
+  } else if (scope.startsWith('find:')) {
+    const cap = await get(`/api/captures/${enc(scope.slice(5))}`).catch(() => null);
+    if (cap) { S.scopeTitles[scope] = cap.raw; S.scopePapers[scope] = cap.papers.filter((p) => p.state === 'confirmed'); }
+  } else if (scope.startsWith('papers:') && !S.scopePapers[scope]) {
+    S.scopePapers[scope] = (await Promise.all(scope.slice(7).split('|').map((id) => get(`/api/papers/${enc(id)}`).catch(() => null)))).filter(Boolean);
   }
   S.threads[scope] = t;
   return t;
@@ -371,7 +376,8 @@ function captureItem(c) {
     ${p ? `<div class="item-paper"><span>${esc(p.title)}${c.papers.length > 1 ? ` <span class="hint">等 ${c.papers.length} 篇</span>` : ''}</span></div>` : ''}
     ${p?.tldr ? `<div class="item-tldr">${esc(p.tldr)}</div>` : ''}
     ${c.thought ? `<div class="item-thought">${esc(c.thought)}</div>` : ''}
-    <div class="item-tags">${topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${statusChip(c)}${p ? reportChip(p) : ''}</div>
+    <div class="item-tags">${topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${statusChip(c)}</div>
+    ${p ? jumpsHtml(p, p.jumps) : ''}
     ${triageBtns}
   </div>`;
 }
@@ -382,7 +388,8 @@ function paperItem(p) {
     <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${esc(p.title)}</div>
     <div class="item-meta" style="margin:3px 0 0">${esc(authors(p.authors))}</div>
     ${p.tldr ? `<div class="item-tldr">${esc(p.tldr)}</div>` : ''}
-    <div class="item-tags">${p.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${p.deep ? '<span class="chip amber">待深读</span>' : ''}${reportChip(p)}</div>
+    <div class="item-tags">${p.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${p.deep ? '<span class="chip amber">待深读</span>' : ''}</div>
+    ${jumpsHtml(p, p.jumps)}
   </div>`;
 }
 
@@ -637,8 +644,9 @@ function captureDetail(c, papers) {
     ${tb('deep', '待深读')}${tb('archived', '存档')}${tb('ignored', '忽略')}
     <button class="btn sm ghost" data-action="undo-capture" data-id="${c.id}" title="删除这条捕获及由它产生的内容">撤销收下</button></div>
     <div class="hint" style="margin-top:4px">当前在：${triage[c.triage]}</div>`;
-  if (c.title) h += `<div class="cap-title">${esc(c.title)}</div>`;
-  if (rawExtra || (!c.title && c.raw)) h += `<div class="raw">${inline(c.raw)}</div>`;
+  const find = c.source === 'find';
+  if (c.title && !find) h += `<div class="cap-title">${esc(c.title)}</div>`;
+  if (!find && (rawExtra || (!c.title && c.raw))) h += `<div class="raw">${inline(c.raw)}</div>`;
   if (c.attachments.length) h += `<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">${c.attachments.map((a) => a.mime.startsWith('image/')
     ? `<a href="/api/attachments/${a.id}" target="_blank" class="thumb" style="width:96px;height:96px"><img src="/api/attachments/${a.id}"></a>`
     : `<a href="/api/attachments/${a.id}" target="_blank" class="chip">${esc(a.filename.replace(/^\d+-/, ''))} ↗</a>`).join('')}</div>`;
@@ -646,7 +654,11 @@ function captureDetail(c, papers) {
   h += `<div class="thoughts">${c.thoughts.map((t) => `<div class="thought"><span class="thought-open" data-action="open-thought" data-id="${t.id}" title="打开想法，接着往下想">${esc(t.gist || t.text)}<small>${t.by === 'agent' ? 'agent 记录 · ' : ''}${ago(t.created_at)}</small></span><span class="thought-acts">${thoughtResearch(t, capPaper)}</span></div>`).join('')}
     <form class="add-line" data-form="thought" data-capture="${c.id}"><input placeholder="${c.thoughts.length ? '再补一句想法…' : '补一句想法：为什么收它？'}"><button class="btn sm">记下</button></form></div>`;
 
-  if (c.status === 'needs_confirm' && !papers.length) {
+  if (find) {
+    h += `<div class="notice info"><h3>你让 agent 找的论文</h3><div class="find-ask">${esc(c.raw)}</div>
+      <p class="hint">${running ? '<span class="spin"></span> agent 正在检索、挑选、入库，挑中的论文会陆续出现在下面…' : papers.length ? `找到 ${papers.length} 篇，都已入库；每篇的入选理由在讨论里。` : 'agent 没有关联到论文，去讨论里看它的说明，或者换个说法再找。'}</p>
+      <button class="btn primary sm" data-action="open-find" data-id="${c.id}">${papers.length > 1 ? `一起讨论这 ${papers.length} 篇 →` : '去讨论 →'}</button></div>`;
+  } else if (c.status === 'needs_confirm' && !papers.length) {
     h += `<div class="notice"><h3>这条解读讲的是哪篇论文？</h3>${(c.candidates || []).map((m) => `
       <div class="cand"><div class="cand-body"><div class="cand-title">${esc(m.title)}</div>
       <div class="cand-meta">${esc(authors(m.authors))} · ${esc(m.published || '')} · <a href="${esc(m.url)}" target="_blank">${esc(idLabel(m.pid))}</a>${m.score ? ` · 标题相似度 ${Math.round(m.score * 100)}%` : ''}</div>
@@ -672,11 +684,11 @@ const pdfButton = ({ capture, paper }) =>
   `<label class="btn sm" style="margin-top:8px">上传 PDF<input type="file" accept="application/pdf" hidden data-upload="${capture ? 'capture' : 'paper'}" data-id="${esc(capture || paper)}"></label>`;
 
 function runsBlock(c) {
-  const label = { capture: '整理', chat: '讨论', deepread: '深读' };
-  const runs = c.runs;
+  const label = { capture: '整理', chat: '讨论', deepread: '深读', find: '找论文', card: '快读卡' };
+  const runs = c.runs, find = c.source === 'find';
   return `<details class="runs" ${runs.some((r) => live(r.status)) ? 'open' : ''}>
-    <summary>处理记录 · ${runs.length ? `${runs.length} 次 agent 运行` : agentOn() ? '还没有 agent 运行' : 'agent 未连接'} <span class="hint">（调优：改 librarian/capture.md 后重新整理）</span></summary>
-    <div style="display:flex;gap:8px;margin-top:10px">
+    <summary>处理记录 · ${runs.length ? `${runs.length} 次 agent 运行` : agentOn() ? '还没有 agent 运行' : 'agent 未连接'} <span class="hint">（调优：改 ${find ? 'librarian/find.md' : 'librarian/capture.md 后重新整理'}）</span></summary>
+    <div style="display:${find ? 'none' : 'flex'};gap:8px;margin-top:10px">
       <button class="btn sm" data-action="reprocess" data-id="${c.id}" data-agent="1" ${agentOn() ? '' : 'disabled'}>重新整理（规则 + agent）</button>
       <button class="btn sm ghost" data-action="reprocess" data-id="${c.id}" data-agent="">只重跑规则预处理</button>
       ${c.agent_id ? `<a class="btn sm ghost" href="https://cursor.com/agents/${esc(c.agent_id)}" target="_blank">在 Cursor 中查看 ↗</a>` : ''}
@@ -732,7 +744,7 @@ function paperCard(p, { capture, inReader } = {}) {
       const src = p.captures?.find((c) => c.id === t.capture_id);
       return `<div class="take">${src ? `<b>${esc(src.author || channel(src))}</b>：` : ''}${esc(t.take)}${t.consistent === false ? ' <span class="chip red">与原文不符</span>' : ''}</div>`;
     }).join('');
-    body = `<div class="tldr">${esc(card.tldr)}</div>
+    body = `<div class="tldr">${esc(card.tldr)}</div>${figuresHtml(p)}
       <dl class="kv"><dt>问题</dt><dd>${inline(card.problem)}</dd><dt>方法</dt><dd>${inline(card.method)}</dd>
       <dt>结果</dt><dd><ul class="results">${card.results.map((r) => `<li>${inline(r.text)} ${cite(p.id, r.page, r.quote)}</li>`).join('')}</ul></dd></dl>
       <div class="res-row">${res.code ? `<a href="${esc(res.code)}" target="_blank">代码 ↗</a>` : '<span>代码：<b>未知</b></span>'}
@@ -744,9 +756,9 @@ function paperCard(p, { capture, inReader } = {}) {
     const wait = capRun || deepRun
       ? '<div class="card-wait"><span class="spin"></span>Agent 正在写快读卡…</div>'
       : agentOn()
-        ? `<div class="card-wait">还没有快读卡。${capture ? `<button class="btn sm" data-action="reprocess" data-id="${capture.id}" data-agent="1">让 agent 整理</button>` : ''}</div>`
+        ? `<div class="card-wait">还没有快读卡。${p.page_count ? `<button class="btn sm" data-action="write-card" data-pid="${esc(p.id)}">让 agent 写快读卡</button>` : ''}</div>`
         : '<div class="card-wait">快读卡由 agent 生成（未连接）。先看摘要：</div>';
-    body = wait + (p.abstract ? `<div class="abstract">${esc(p.abstract)}</div>` : '');
+    body = wait + (p.abstract ? `<div class="abstract">${esc(p.abstract)}</div>` : '') + figuresHtml(p);
   }
   return `<article class="paper" data-anchor-surface="card" data-pid="${esc(p.id)}">
     ${inReader ? '' : `<h1 class="paper-title">${esc(p.title)}</h1>`}
@@ -754,6 +766,7 @@ function paperCard(p, { capture, inReader } = {}) {
     ${capture && p.captures?.length > 1 ? ` · <a href="#" data-action="select" data-kind="paper" data-id="${esc(p.id)}">共 ${p.captures.length} 个来源</a>` : ''}
     ${capture ? ` · <a href="#" data-action="unlink" data-id="${capture.id}" data-paper="${esc(p.id)}" title="这条捕获不是讲这篇">不是这篇？</a>` : ''}</div>
     ${topicsRow(p)}
+    ${jumpsHtml(p, fullJumps(p), true)}
     ${p.page_count ? '' : `<div class="notice" style="margin-top:12px">没下载到这篇论文的 PDF（可能需要登录或不公开）。上传 PDF 后才能写快读卡、深读和对照原文。<br>${pdfButton({ paper: p.id })}</div>`}
     ${body}
     <div class="research-row"><span class="hint">研究</span>${(p.research || []).map(researchChip).join('') || '<span class="hint">还没有用到这篇</span>'}
@@ -778,7 +791,79 @@ function deepButton(p) {
 }
 
 const deepToast = () => (agentOn() ? '已加入待深读，agent 会先把深读报告写好' : '已加入待深读');
-const reportChip = (p) => ({ done: '<span class="chip green">有深读报告</span>', running: '<span class="chip violet">报告生成中</span>' })[reportState(p)] || '';
+
+// ---------- figures: the quick card's method / architecture figures, cropped from the PDF ----------
+
+const figSrc = (pid, n) => `/api/papers/${enc(pid)}/figures/${n}`;
+const figText = (caption) => caption.replace(/^\s*(?:Figure|Fig\.)\s*\d+\s*[:.|]\s*/i, '');
+
+function figuresHtml(p) {
+  const figs = p.key_figures || [];
+  if (!figs.length) return '';
+  const pid = esc(p.id), more = (p.figures || []).length - figs.length;
+  return `<div class="figs" data-pid="${pid}"><div class="figs-track">${figs.map((f) => `<figure class="fig">
+      <button class="fig-img" data-action="fig-open" data-pid="${pid}" data-n="${f.n}" title="放大看"><img loading="lazy" src="${figSrc(p.id, f.n)}" alt="图 ${f.n}"></button>
+      <figcaption>${f.note ? `<b>${esc(f.note)}</b>　` : ''}<span class="hint">图 ${f.n} · p.${f.page}</span>　${esc(short(figText(f.caption), 150))}</figcaption></figure>`).join('')}</div>
+    ${figs.length > 1 ? '<button class="figs-nav prev" data-action="fig-step" data-d="-1" aria-label="上一张">‹</button><button class="figs-nav next" data-action="fig-step" data-d="1" aria-label="下一张">›</button>' : ''}
+    <div class="figs-foot"><span class="figs-count">${figs.length > 1 ? `1 / ${figs.length}` : ''}</span><span class="grow"></span>
+      ${more > 0 ? `<a href="#" data-action="fig-open" data-pid="${pid}" data-n="${figs[0].n}" data-all="1">全部 ${figs.length + more} 张图</a>` : ''}</div></div>`;
+}
+
+async function openFigure(pid, n, all) {
+  const p = [S.reader?.paper, ...(S.detail?.papers || [])].find((x) => x?.id === pid && x.figures) || await get(`/api/papers/${enc(pid)}`).catch(fail);
+  const list = p && (all ? p.figures : p.key_figures.length ? p.key_figures : p.figures);
+  if (!list?.length) return;
+  S.lightbox = { pid, list, i: Math.max(0, list.findIndex((f) => f.n === +n)) };
+  renderLightbox();
+}
+
+function renderLightbox() {
+  const { pid, list, i } = S.lightbox, f = list[i];
+  modal(`<div class="lightbox"><div class="lb-head"><b>图 ${f.n}</b><span class="hint">p.${f.page}${list.length > 1 ? ` · ${i + 1} / ${list.length}` : ''}</span><span class="grow"></span>
+      <button class="btn sm" data-action="fig-pdf" data-pid="${esc(pid)}" data-page="${f.page}" data-q="${esc(short(f.caption, 40))}">在原文中看 →</button>
+      <button class="btn sm ghost" data-action="close-modal">关闭 <kbd>Esc</kbd></button></div>
+    <div class="lb-stage">${list.length > 1 ? `<button class="figs-nav prev" data-action="lb-step" data-d="-1" ${i ? '' : 'disabled'}>‹</button>` : ''}
+      <img src="${figSrc(pid, f.n)}" alt="图 ${f.n}">
+      ${list.length > 1 ? `<button class="figs-nav next" data-action="lb-step" data-d="1" ${i < list.length - 1 ? '' : 'disabled'}>›</button>` : ''}</div>
+    ${f.note ? `<p class="lb-note">${esc(f.note)}</p>` : ''}<p class="lb-caption">${esc(f.caption)}</p></div>`);
+  document.querySelector('.modal').classList.add('wide');
+}
+
+// ---------- jumps: from a title card straight to the part of the paper the reader is after ----------
+
+const KEY_LABEL = { method: '方法', experiments: '实验', conclusion: '结论' };
+
+/** j: { report: [headings], sections: {method: {title, page}, ...}, figures, anchors, chat }; full: the card itself, with report sections. */
+function jumpsHtml(p, j, full) {
+  const pid = esc(p.id), state = reportState(p);
+  if (!j) return state ? `<div class="jumps">${jumpBtn(pid, state === 'done' ? '深读报告 →' : '<span class="spin"></span>报告生成中', { tab: 'report' }, state === 'done' ? 'go' : 'run')}</div>` : '';
+  const parts = [];
+  if (state === 'done' && full && j.report.length) {
+    parts.push(`<span class="jumps-label">深读报告</span>${j.report.map((h) => jumpBtn(pid, esc(short(h.replace(/^你关心的[:：]/, '关心：'), 14)), { tab: 'report', section: h }, 'go', h)).join('')}`);
+  } else if (state) parts.push(jumpBtn(pid, state === 'done' ? '深读报告 →' : '<span class="spin"></span>报告生成中', { tab: 'report' }, state === 'done' ? 'go' : 'run'));
+  const secs = Object.entries(KEY_LABEL).filter(([k]) => j.sections?.[k]);
+  if (secs.length) parts.push(`<span class="jumps-label">原文</span>${secs.map(([k, label]) => jumpBtn(pid, `${label} <small>p.${j.sections[k].page}</small>`, { page: j.sections[k].page, q: j.sections[k].title }, '', j.sections[k].title)).join('')}`);
+  if (j.figures) parts.push(`<button class="jump" data-action="fig-open" data-pid="${pid}" data-n="0" data-all="${full ? 1 : ''}" title="${full ? '浏览全部插图' : '看方法 / 架构图'}">${full ? `全部插图 ${j.figures}` : '架构图'}</button>`);
+  if (j.anchors) parts.push(jumpBtn(pid, `划词 ${j.anchors}`, { tab: 'anchors' }, '', '你在原文、快读卡、报告里划过的段落'));
+  if (j.chat) parts.push(jumpBtn(pid, `讨论 ${j.chat}`, { tab: 'chat' }, '', '接着上次的讨论'));
+  return parts.length ? `<div class="jumps ${full ? 'full' : ''}">${parts.join('')}</div>` : '';
+}
+
+const jumpBtn = (pid, label, { tab, section, page, q }, cls = '', title = '') =>
+  `<button class="jump ${cls}" data-action="jump" data-pid="${pid}"${tab ? ` data-tab="${tab}"` : ''}${section ? ` data-section="${esc(section)}"` : ''}${page ? ` data-page="${page}"` : ''}${q ? ` data-q="${esc(q)}"` : ''} title="${esc(title)}">${label}</button>`;
+
+const fullJumps = (p) => ({ report: (p.report?.sections || []).map((s) => s.heading), sections: p.key_sections, figures: (p.figures || []).length, anchors: (p.anchors || []).length });
+
+/** Open the reader on a tab (and report section) or a PDF page, flashing the heading or caption there. */
+function openAt(pid, { tab, section, page, q } = {}) {
+  if (S.reader?.pid === pid) {
+    if (tab) { S.reader.tab = tab; S.reader.section = section; renderPanel(); if (tab === 'chat') loadThread(`paper:${pid}`).then(renderPanel); }
+    if (page) jump(page, q);
+    return;
+  }
+  Object.assign(S, { pendingTab: tab || (page ? 'card' : null), pendingSection: section || null, pendingFlash: page && q ? { page, quote: q } : null });
+  openReader(pid, page);
+}
 
 function topicsRow(p, kind = 'paper') {
   const open = S.picker === p.id;
@@ -798,11 +883,12 @@ function topicsRow(p, kind = 'paper') {
 async function openReader(pid, page, push = true) {
   if (push) { S.pushing = true; location.hash = `#/read/${enc(pid)}${page ? '@' + page : ''}`; return; }
   const fresh = S.reader?.pid !== pid;
-  S.reader = { ...(fresh ? { tab: S.pendingTab, anchor: S.pendingAnchor } : S.reader), pid, page: page || S.reader?.page || 1 };
-  S.pendingTab = null;
-  S.pendingAnchor = null;
+  S.reader = { ...(fresh ? { tab: S.pendingTab, anchor: S.pendingAnchor, section: S.pendingSection, flash: S.pendingFlash } : S.reader),
+    pid, page: page || S.reader?.page || 1 };
+  Object.assign(S, { pendingTab: null, pendingAnchor: null, pendingSection: null, pendingFlash: null });
   try {
     S.reader.paper = await get(`/api/papers/${enc(pid)}`);
+    changed('reader', S.reader.paper);
   } catch (e) { fail(e); return; }
   S.reader.tab ||= reportState(S.reader.paper) ? 'report' : 'card';
   renderReader(fresh);
@@ -826,6 +912,8 @@ function renderReader(fresh) {
     el.innerHTML = `<div class="reader-top">
         <button class="btn sm ghost" data-action="close-reader">← 返回 <kbd>Esc</kbd></button>
         <div class="title">${esc(p.title)}</div>
+        ${p.pdf_path && p.outline?.length ? `<select class="toc" data-change="toc" title="跳到原文的某一节"><option value="">原文目录…</option>${p.outline.map((s) =>
+          `<option value="${s.page}|${esc(s.title)}">${'　'.repeat(Math.min(s.level, 3) - 1)}${esc(short(s.title, 48))}　p.${s.page}</option>`).join('')}</select>` : ''}
         ${p.url ? `<a class="btn sm ghost" href="${esc(p.url)}" target="_blank">${esc(idLabel(p.id).split(' ')[0])} ↗</a>` : ''}
         <button class="btn sm ghost" data-action="wide">调整面板宽度</button>
       </div>
@@ -882,10 +970,16 @@ async function mountPdf(pid, page = 1) {
   if (page > 1) jumpPdf(page);
 }
 
-async function renderPdfPage(n) {
+/** Resolves once the page's canvas and text layer are in place (the same promise for concurrent callers). */
+function renderPdfPage(n) {
   const div = document.querySelector(`#pdfv .pdf-page[data-page="${n}"]`);
-  if (!div || div.dataset.rendered) return;
+  if (!div) return Promise.resolve();
   div.dataset.rendered = '1';
+  div.rendering ||= drawPdfPage(div, n);
+  return div.rendering;
+}
+
+async function drawPdfPage(div, n) {
   const page = await PDFV.doc.getPage(n);
   const vp = page.getViewport({ scale: PDFV.scale });
   div.style.width = `${vp.width}px`;
@@ -918,7 +1012,7 @@ function markPdfPage(n) {
   const div = document.querySelector(`#pdfv .pdf-page[data-page="${n}"]`), layer = div?.querySelector('.textLayer');
   const p = S.reader?.paper;
   if (!layer || !p) return;
-  unmark(layer, 'mark');
+  unmark(layer, 'mark.anchor-hl');
   div.querySelectorAll('.anchor-bubble').forEach((b) => b.remove());
   const top = div.getBoundingClientRect().top;
   for (const a of p.anchors.filter((x) => x.surface === 'pdf' && x.page === n)) {
@@ -1099,7 +1193,13 @@ function renderPanel() {
   const panel = $('#panel');
   panel.classList.toggle('chatwrap', r.tab === 'chat' || r.tab === 'anchor');
   if (r.tab === 'card') { panel.innerHTML = paperCard(p, { inReader: true }); decorateAnchors(p, panel); }
-  else if (r.tab === 'report') { panel.innerHTML = reportHtml(p); decorateAnchors(p, panel); }
+  else if (r.tab === 'report') {
+    panel.innerHTML = reportHtml(p);
+    decorateAnchors(p, panel);
+    const target = r.section && [...panel.querySelectorAll('.section')].find((s) => s.dataset.section === r.section);
+    if (target) { target.scrollIntoView({ block: 'start' }); target.classList.add('flash'); }
+    r.section = null;
+  }
   else if (r.tab === 'anchors') panel.innerHTML = anchorsListHtml(p);
   else if (r.tab === 'anchor') { panel.innerHTML = anchorPanelHtml(p, r.anchor); scrollChat(); }
   else if (r.tab === 'notes') panel.innerHTML = notesBlock(p).replace('class="block"', 'class="block" style="margin-top:0"');
@@ -1120,7 +1220,8 @@ function reportHtml(p) {
       ${agentOn() ? '' : '<p class="hint">需要先连接 agent</p>'}
       ${last ? runCard(last, '上次深读') : ''}</div>`;
   }
-  return p.report.sections.map((s) => `<div class="section" data-anchor-surface="report" data-pid="${esc(p.id)}" data-section="${esc(s.heading)}"><h3>${esc(s.heading)}</h3>${md(s.body)}
+  return `<div class="rtoc">${p.report.sections.map((s) => jumpBtn(esc(p.id), esc(short(s.heading, 14)), { tab: 'report', section: s.heading }, '', s.heading)).join('')}</div>` +
+    p.report.sections.map((s) => `<div class="section" data-anchor-surface="report" data-pid="${esc(p.id)}" data-section="${esc(s.heading)}"><h3>${esc(s.heading)}</h3>${md(s.body)}
       ${s.citations.length ? `<div class="cites">${s.citations.map((c) => cite(p.id, c.page, c.quote)).join('')}</div>` : ''}</div>`).join('') +
     `<div style="margin-top:20px"><button class="btn sm ghost" data-action="deepread" data-pid="${esc(p.id)}" ${agentOn() ? '' : 'disabled'}>重新生成</button></div>`;
 }
@@ -1135,6 +1236,8 @@ const SUGGEST = {
   anchor: ['这段在说什么？用大白话解释一下', '为什么要这样设计？有没有别的做法', '这和我的研究有什么关系？'],
   thought: ['这个想法成立的前提是什么？', '库里有没有支持或反对它的证据？', '如果值得做，最小的验证方式是什么？'],
   research: ['这个研究的问题成立吗？最强的反对意见是什么？', '和库里最接近的工作相比，方法上的区别在哪？', '帮我把验证方案收敛到一个最小实验'],
+  find: ['把这几篇按方法路线分一分，列个对比表', '哪篇最值得先深读？为什么', '还漏了哪些重要工作？再补找几篇'],
+  papers: ['它们各自解决什么问题？列个对比表', '方法上的关键分歧在哪？各自的证据是什么', '能不能组合起来？最小的验证实验是什么'],
 };
 
 function scopeLabel(scope) {
@@ -1143,6 +1246,8 @@ function scopeLabel(scope) {
   if (k === 'research') return `研究《${S.scopeTitles[scope] || '…'}》`;
   if (k === 'thought') return '这条想法';
   if (k === 'anchor') return '选中的这段';
+  if (k === 'find') return `找到的论文「${short(S.scopeTitles[scope] || '…', 24)}」`;
+  if (k === 'papers') return `选中的 ${ref.split('|').length} 篇论文`;
   return k === 'paper' ? '这篇论文' : k === 'topic' ? `主题 ${ref}` : k === 'thoughts' ? '我的想法' : '整个论文库';
 }
 
@@ -1162,6 +1267,7 @@ function chatHtml(scope) {
       ${t?.agent_id ? `<a class="btn sm ghost" href="https://cursor.com/agents/${esc(t.agent_id)}" target="_blank">在 Cursor 中继续 ↗</a>` : ''}
       ${t?.messages.length && !scope.startsWith('research:') ? `<button class="btn sm ghost" data-action="compose-thread" data-scope="${esc(scope)}" title="把这段讨论作为素材开一个研究">转成研究</button>` : ''}
       ${t?.messages.length ? `<button class="btn sm ghost" data-action="chat-new" data-scope="${esc(scope)}">新对话</button>` : ''}</div>
+    ${S.scopePapers[scope]?.length ? `<div class="scope-papers"><span class="hint">${kind === 'find' ? `已入库 ${S.scopePapers[scope].length} 篇` : '论文'}</span>${S.scopePapers[scope].map((p) => paperChip(p.id, p.title)).join('')}</div>` : ''}
     <div class="msgs">${msgs}</div>
     <form class="chat-input" data-form="chat" data-scope="${esc(scope)}">
       <textarea rows="1" placeholder="${disabled ? 'Agent 未连接，暂时不能讨论' : '问点什么… 回车发送，Shift+回车换行'}" ${disabled ? 'disabled' : ''}></textarea>
@@ -1200,7 +1306,7 @@ function discussPage() {
   const scope = S.scope;
   const chip = (s, label) => `<button class="scope ${scope === s ? 'on' : ''}" data-action="scope" data-scope="${esc(s)}">${esc(label)}</button>`;
   return `<div class="page"><div style="padding:18px 20px 10px"><h2 class="page-title">讨论</h2>
-    <div class="scope-bar">${chip('library', '整个论文库')}${chip('thoughts', '我的想法')}${scope.startsWith('research:') ? chip(scope, scopeLabel(scope)) : ''}
+    <div class="scope-bar">${chip('library', '整个论文库')}${chip('thoughts', '我的想法')}${/^(research|find|papers):/.test(scope) ? chip(scope, scopeLabel(scope)) : ''}
       <select class="scope ${scope.startsWith('topic:') ? 'on' : ''}" data-change="scope"><option value="">按主题…</option>
       ${topics.map((t) => `<option value="topic:${esc(t.path)}" ${scope === 'topic:' + t.path ? 'selected' : ''}>${t.path.includes('/') ? '　' : ''}${esc(t.name)}</option>`).join('')}</select></div></div>
     <div style="flex:1;min-height:0;border-top:1px solid var(--line)">${chatHtml(scope)}</div></div>`;
@@ -1242,7 +1348,8 @@ function selectBar(kind) {
   if (!sel || sel.kind !== kind) return '';
   const n = sel.ids.size, noun = kind === 'thought' ? '条想法' : '篇论文';
   return `<div class="select-bar"><span>已选 ${n} ${noun}</span><span class="grow"></span>
-    <button class="btn sm primary" data-action="sel-start" ${n ? '' : 'disabled'}>用它们开始研究</button>
+    ${kind === 'paper' ? `<button class="btn sm primary" data-action="sel-discuss" ${n > 1 ? '' : 'disabled'} title="把选中的几篇放在一起，和 agent 对比着讨论">一起讨论</button>` : ''}
+    <button class="btn sm ${kind === 'paper' ? '' : 'primary'}" data-action="sel-start" ${n ? '' : 'disabled'}>用它们开始研究</button>
     <button class="btn sm" data-action="sel-join" ${n ? '' : 'disabled'}>加入已有研究</button>
     <button class="btn sm ghost" data-action="sel-cancel">取消</button></div>`;
 }
@@ -1328,9 +1435,31 @@ async function addFiles(files) {
   capText.focus();
 }
 
+const FIND_RE = /^\s*(?:请|麻烦)?\s*(?:帮我|帮忙|给我)\s*(?:找|搜|推荐)|^\s*(?:找|搜)(?:一下|几篇|一些|些)?[^\n]{0,60}(?:论文|paper)/i;
+
+async function submitFind(text) {
+  capText.value = ''; capThought.value = ''; autosize(capText);
+  try {
+    const cap = await post('/api/find', { text });
+    loadState();
+    if (!cap.agent) {
+      toast('Agent 未连接：先按关键词在 arXiv 检索了候选，确认后入库');
+      if (S.view !== 'inbox') { S.wantSel = { kind: 'capture', id: cap.id }; go('inbox'); } else { await load(); select('capture', cap.id); }
+      return;
+    }
+    toast('已交给 agent 去找，找到的论文会入库，并在这里直接开聊');
+    S.scopeTitles[`find:${cap.id}`] = text;
+    openThreadAt(`find:${cap.id}`);
+  } catch (e) {
+    capText.value = text; autosize(capText);
+    fail(e);
+  }
+}
+
 async function submitCapture() {
   const text = capText.value.trim(), thought = capThought.value.trim(), images = S.images;
   if (!text && !images.length && !thought) { capText.focus(); return; }
+  if (!images.length && !thought && FIND_RE.test(text) && !/https?:\/\//.test(text)) return submitFind(text);
   capText.value = ''; capThought.value = ''; S.images = []; renderImages(); autosize(capText);
   try {
     const cap = await post('/api/captures', { text, thought, images });
@@ -1741,7 +1870,8 @@ const actions = {
     const scope = el.dataset.scope, t = S.threads[scope], [k, ...rest] = scope.split(':'), ref = rest.join(':');
     const first = t.messages.find((m) => m.role === 'user');
     openComposer({ links: [{ kind: 'thread', ref: t.id, label: first ? first.text : scopeLabel(scope) },
-      ...(k === 'paper' ? [{ kind: 'paper', ref, label: S.reader?.paper?.title || ref }] : [])], topics: k === 'topic' ? [ref] : [] });
+      ...(k === 'paper' ? [{ kind: 'paper', ref, label: S.reader?.paper?.title || ref }] : []),
+      ...(S.scopePapers[scope] || []).map((p) => ({ kind: 'paper', ref: p.id, label: p.title }))], topics: k === 'topic' ? [ref] : [] });
   },
   'compose-capture': () => {
     const text = [capText.value.trim(), capThought.value.trim()].filter(Boolean).join('\n\n');
@@ -1757,6 +1887,19 @@ const actions = {
     S.selecting = null; renderBody();
     openComposer({ links });
   },
+  'sel-discuss': () => {
+    const picked = S.list.filter((x) => S.selecting.ids.has(x.id));
+    const scope = `papers:${picked.map((x) => x.id).join('|')}`;
+    S.scopePapers[scope] = picked.map(({ id, title }) => ({ id, title }));
+    S.selecting = null;
+    openThreadAt(scope);
+  },
+  'find-capture': () => {
+    const text = [capText.value.trim(), capThought.value.trim()].filter(Boolean).join('\n');
+    if (!text) { capText.placeholder = '先说说想找什么样的论文，比如：用 flow matching 做 VLA 动作头、有真机实验的工作'; capText.focus(); return; }
+    submitFind(text);
+  },
+  'open-find': (el) => openThreadAt(`find:${el.dataset.id}`),
   'sel-join': () => {
     const { kind, ids } = S.selecting;
     S.selecting = null; renderBody();
@@ -1878,6 +2021,24 @@ const actions = {
   'goto-capture': (el, e) => { e.preventDefault(); openItem('capture', el.dataset.id, 'inbox'); },
   'rm-image': (el) => { S.images.splice(+el.dataset.i, 1); renderImages(); },
   'close-modal': closeModal,
+  jump: (el, e) => {
+    e.preventDefault(); e.stopPropagation();
+    const d = el.dataset;
+    openAt(d.pid, { tab: d.tab, section: d.section, page: d.page ? +d.page : undefined, q: d.q });
+  },
+  'fig-open': (el, e) => { e.preventDefault(); e.stopPropagation(); openFigure(el.dataset.pid, el.dataset.n, !!el.dataset.all); },
+  'fig-step': (el, e) => {
+    e.stopPropagation();
+    const track = el.closest('.figs').querySelector('.figs-track');
+    track.scrollBy({ left: +el.dataset.d * track.clientWidth, behavior: 'smooth' });
+  },
+  'lb-step': (el) => { S.lightbox.i = Math.max(0, Math.min(S.lightbox.list.length - 1, S.lightbox.i + +el.dataset.d)); renderLightbox(); },
+  'fig-pdf': (el) => { closeModal(); openAt(el.dataset.pid, { page: +el.dataset.page, q: el.dataset.q }); },
+  'write-card': async (el) => {
+    el.disabled = true;
+    try { await post(`/api/papers/${enc(el.dataset.pid)}/card`); toast('已交给 agent 写快读卡'); refresh(true); }
+    catch (e) { fail(e); el.disabled = false; }
+  },
 };
 
 document.addEventListener('click', (e) => {
@@ -1911,10 +2072,21 @@ document.addEventListener('change', async (e) => {
     } catch (err) { fail(err); refresh(true); }
     return;
   }
+  if (e.target.dataset.change === 'toc' && e.target.value) {
+    const [page, ...title] = e.target.value.split('|');
+    jump(+page, title.join('|'));
+    e.target.value = '';
+    return;
+  }
   if (e.target.dataset.change === 'scope' && e.target.value) {
     S.scope = e.target.value; renderBody(); await loadThread(S.scope); renderBody();
   }
 });
+
+document.addEventListener('scroll', (e) => {
+  const track = e.target.classList?.contains('figs-track') && e.target, count = track && track.parentElement.querySelector('.figs-count');
+  if (count) count.textContent = `${Math.round(track.scrollLeft / track.clientWidth) + 1} / ${track.children.length}`;
+}, true);
 
 document.addEventListener('input', (e) => {
   if (e.target.dataset.filter !== 'pick') return;
@@ -2037,6 +2209,10 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); if (S.reader) closeReader(); capText.focus(); return; }
+  if (S.lightbox && document.querySelector('.lightbox') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    S.lightbox.i = Math.max(0, Math.min(S.lightbox.list.length - 1, S.lightbox.i + (e.key === 'ArrowRight' ? 1 : -1)));
+    return renderLightbox();
+  }
   if (e.key === 'Escape') {
     if (document.querySelector('.modal-bg')) return closeModal();
     if (S.picker) { S.picker = null; return S.reader ? renderPanel() : renderDetail(); }
@@ -2089,7 +2265,7 @@ async function refresh(force) {
     if (S.sel && !editing && !S.picker && !S.editResearch && !S.editGist && !S.editExp && !S.editWriting && !document.querySelector('.modal-bg')) await loadDetail(force);
     if (S.reader) {
       const p = await get(`/api/papers/${enc(S.reader.pid)}`);
-      if (force || changed('reader', p)) {
+      if (changed('reader', p) || force) {
         if (reportState(S.reader.paper) === 'running' && reportState(p) === 'done' && S.reader.tab !== 'report') {
           toast('深读报告写好了', '去看', () => { S.reader.tab = 'report'; renderPanel(); });
         }
