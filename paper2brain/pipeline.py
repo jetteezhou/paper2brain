@@ -120,11 +120,12 @@ def attach_pdf(pid, data):
 
 def receive(capture_id, text, source, thought=None, images=()):
     """Everything the user hands over (web box, iPhone shortcut, agent's ./p2b capture add) comes in here.
-    - only a thought, nothing to look up: a standalone thought;
-    - the same text as an earlier capture (the clipboard still holds the last link): the thought goes onto that
-      capture, which moves back to the inbox;
-    - otherwise a new capture. Idempotent on capture_id, which also names a thought it produced.
-    Returns {"kind": "thought" | "duplicate" | "capture", "created", "capture" | "thought_id"}."""
+    The thought (what the user said with it) opens a discussion:
+    - only a thought, nothing to look up: a discussion of the whole library;
+    - the same text as an earlier capture (the clipboard still holds the last link): a discussion of that capture,
+      which moves back to the inbox;
+    - otherwise a new capture, with its discussion. Idempotent on capture_id, which also names a discussion it opened.
+    Returns {"kind": "thought" | "duplicate" | "capture", "created", "capture" | "thread_id"}."""
     text, thought = (text or "").strip(), (thought or "").strip()
     existing = store.get_capture(capture_id)
     if existing:
@@ -132,11 +133,11 @@ def receive(capture_id, text, source, thought=None, images=()):
     if not text and not images:
         if not thought:
             raise rules.Rejected("内容为空：至少要有文字、链接、图片或一句想法")
-        return {"kind": "thought", "created": True, "thought_id": store.add_thought(thought, "user", tid=capture_id)}
+        return {"kind": "thought", "created": True, "thread_id": store.new_thread("library", text=thought, tid=capture_id)}
     earlier = None if images else store.same_capture(text)
     if earlier:
         if thought:
-            store.add_thought(thought, "user", capture_id=earlier, tid=capture_id)
+            store.new_thread(f"capture:{earlier}", text=thought, tid=capture_id)
         store.set_triage(earlier, "inbox")
         return {"kind": "duplicate", "created": False, "capture": store.get_capture(earlier)}
     cap, created = store.add_capture(capture_id, text, source, thought, images)
@@ -265,11 +266,10 @@ REPO_HOSTS = ("github.com", "gitlab.com", "gitee.com", "bitbucket.org")
 
 
 def start_research(title, text, topics=(), links=(), files=()):
-    """Open a research from whatever the user already has: a long text, files, chosen thoughts / papers /
-    discussions. Fast part only (create, store files, explicit links); finish_start does the network work."""
+    """Open a research from whatever the user already has: a long text, files, chosen papers / discussions. Fast part only (create, store files, explicit links); finish_start does the network work."""
     text = (text or "").strip()
     if not ((title or "").strip() or text or links or files):
-        raise rules.Rejected("至少写一句想法，或者带上文件、想法、论文、讨论、仓库中的一样")
+        raise rules.Rejected("至少写一句想法，或者带上文件、论文、讨论、仓库中的一样")
     first = next((ln.strip(" #>-*") for ln in text.splitlines() if ln.strip(" #>-*")), "")
     title = (title or "").strip() or short_title(first) or "新研究"
     rid = store.add_research(title, "user", None, topics, links)
@@ -304,7 +304,7 @@ def short_title(line, n=30):
 
 def _materials_line(rid):
     r = store.get_research(rid)
-    names = {"paper": "论文", "thought": "想法", "thread": "讨论", "message": "讨论消息", "capture": "收下的内容", "doc": "附件"}
+    names = {"paper": "论文", "thread": "讨论", "message": "讨论消息", "capture": "收下的内容", "doc": "附件"}
     parts = [f"{names.get(l['kind'], l['kind'])}「{short_title(l.get('label') or '', 24)}」" for l in r["links"] if not l["missing"]]
     parts += [f"仓库 {x['name']}（{'自己的' if x['role'] == 'own' else 'baseline'}）" for x in r["repos"]]
     return "、".join(parts)

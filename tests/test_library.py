@@ -85,7 +85,7 @@ class Store(unittest.TestCase):
         cap, created = store.add_capture(self.cid, "different text", "test", thought="again")
         self.assertFalse(created)
         self.assertEqual(cap["raw"], "https://example.com/a")
-        self.assertEqual(len(cap["thoughts"]), 1)
+        self.assertEqual([t["first"] for t in cap["threads"]], ["为什么收"])
 
     def test_same_text_is_found_for_dedupe(self):
         self.assertIsNotNone(store.same_capture(" https://example.com/a "))
@@ -131,22 +131,22 @@ class Store(unittest.TestCase):
         aid = store.add_anchor(only, "card", "flow matching", "user")
         store.add_message(store.thread_for(f"anchor:{aid}")["id"], "user", "这段？")
         store.add_message(store.thread_for(f"paper:{only}")["id"], "user", "讲讲")
-        on_paper = store.add_thought("关于这篇的想法", "user", paper_id=only)
-        store.link_research(rid, "thought", store.get_capture(self.cid)["thoughts"][0]["id"], "user")
+        store.new_thread(f"paper:{only}", text="关于这篇的想法")
+        store.link_research(rid, "thread", store.get_capture(self.cid)["threads"][0]["id"], "user")
         (store.paper_dir(only) / "pages.json").write_text("[]")
 
         plan = store.capture_removal(self.cid)
         self.assertEqual([p["id"] for p in plan["papers"]], [only])
-        self.assertEqual((len(plan["papers"][0]["anchor"]), len(plan["papers"][0]["thread"]), plan["papers"][0]["card"]), (1, 2, True))
+        self.assertEqual((len(plan["papers"][0]["anchor"]), len(plan["papers"][0]["thread"]), plan["papers"][0]["card"]), (1, 3, True))
         self.assertEqual({p["id"]: len(p["why"]) for p in plan["kept"]}, {shared: 1, used: 1})
-        self.assertEqual((len(plan["thoughts"]), plan["used_in"]), (1, ["用到它"]))
+        self.assertEqual((len(plan["threads"]), plan["used_in"]), (1, ["用到它"]))
 
         store.delete_capture(self.cid)
         self.assertIsNone(store.get_capture(self.cid))
         self.assertIsNone(store.get_paper(only))
         self.assertFalse(store.paper_dir(only, create=False).exists())
         self.assertIsNone(store.get_anchor(aid))
-        self.assertFalse(any(t["id"] == on_paper or t["capture_id"] == self.cid for t in store.list_thoughts()))
+        self.assertFalse(any(t["scope"] in (f"capture:{self.cid}", f"paper:{only}") for t in store.recent_threads()))
         self.assertEqual([l["kind"] for l in store.get_research(rid)["links"]], ["paper"])
         listed = {p["id"] for p in store.list_papers()}
         self.assertTrue({shared, used} <= listed and only not in listed)
@@ -172,13 +172,14 @@ class Store(unittest.TestCase):
     def test_research_materials_link_both_ways_and_inherit_topics(self):
         store.upsert_paper("arxiv:2501.00001", "one-step policy")
         store.set_topics("arxiv:2501.00001", ["VLA/推理加速"], "agent")
-        tid = store.add_thought("能不能把动作头蒸馏到一步", "user", paper_id="arxiv:2501.00001")
-        rid = store.add_research("一步动作头", "user", links=[("thought", tid), ("paper", "arxiv:2501.00001")])
+        tid = store.new_thread("paper:arxiv:2501.00001", text="能不能把动作头蒸馏到一步")
+        rid = store.add_research("一步动作头", "user", links=[("thread", tid), ("paper", "arxiv:2501.00001")])
         r = store.get_research(rid)
         self.assertEqual((r["stage"], r["topics"]), ("forming", ["VLA/推理加速"]))
-        self.assertEqual({l["kind"] for l in r["links"]}, {"thought", "paper"})
+        self.assertEqual({l["kind"] for l in r["links"]}, {"thread", "paper"})
+        self.assertEqual(next(l for l in r["links"] if l["kind"] == "thread")["label"], "能不能把动作头蒸馏到一步")
         self.assertEqual(store.get_paper("arxiv:2501.00001")["research"][0]["id"], rid)
-        self.assertTrue(any(t["research"] for t in store.list_thoughts() if t["id"] == tid))
+        self.assertEqual(store.thread_for(thread_id=tid)["research"][0]["id"], rid)
         self.assertEqual([x["id"] for x in store.list_research("VLA")], [rid])
         with self.assertRaisesRegex(rules.Rejected, "不存在"):
             store.link_research(rid, "message", "nope", "user")
@@ -212,17 +213,63 @@ class Store(unittest.TestCase):
         self.assertEqual((r["title"], r["body"]["validation"], r["proposal"], r["stage"]),
                          ("t", "v [arxiv:2410.24164 p.3]", None, "forming"))
 
-    def test_thought_gist_keeps_raw_and_user_edit_wins(self):
-        tid = store.add_thought("和 diffusion policy 对比一下", "user", paper_id="arxiv:2410.24164")
-        self.assertIn(tid, store.pending_gists(100))
-        store.set_gist(tid, "π0 的 flow matching 动作头和 Diffusion Policy 差在哪", "agent")
-        self.assertNotIn(tid, store.pending_gists(100))
-        store.set_gist(tid, "比较两种动作生成头", "user")
+    def test_discussion_title_keeps_words_and_user_edit_wins(self):
+        store.upsert_paper("arxiv:2601.00021", "titled")
+        tid = store.new_thread("paper:arxiv:2601.00021", text="和 diffusion policy 对比一下")
+        self.assertIn(tid, store.pending_titles(100))
+        store.set_thread_title(tid, "π0 的 flow matching 动作头和 Diffusion Policy 差在哪", "agent")
+        self.assertNotIn(tid, store.pending_titles(100))
+        store.set_thread_title(tid, "比较两种动作生成头", "user")
         with self.assertRaisesRegex(rules.Rejected, "手动改过"):
-            store.set_gist(tid, "agent 又来改", "agent")
-        t = store.get_thought(tid)
-        self.assertEqual((t["text"], t["gist"], t["gist_by"], t["paper"]["id"]),
-                         ("和 diffusion policy 对比一下", "比较两种动作生成头", "user", "arxiv:2410.24164"))
+            store.set_thread_title(tid, "agent 又来改", "agent")
+        t = store.thread_for(thread_id=tid)
+        self.assertEqual((t["messages"][0]["text"], t["title"], t["title_by"]), ("和 diffusion policy 对比一下", "比较两种动作生成头", "user"))
+        self.assertEqual(store.get_paper("arxiv:2601.00021")["threads"][0]["id"], tid)
+
+    def test_discussion_tree_grows_moves_and_survives_deletes(self):
+        pid = "arxiv:2601.00022"
+        store.upsert_paper(pid, "tree")
+        root = store.new_thread(f"paper:{pid}", text="π0 为什么用 flow matching")
+        aid = store.add_anchor(pid, "card", "action expert", "user")
+        mid = store.thread_for(f"anchor:{aid}")["id"]
+        store.add_message(mid, "user", "这段呢")
+        leaf = store.new_thread("library", parent_id=mid, text="能不能用到灵巧手上")
+        self.assertEqual(store.thread_for(thread_id=leaf)["parent"]["first"], "这段呢")
+        store.move_thread(mid, root, "agent")
+        self.assertEqual([c["id"] for c in store.thread_for(thread_id=root)["children"]], [mid])
+        with self.assertRaisesRegex(rules.Rejected, "它下面"):
+            store.move_thread(root, leaf, "user")
+        with self.assertRaisesRegex(rules.Rejected, "手动调整"):
+            store.move_thread(leaf, None, "agent")  # the user placed it by branching off
+        store.move_thread(mid, None, "user")
+        with self.assertRaisesRegex(rules.Rejected, "手动调整"):
+            store.move_thread(mid, root, "agent")
+        store.move_thread(mid, root, "user")
+        store.delete_anchor(aid)
+        self.assertEqual(store.thread_for(thread_id=leaf)["parent_id"], root)
+        with self.assertRaisesRegex(rules.Rejected, "不存在"):
+            store.new_thread("library", parent_id=mid)
+
+    def test_branch_from_a_message_inherits_the_path_and_cites_link_back(self):
+        pid = "arxiv:2601.00023"
+        store.upsert_paper(pid, "cited")
+        root = store.new_thread("library", text="动作头怎么选")
+        first = store.add_message(root, "assistant", f"flow matching 更快 [{pid} p.3]")
+        store.add_message(root, "user", "那 diffusion 呢")
+        a = store.new_thread("library", fork=first, text="只看 flow matching")
+        b = store.new_thread("library", fork=first, text="只看推理速度")
+        t = store.thread_for(thread_id=a)
+        self.assertEqual((t["parent_id"], [m["text"] for m in t["path"][0]["messages"]]),
+                         (root, ["动作头怎么选", f"flow matching 更快 [{pid} p.3]"]))  # up to the fork, not after it
+        self.assertEqual([s["id"] for s in t["siblings"]], [a, b])
+        r = store.thread_for(thread_id=root)
+        self.assertEqual(([x["id"] for x in r["messages"][1]["forks"]], r["papers"]), ([a, b], [{"id": pid, "title": "cited"}]))
+        self.assertEqual([x["id"] for x in store.cited_in(pid)], [root])
+        store.move_thread(b, a, "user")
+        self.assertIsNone(store.thread_for(thread_id=b)["fork_message_id"])
+        with store.tx() as c:
+            store._drop_threads(c, [root])
+        self.assertEqual((store.thread_for(thread_id=a)["parent_id"], store.thread_for(thread_id=a)["fork_message_id"]), (None, None))
 
     def test_experiment_numbers_must_come_from_raw(self):
         raw = "eval libero_spatial: success=0.923 (n=500)\nbaseline pi0: 0.884"
@@ -301,14 +348,14 @@ class Store(unittest.TestCase):
 
     def test_start_research_from_what_the_user_has(self):
         from paper2brain import pipeline
-        tid = store.add_thought("用 latent action 预训练 tokenizer", "user")
+        tid = store.new_thread("library", text="用 latent action 预训练 tokenizer")
         rid, images = pipeline.start_research(
-            None, "# 我想做：跨本体的动作 tokenizer\n背景很长……", ["VLA/tokenizer"], [("thought", tid)],
+            None, "# 我想做：跨本体的动作 tokenizer\n背景很长……", ["VLA/tokenizer"], [("thread", tid)],
             [("notes.md", "text/markdown", "白板笔记：codebook 512".encode()), ("board.png", "image/png", b"\x89PNG fake")])
         r = store.get_research(rid)
         self.assertEqual(r["title"], "我想做：跨本体的动作 tokenizer")
         kinds = sorted(l["kind"] for l in r["links"])
-        self.assertEqual(kinds, ["doc", "doc", "thought"])
+        self.assertEqual(kinds, ["doc", "doc", "thread"])
         doc = next(l for l in r["links"] if l["kind"] == "doc" and l["label"] == "notes.md")
         self.assertEqual(store.get_doc(doc["ref"])["text"], "白板笔记：codebook 512")
         self.assertEqual(len(images), 1)
@@ -442,13 +489,13 @@ class Server(unittest.TestCase):
         self.assertEqual(self.req("GET", "/api/state"), 200)
         self.assertEqual(self.req("GET", "/api/state", Host=f"localhost:{self.port}"), 200)
         self.assertEqual(self.req("GET", "/api/state", Host=f"evil.example:{self.port}"), 403)
-        body = '{"text": "跨站写入"}'.encode()
-        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "text/plain"}), 415)
-        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "application/json", "Origin": "http://evil.example"}), 403)
-        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "application/json", "Origin": "null"}), 403)
+        body = '{"scope": "library", "text": "跨站写入"}'.encode()
+        self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "text/plain"}), 415)
+        self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "application/json", "Origin": "http://evil.example"}), 403)
+        self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "application/json", "Origin": "null"}), 403)
         self.assertEqual(self.req("DELETE", "/api/anchors/x", Origin="http://evil.example"), 403)
-        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "application/json", "Origin": own}), 200)
-        self.assertEqual(sum(t["text"] == "跨站写入" for t in store.list_thoughts()), 1)
+        self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "application/json", "Origin": own}), 200)
+        self.assertEqual(sum(t["first"] == "跨站写入" for t in store.recent_threads()), 1)
 
 
 class scratch_home:
@@ -632,7 +679,8 @@ class Receiving(unittest.TestCase):
             got = pipeline.receive("sc-1", "  ", "web", "组会想讲 action chunking 的演化")
             self.assertEqual(got["kind"], "thought")
             self.assertEqual(pipeline.receive("sc-1", "", "web", "组会想讲 action chunking 的演化")["kind"], "thought")
-            self.assertEqual([t["text"] for t in store.list_thoughts()], ["组会想讲 action chunking 的演化"])
+            self.assertEqual([(t["id"], t["scope"], t["first"]) for t in store.recent_threads()],
+                             [("sc-1", "library", "组会想讲 action chunking 的演化")])
             self.assertEqual(store.counts()["inbox"], 0)
             pending = pipeline.receive("sc-9", "只有中文描述的一段解读", "web")["capture"]["id"]
             store.update_capture(pending, status="unmapped")
@@ -644,7 +692,7 @@ class Receiving(unittest.TestCase):
             store.set_triage(first["id"], "archived")
             again = pipeline.receive("sc-3", "https://arxiv.org/abs/2410.24164 ", "shortcut", "真机任务有几个？")
             self.assertEqual((again["kind"], again["capture"]["id"], again["capture"]["triage"]), ("duplicate", "sc-2", "inbox"))
-            self.assertEqual([t["text"] for t in again["capture"]["thoughts"]], ["真机任务有几个？"])
+            self.assertEqual([t["first"] for t in again["capture"]["threads"]], ["真机任务有几个？"])
             self.assertEqual(pipeline.receive("sc-2", "别的", "web")["created"], False)
 
     def test_icloud_inbox_waits_for_the_api_agent_unless_told_otherwise(self):
@@ -660,7 +708,7 @@ class Receiving(unittest.TestCase):
             write("th-1.json", {"id": "th-1", "text": "", "thought": "只是一个念头"})
             write("sc-1.json", {"id": "sc-1", "text": "https://mp.weixin.qq.com/s/abc", "thought": ""})
             inbox.drain()
-            self.assertEqual([t["id"] for t in store.list_thoughts()], ["th-1"])
+            self.assertEqual([t["id"] for t in store.recent_threads()], ["th-1"])
             self.assertIsNone(store.get_capture("sc-1"))  # the API's agent may still be taking it
             write("sc-1.agent.json", {"agent": {"id": "bc-phone"}, "run": {"id": "run-phone", "status": "CREATING"}})
             inbox.drain()
@@ -669,12 +717,12 @@ class Receiving(unittest.TestCase):
             process.assert_called_once_with("sc-1", agent=False)
             write("sc-2.json", {"id": "sc-2", "text": "https://mp.weixin.qq.com/s/abc", "thought": "再补一句", "local": True})
             inbox.drain()
-            self.assertEqual([t["text"] for t in store.get_capture("sc-1")["thoughts"]], ["再补一句"])
+            self.assertEqual([t["first"] for t in store.get_capture("sc-1")["threads"]], ["再补一句"])
             self.assertEqual(sorted(p.name for p in box.iterdir()), ["done"])
 
 
 class Search(unittest.TestCase):
-    def test_words_in_any_order_across_authors_gists_discussions_and_full_text(self):
+    def test_words_in_any_order_across_authors_titles_discussions_and_full_text(self):
         with scratch_home():
             cid = store.new_id()
             store.add_capture(cid, "https://arxiv.org/abs/2410.24164", "web")
@@ -682,8 +730,8 @@ class Search(unittest.TestCase):
             store.link(cid, "arxiv:2410.24164", "rule")
             store.set_fulltext("arxiv:2410.24164", "/tmp/x.pdf", PAGES)
             store.upsert_paper("arxiv:2501.00002", "库外论文", ["Chelsea Finn"])  # not listed: no capture, no research
-            tid = store.add_thought("和 DP 比一下", "user")
-            store.set_gist(tid, "flow matching 动作头和 diffusion policy 的区别", "agent")
+            tid = store.new_thread("library", text="和 DP 比一下")
+            store.set_thread_title(tid, "flow matching 动作头和 diffusion policy 的区别", "agent")
             th = store.thread_for("library")
             store.add_message(th["id"], "user", "库里谁做过灵巧手？")
 
@@ -695,7 +743,7 @@ class Search(unittest.TestCase):
             hit = store.search("laundry")["papers"][0]
             self.assertEqual((hit["hits"], hit["hit_page"]), (["原文"], 2))
             self.assertIn("laundry folding", hit["hit_text"])
-            self.assertEqual(ids("diffusion 动作头", "thoughts"), [tid])
+            self.assertEqual(ids("diffusion 动作头", "threads"), [tid])
             self.assertEqual(store.search("灵巧手")["messages"][0]["scope"], "library")
             self.assertEqual(ids("flow 不存在的词", "papers"), [])
             self.assertEqual(ids("100%", "papers"), [])
@@ -713,17 +761,28 @@ class Migrations(unittest.TestCase):
             legacy.execute("INSERT INTO thoughts VALUES ('t1', '2026-10-01', '旧想法', 'user', 'c1', NULL)")
             legacy.execute("INSERT INTO captures (id, created_at, raw, source, status) VALUES ('bare', '2026-10-02', '', 'web', 'unmapped')")
             legacy.execute("INSERT INTO thoughts VALUES ('t2', '2026-10-02', '只有一句想法', 'user', 'bare', NULL)")
+            legacy.execute("INSERT INTO threads VALUES ('th1', '2026-10-03', 'thought:t1', NULL, 'bc-1')")
+            legacy.execute("INSERT INTO messages VALUES ('m1', '2026-10-03', 'th1', 'user', '接着想', NULL)")
+            legacy.execute("INSERT INTO threads VALUES ('th2', '2026-10-04', 'thoughts', NULL, NULL)")
+            legacy.execute("INSERT INTO research (id, created_at, updated_at, title, by) VALUES ('r1', '2026-10-05', '2026-10-05', 'r', 'user')")
+            legacy.execute("INSERT INTO research_links VALUES ('r1', 'thought', 't1', 'user', '2026-10-05')")
+            legacy.execute("INSERT INTO research_links VALUES ('r1', 'thread', 'th1', 'user', '2026-10-05')")
             legacy.execute("INSERT INTO topics VALUES ('VLA', 'VLA', NULL, 0)")
             legacy.commit()
             legacy.close()
 
-            self.assertEqual(store.get_capture("c1")["thoughts"][0]["text"], "旧想法")
+            t1 = store.get_capture("c1")["threads"]
+            self.assertEqual([(t["id"], t["first"]) for t in t1], [("t1", "旧想法")])
+            t1 = store.thread_for(thread_id="t1")
+            self.assertEqual(([m["text"] for m in t1["messages"]], t1["agent_id"]), (["旧想法", "接着想"], "bc-1"))
+            self.assertEqual([(l["kind"], l["ref"]) for l in store.get_research("r1")["links"]], [("thread", "t1")])
             self.assertIsNone(store.get_capture("bare"))
-            self.assertEqual(next(t for t in store.list_thoughts() if t["id"] == "t2")["capture_id"], None)
+            self.assertEqual(store.thread_for(thread_id="t2")["scope"], "library")
+            self.assertEqual(store.thread_for(thread_id="th2")["scope"], "library")
             c = sqlite3.connect(home / "p2b.sqlite")
             self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], len(store.MIGRATIONS))
             names = {r[0] for r in c.execute("SELECT name FROM sqlite_master")}
-            self.assertTrue({"messages_thread", "events_target"} <= names and "ideas" not in names)
+            self.assertTrue({"messages_thread", "events_target", "threads_parent"} <= names and not {"ideas", "thoughts", "th1"} & names)
             self.assertEqual([r[0] for r in c.execute("SELECT path FROM topics")], ["VLA"])  # user's tree untouched
             before = list((home / "backups").glob("p2b-before-*.sqlite"))
             self.assertEqual(len(before), 1)

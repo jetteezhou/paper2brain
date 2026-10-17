@@ -323,13 +323,16 @@ def scope_text(scope):
     if kind == "paper":
         p = store.get_paper(ref)
         return (
-            f"论文 {ref}《{p['title'] if p else ''}》。先运行 `./p2b show paper {ref}` 了解快读卡、想法和笔记；"
+            f"论文 {ref}《{p['title'] if p else ''}》。先运行 `./p2b show paper {ref}` 了解快读卡、用户说过的话和笔记；"
             f"需要细节时用 `./p2b text {ref} --pages 3-5` 读原文。"
         )
     if kind == "topic":
         return f"主题「{ref}」下的论文。先运行 `./p2b papers --topic '{ref}'`。"
-    if kind == "thoughts":
-        return "用户记下的想法。先运行 `./p2b thoughts`，再结合相关论文回答。"
+    if kind == "capture":
+        return (
+            f"用户收下的一条内容（捕获 {ref}），这段讨论从他收下时说的话开始。先运行 `./p2b show capture {ref}`，"
+            f"已关联论文的再用 `./p2b show paper <id>` 看快读卡。"
+        )
     if kind == "find":
         cap = store.get_capture(ref) or {}
         return (
@@ -350,14 +353,6 @@ def scope_text(scope):
             f"论文 {pid}《{p.get('title', '')}》的{where}{at}里，用户选中了这段：「{a.get('quote', '')}」。"
             f"先运行 `./p2b show paper {pid}`；{ctx}围绕这段回答：它在说什么、为什么这样做、"
             f"和别的工作或用户的研究有什么关系，或者回答用户的具体问题。回答要短，引用页码。"
-        )
-    if kind == "thought":
-        t = store.get_thought(ref) or {}
-        about = f"，关于论文 {t['about_paper']}《{t.get('paper_title') or ''}》" if t.get("about_paper") else ""
-        gist = f"，提炼为「{t['gist']}」" if t.get("gist") else ""
-        return (
-            f"用户的一个想法（{ref}）：原话「{t.get('text', '')}」{gist}{about}。先运行 `./p2b thought show {ref}`，"
-            f"再按 librarian/thought.md 的“围绕一条想法讨论”一节，帮用户把这个念头往下推。"
         )
     if kind == "research":
         x = store.get_research(ref)
@@ -390,9 +385,16 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
         prompt, name = WEB_MARK + text, None
     else:
         opening = "这是研究的开端：按 librarian/research.md 的“开启研究”一节处理。\n" if start else ""
+        up = thread["parent"]
+        up = f"这段讨论是从另一段分出来的：{up['id']}「{up['title'] or up['first'] or ''}」，需要更多上下文时用 `./p2b thread show {up['id']}`。\n" if up else ""
+        # a branch inherits its ancestors up to the fork point, then what was said in it so far
+        said = [(m["role"], m["text"]) for seg in thread["path"] for m in seg["messages"]] + \
+               [(m["role"], m["run_text"] or m["text"]) for m in thread["messages"]]
+        said = [f"{'用户' if role == 'user' else 'agent'}：{text[:600]}" for role, text in said if text][-14:]
+        said = "这条讨论路径上已经说过的（从根到这里，按时间）：\n" + "\n".join(said) + "\n" if said else ""
         prompt = (
-            f"先读 librarian/README.md 和 librarian/discuss.md。\n{opening}讨论范围：{scope_text(scope)}\n"
-            f"讨论线程 ID：{thread['id']}（关联研究素材或笔记时用 --thread）\n\n用户{'的原话' if start else '的问题'}：{text}"
+            f"先读 librarian/README.md 和 librarian/discuss.md。\n{opening}讨论范围：{scope_text(scope)}\n{up}"
+            f"讨论线程 ID：{thread['id']}（关联研究素材或笔记时用 --thread）\n\n{said}用户{'的原话' if start else '的问题'}：{text}"
         )
         name = f"{'开启研究' if start else '讨论'}：{text[:40]}"
 
@@ -433,20 +435,20 @@ DISTILL_AGENT, DISTILL_TRIED = "distill_agent", "distill_tried"
 
 
 def distill_pending():
-    """Fill empty thought gists in batches through one long-lived agent: a follow-up starts in seconds, while a new
-    agent on this machine takes about a minute. Each thought is tried at most twice."""
+    """Name untitled discussions in batches through one long-lived agent: a follow-up starts in seconds, while a new
+    agent on this machine takes about a minute. Each discussion is tried at most twice."""
     if not status()["enabled"] or any(r["kind"] == "distill" for r in store.unfinished_runs()):
         return
     tried = json.loads(store.kv_get(DISTILL_TRIED) or "{}")
-    ids = [i for i in store.pending_gists() if tried.get(i, 0) < 2]
+    ids = [i for i in store.pending_titles() if tried.get(i, 0) < 2]
     if not ids:
         return
     last = store.last_run("distill")
     if last and last["status"] == "ERROR" and "agent_busy" not in (last["error"] or ""):
         store.kv_set(DISTILL_AGENT, "")  # that agent is gone (archived or expired); start a fresh one
     store.kv_set(DISTILL_TRIED, json.dumps({**tried, **{i: tried.get(i, 0) + 1 for i in ids}}))
-    text = f"先读 librarian/README.md 和 librarian/thought.md，按“提炼想法”一节处理这些想法：{' '.join(ids)}"
-    start_async("distill", "thoughts", text, name="提炼想法", agent_id=store.kv_get(DISTILL_AGENT) or None)
+    text = f"先读 librarian/README.md 和 librarian/discuss.md，按“给讨论起标题”一节处理这些讨论：{' '.join(ids)}"
+    start_async("distill", "threads", text, name="给讨论起标题", agent_id=store.kv_get(DISTILL_AGENT) or None)
 
 
 DEEP_TRIED = "deepread_tried"

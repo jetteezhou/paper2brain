@@ -24,8 +24,8 @@ paper2brain 发给你的任务都以"先读 librarian/""你是 paper2brain"或"�
 ## 常用命令
 
 ```
-./p2b show capture <id>        # 捕获详情：原文、快照正文、候选论文、已关联论文、用户想法
-./p2b show paper <paper_id>    # 论文详情：元数据、快读卡、主题、来源、想法、笔记、discussions（用户在网页 / 划词 / 手机上问过什么）
+./p2b show capture <id>        # 捕获详情：原文、快照正文、候选论文、已关联论文、threads（用户收下时说的话）
+./p2b show paper <paper_id>    # 论文详情：元数据、快读卡、主题、来源、笔记、discussions（用户收下时、在网页 / 划词 / 手机上说过什么）
 ./p2b text <paper_id> --pages 1-3
 ./p2b find "English title"     # 按标题检索（arXiv + Crossref），返回 pid 和相似度
 ./p2b find --keywords "flow matching VLA"   # 按关键词检索 arXiv（全部命中），找论文时用（见 librarian/find.md）
@@ -37,21 +37,21 @@ paper2brain 发给你的任务都以"先读 librarian/""你是 paper2brain"或"�
 ./p2b topics
 ./p2b topic set <arxiv:id> "VLA/推理加速" ["WAM/世界模型" ...]
 ./p2b topic propose --name "..." [--parent VLA] --why "..." [--paper <id>]   # 提议新主题，用户确认后生效
-./p2b thought add --text "..." [--gist "一句话提炼"] [--capture <id>] [--paper <arxiv:id>]
-./p2b thought show <id> [<id> ...]   # 想法 + 论文、研究、同类想法
-./p2b thought gist <id> --text "..." # 一句话提炼（见 librarian/thought.md）
+./p2b threads                        # 讨论树：每段讨论的上级、标题或开头一句、范围
+./p2b thread show <id> [<id> ...]    # 一段讨论的消息、上级和下级
+./p2b thread title <id> --text "..." # 给讨论起标题（见 librarian/discuss.md）
+./p2b thread move <id> --parent <上级 id|root>
 ./p2b note add --text "..." [--paper <arxiv:id>] [--topic "VLA"]
 ./p2b research list [--topic "VLA"]
 ./p2b research show <研究 id>
 ./p2b research add --title "..." --summary "..." [--paper <id>] [--thread <id>] [--topic "VLA"]
-./p2b research link <研究 id> paper|thought|thread|capture <id>
+./p2b research link <研究 id> paper|thread|message|capture <id>
 ./p2b research propose <研究 id> --file /tmp/research.json --base-rev N   # 修改稿，用户确认后才生效
 ./p2b repo <仓库 id>                    # 只读代码仓库：本地路径、commit、最近提交（见 librarian/code.md）
 ./p2b codemap put --research <id> --repo <id> --paper <id> --file /tmp/map.json
 ./p2b experiment show|put <实验 id> ...  # 见 librarian/experiment.md
 ./p2b writing show|propose <研究 id> ... # 摘要与引言草稿，见 librarian/writing.md
 ./p2b papers [--topic "VLA"] [--unsorted]
-./p2b thoughts
 ./p2b search "关键词"
 ```
 

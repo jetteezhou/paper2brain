@@ -79,7 +79,7 @@ def capture_add(q, body):
         images.append((f"{i}-{Path(name).name}", base64.b64decode(img["data"]), mime))
     got = pipeline.receive(str(uuid.uuid4()), body.get("text", ""), "web", body.get("thought"), images)
     if got["kind"] == "thought":
-        return {"thought_id": got["thought_id"]}
+        return {"thread_id": got["thread_id"]}
     if got["kind"] == "duplicate":
         return {**got["capture"], "duplicate": True}
     bg(pipeline.process, got["capture"]["id"])
@@ -276,33 +276,7 @@ def paper_deepread(q, body, pid):
     return {"run_id": cursor_api.deep_read(pid)}
 
 
-# ---------- thoughts, notes, discussion ----------
-
-@route("GET", "/api/thoughts")
-def thoughts(q, body):
-    return store.list_thoughts()
-
-
-@route("GET", "/api/thoughts/([^/]+)")
-def thought_get(q, body, tid):
-    t = store.get_thought(tid)
-    if not t:
-        raise rules.Rejected("这条想法不存在或已删除")
-    return t
-
-
-@route("POST", "/api/thoughts/([^/]+)")
-def thought_update(q, body, tid):
-    store.set_gist(tid, body.get("gist"), "user")
-    return store.get_thought(tid)
-
-
-@route("POST", "/api/thoughts")
-def thought_add(q, body):
-    """by_agent: the user keeps an agent's answer from a discussion as a thought; it is labelled as the agent's words."""
-    by = "agent" if body.get("by_agent") else "user"
-    return {"id": store.add_thought(body.get("text"), by, body.get("capture_id"), body.get("paper_id"))}
-
+# ---------- notes, discussion ----------
 
 @route("POST", "/api/notes")
 def note_add(q, body):
@@ -524,15 +498,28 @@ def writing_export(q, body, rid):
 
 @route("POST", "/api/threads")
 def thread_new(q, body):
-    store.new_thread(body["scope"])
-    return store.thread_for(body["scope"])
+    """text: a line the user only writes down; the discussion opens with it and nobody is asked to answer."""
+    tid = store.new_thread(body["scope"], body.get("parent_id"), body.get("text"), fork=body.get("fork_message_id"))
+    return store.thread_for(thread_id=tid)
+
+
+@route("POST", "/api/threads/([^/]+)")
+def thread_edit(q, body, tid):
+    if "title" in body:
+        store.set_thread_title(tid, body["title"], "user")
+    if "parent_id" in body:
+        store.move_thread(tid, body["parent_id"], "user")
+    return store.thread_for(thread_id=tid)
 
 
 @route("POST", "/api/chat")
 def chat(q, body):
+    """reply: false writes the line into the discussion without asking the agent (also works with no agent)."""
     text = (body.get("text") or "").strip()
     if not text:
         raise rules.Rejected("问题不能为空")
+    if body.get("reply") is False:
+        return {"message_id": store.add_message(store.thread_for(body["scope"], body.get("thread_id"))["id"], "user", text)}
     return {"run_id": cursor_api.discuss(body["scope"], text, body.get("thread_id"))}
 
 

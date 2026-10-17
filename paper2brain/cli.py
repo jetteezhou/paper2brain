@@ -36,10 +36,10 @@ def run(args):
         images = [(Path(p).name, Path(p).read_bytes(), mimetypes.guess_type(p)[0] or "image/png") for p in args.image]
         got = pipeline.receive(args.id or str(uuid.uuid4()), args.text, args.source, args.thought, images)
         if got["kind"] == "thought":
-            return {"created": True, "thought_id": got["thought_id"], "note": "只有一句想法，已记为想法，不用再处理"}
+            return {"created": True, "thread_id": got["thread_id"], "note": "只有一句想法，已记成一段讨论的开头，不用再处理"}
         if got["kind"] == "duplicate":
             return {"created": False, "duplicate_of": got["capture"]["id"],
-                    "note": "这段内容以前收过，想法已补到那条上，不用再处理"}
+                    "note": "这段内容以前收过，这句想法已记到那条下面，不用再处理"}
         return {"created": got["created"], "capture": got["capture"]}
     if cmd == "ingest":
         return pipeline.ingest(args.capture_id)
@@ -83,15 +83,21 @@ def run(args):
         pid = to_pid(args.paper)
         store.set_topics(pid, args.paths, "agent")
         return {"paper": pid, "topics": args.paths}
-    if cmd == "thought":
+    if cmd == "threads":
+        return [{k: t[k] for k in ("id", "parent_id", "title", "first", "scope", "scope_title", "n", "last_at")}
+                for t in store.recent_threads()]
+    if cmd == "thread":
         if args.action == "show":
-            return [store.get_thought(i) for i in args.ids]
-        if args.action == "gist":
-            store.set_gist(args.ids[0], args.text, "agent")
-            return {"ok": True}
-        if not args.text:
-            raise rules.Rejected("--text 不能为空")
-        return {"id": store.add_thought(args.text, "agent", args.capture, args.paper and to_pid(args.paper), args.gist)}
+            return [_thread_brief(i) for i in args.ids]
+        if len(args.ids) != 1:
+            raise rules.Rejected(f"用法：./p2b thread {args.action} <讨论 id> ...")
+        if args.action == "title":
+            store.set_thread_title(args.ids[0], args.text, "agent")
+        else:
+            if not args.parent:
+                raise rules.Rejected("--parent 写上级讨论的 id，或 root 表示放回顶层")
+            store.move_thread(args.ids[0], None if args.parent == "root" else args.parent, "agent")
+        return {"ok": True}
     if cmd == "note":
         return {"id": store.add_note(args.text, "agent", args.paper and to_pid(args.paper), args.topic, args.thread)}
     if cmd == "doc":
@@ -135,8 +141,8 @@ def run(args):
         if args.action == "list":
             return store.list_research("" if args.unsorted else (args.topic[0] if args.topic else None))
         if args.action == "add":
-            links = [("paper", to_pid(p)) for p in args.paper] + [("thought", t) for t in args.thought] + \
-                    [("thread", t) for t in args.thread] + [("capture", t) for t in args.capture]
+            links = [("paper", to_pid(p)) for p in args.paper] + [("thread", t) for t in args.thread] + \
+                    [("capture", t) for t in args.capture]
             return {"id": store.add_research(args.title, "agent", args.summary, args.topic, links)}
         if args.action == "show":
             return store.get_research(args.id)
@@ -181,8 +187,6 @@ def run(args):
         return [{"page": n, "text": pages[n - 1]} for n in _pages(args.pages, len(pages))]
     if cmd == "papers":
         return store.list_papers("" if args.unsorted else args.topic)
-    if cmd == "thoughts":
-        return store.list_thoughts()
     if cmd == "search":
         return store.search(args.query)
     if cmd == "inbox":
@@ -191,6 +195,15 @@ def run(args):
     if cmd == "serve":
         from . import server
         server.serve(args.host, args.port)
+
+
+def _thread_brief(tid):
+    t = store.thread_for(thread_id=tid)
+    return {"id": t["id"], "scope": t["scope"], "title": t["title"], "title_by": t["title_by"], "parent": t["parent"],
+            "fork_message_id": t["fork_message_id"], "path": [{k: s[k] for k in ("id", "title", "first")} for s in t["path"]],
+            "children": t["children"], "research": t["research"], "papers": t["papers"],
+            "messages": [{"role": m["role"], "at": m["created_at"], "text": (m["run_text"] or m["text"] or "")[:1500]}
+                         for m in t["messages"]]}
 
 
 def parser():
@@ -237,13 +250,12 @@ def parser():
     s.add_argument("--why", help="propose：为什么现有主题放不下")
     s.add_argument("--paper", dest="paper_for", action="append", default=[], help="propose：采用后归进去的论文")
 
-    s = sub.add_parser("thought", help="想法：add 记一条 / show 查看（含论文、研究、同类想法）/ gist 写一句话提炼")
-    s.add_argument("action", choices=["add", "show", "gist"])
-    s.add_argument("ids", nargs="*", help="show/gist 时的想法 id")
-    s.add_argument("--text", help="add：想法原文；gist：一句话提炼")
-    s.add_argument("--gist", help="add 时可同时给出一句话提炼")
-    s.add_argument("--capture")
-    s.add_argument("--paper")
+    sub.add_parser("threads", help="讨论树：每段讨论的 id、上级（parent_id）、标题或开头一句、范围、最近活动")
+    s = sub.add_parser("thread", help="讨论：show 查看消息、上级和下级 / title 起标题 / move 挂到另一段讨论下面")
+    s.add_argument("action", choices=["show", "title", "move"])
+    s.add_argument("ids", nargs="+", help="讨论 id（show 可以给多个）")
+    s.add_argument("--text", help="title：一句话标题（≤50 字，见 librarian/discuss.md）")
+    s.add_argument("--parent", help="move：上级讨论的 id，root 表示放回顶层")
     s = sub.add_parser("note", help="记一条讨论结论")
     s.add_argument("action", choices=["add"])
     s.add_argument("--text", required=True)
@@ -282,13 +294,12 @@ def parser():
     s = sub.add_parser("research", help="研究：list / add 新建（构思中）/ show / link 关联素材 / propose 提交修改稿待用户确认")
     s.add_argument("action", choices=["list", "add", "show", "link", "propose"])
     s.add_argument("id", nargs="?", help="show/link/propose 时的研究 id")
-    s.add_argument("kind", nargs="?", choices=["paper", "thought", "message", "thread", "capture", "note"])
+    s.add_argument("kind", nargs="?", choices=["paper", "message", "thread", "capture", "note"])
     s.add_argument("ref", nargs="?")
     s.add_argument("--title")
     s.add_argument("--summary")
     s.add_argument("--topic", action="append", default=[])
     s.add_argument("--paper", action="append", default=[])
-    s.add_argument("--thought", action="append", default=[])
     s.add_argument("--thread", action="append", default=[])
     s.add_argument("--capture", action="append", default=[])
     s.add_argument("--file", help="propose：JSON 文件路径，- 表示标准输入")
@@ -304,7 +315,6 @@ def parser():
     s = sub.add_parser("papers")
     s.add_argument("--topic")
     s.add_argument("--unsorted", action="store_true")
-    sub.add_parser("thoughts")
     sub.add_parser("search").add_argument("query")
     sub.add_parser("inbox", help="处理 iCloud 收件箱").add_argument("action", choices=["drain"])
     s = sub.add_parser("serve", help="启动 Web 界面")

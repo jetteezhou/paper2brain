@@ -11,7 +11,7 @@
 ./p2b ingest <capture_id>
 ```
 
-`capture add` 按 id 幂等，重复执行没有副作用。返回里有 `thought_id`（只有一句想法）或 `duplicate_of`（这段内容以前收过，想法已补到那条上）时，不用再处理，回复"已记下"即可。
+`capture add` 按 id 幂等，重复执行没有副作用。返回里有 `thread_id`（只有一句想法，已记成一段讨论的开头）或 `duplicate_of`（这段内容以前收过，想法已记到那条下面）时，不用再处理，回复"已记下"即可。
 
 ## 1. 看清这条捕获
 
@@ -19,7 +19,7 @@
 
 - `status`：`mapped` 已关联论文 / `needs_confirm` 有候选待确认 / `unmapped` 没找到 / `needs_agent` 只有截图 / `failed` 预处理失败（看 `note`）。
 - `snapshot_text`：解读正文。`candidates`：规则找到的候选论文，`why` 说明来源。
-- `thoughts`：用户随手记下的想法。它就是这次的阅读意图，写快读卡时要回应它。
+- `threads`：用户收下时说的话（`first` 是原话），每句开了一段讨论。它就是这次的阅读意图，写快读卡时要回应它。
 - 如果附带截图，你能直接看到图片：找出论文标题、作者或 arXiv 号。
 
 ## 2. 找到原论文

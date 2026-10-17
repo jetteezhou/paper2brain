@@ -5,44 +5,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>paper2brain</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/app/discuss.css">
+  <link rel="stylesheet" href="/app/papers.css">
+  <link rel="stylesheet" href="/app/reader.css">
+  <link rel="stylesheet" href="/app/research.css">
   <link rel="icon" href="data:,">
+  <script type="importmap">
+  {"imports": {
+    "preact": "/vendor/preact/preact.mjs",
+    "preact/hooks": "/vendor/preact/hooks.mjs",
+    "@preact/signals-core": "/vendor/preact/signals-core.mjs",
+    "@preact/signals": "/vendor/preact/signals.mjs",
+    "htm": "/vendor/preact/htm.mjs"
+  }}
+  </script>
 </head>
 <body>
-  <div id="app">
-    <aside id="side">
-      <div class="brand"><div class="brand-mark">p2</div>paper2brain</div>
-      <div class="search">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input id="search" placeholder="搜索论文、想法、讨论  /" autocomplete="off" aria-label="搜索">
-      </div>
-      <nav class="nav" id="nav"></nav>
-      <div class="agent-status" id="agent-status"></div>
-    </aside>
-    <main id="main">
-      <form id="capture" autocomplete="off">
-        <div class="cap-box" id="cap-box">
-          <div class="cap-row">
-            <textarea id="cap-text" rows="1" placeholder="粘贴任意链接、一段文字、截图或 PDF，回车收下；也可以说“帮我找……的论文”"></textarea>
-            <span class="hint"><kbd>⌘K</kbd></span>
-          </div>
-          <div id="cap-images"></div>
-          <div class="cap-thought"><span>想法</span><input id="cap-thought" placeholder="顺手记一句为什么收（可选）"></div>
-        </div>
-        <div class="cap-acts"><button class="btn primary big" type="submit">收下</button><button class="btn ghost sm" type="button" data-action="find-capture" title="让 agent 按这段描述找几篇论文，入库后直接开始讨论这组论文">找论文</button><button class="btn ghost sm" type="button" data-action="compose-capture" title="把这段内容作为一个研究的开端">开始研究</button></div>
-      </form>
-      <nav id="mnav" aria-label="主导航"></nav>
-      <div class="search msearch">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input id="msearch" type="search" placeholder="搜索论文、想法、讨论" autocomplete="off" aria-label="搜索">
-      </div>
-      <div id="body">
-        <section id="list"></section>
-        <section id="detail"></section>
-      </div>
-    </main>
-  </div>
-  <div id="reader" hidden></div>
-  <div id="toast"></div>
-  <script type="module" src="/app.js"></script>
+  <div id="root"></div>
+  <script type="module" src="/app/main.js"></script>
 </body>
 </html>

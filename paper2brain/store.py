@@ -23,7 +23,7 @@ UNFINISHED = ("WAITING", "CREATING", "RUNNING", "QUEUED")
 _UNFINISHED_SQL = "('WAITING','CREATING','RUNNING','QUEUED')"
 RESEARCH_ELEMENTS = ("problem", "method", "validation")
 RESEARCH_FIELDS = RESEARCH_ELEMENTS + ("notes",)
-LINK_KINDS = ("paper", "thought", "message", "thread", "capture", "note", "doc")
+LINK_KINDS = ("paper", "message", "thread", "capture", "note", "doc")
 # A paper shows up in lists, topics and search when a capture is confirmed to be about it or a research uses it.
 LISTED = ("(EXISTS (SELECT 1 FROM capture_papers lc WHERE lc.paper_id=p.id AND lc.state='confirmed') "
           "OR EXISTS (SELECT 1 FROM research_links lr WHERE lr.kind='paper' AND lr.ref=p.id))")
@@ -177,9 +177,44 @@ def _v6_topic_proposals(c):
     c.execute("ALTER TABLE topics ADD COLUMN for_papers TEXT")
 
 
+def _v7_discussion_tree(c):
+    """Discussions form a tree: parent_id is the discussion one grew out of; title_by / parent_by = 'user' keep the
+    agent off what the user set. Each thought becomes a discussion of its own (same id, words, time, gist as title),
+    absorbing the discussion it already had; research materials follow. The thoughts table goes (backed up first)."""
+    for col in ("parent_id", "title_by", "parent_by"):
+        c.execute(f"ALTER TABLE threads ADD COLUMN {col} TEXT")
+    c.execute("CREATE INDEX IF NOT EXISTS threads_parent ON threads(parent_id)")
+    c.execute("UPDATE threads SET scope='library' WHERE scope='thoughts'")
+    for t in c.execute("SELECT * FROM thoughts ORDER BY created_at").fetchall():
+        scope = f"paper:{t['paper_id']}" if t["paper_id"] else f"capture:{t['capture_id']}" if t["capture_id"] else "library"
+        old = _ids(c, "SELECT id FROM threads WHERE scope=?", (f"thought:{t['id']}",))
+        q = _qs(old)
+        agent = old and (c.execute(f"SELECT agent_id FROM threads WHERE id IN ({q}) AND agent_id IS NOT NULL "
+                                   f"ORDER BY created_at DESC", old).fetchone() or [None])[0]
+        c.execute("INSERT INTO threads (id, created_at, scope, title, agent_id, title_by) VALUES (?,?,?,?,?,?)",
+                  (t["id"], t["created_at"], scope, t["gist"], agent or None, t["gist"] and t["gist_by"]))
+        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)",
+                  (new_id(), t["created_at"], t["id"], "user" if t["by"] == "user" else "assistant", t["text"], None))
+        if old:
+            for table, col in (("messages", "thread_id"), ("notes", "thread_id"), ("runs", "ref")):
+                c.execute(f"UPDATE {table} SET {col}=? WHERE {col} IN ({q})", (t["id"], *old))
+            c.execute(f"UPDATE OR IGNORE research_links SET ref=? WHERE kind='thread' AND ref IN ({q})", (t["id"], *old))
+            c.execute(f"DELETE FROM research_links WHERE kind='thread' AND ref IN ({q})", old)
+            c.execute(f"DELETE FROM threads WHERE id IN ({q})", old)
+    c.execute("UPDATE OR IGNORE research_links SET kind='thread' WHERE kind='thought'")
+    c.execute("DELETE FROM research_links WHERE kind='thought'")
+    c.execute("DROP TABLE thoughts")
+
+
+def _v8_fork_point(c):
+    """fork_message_id: the message of the parent discussion a branch grew from (NULL: from the whole of it)."""
+    c.execute("ALTER TABLE threads ADD COLUMN fork_message_id TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
-MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals]
+MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
+              _v7_discussion_tree, _v8_fork_point]
 
 
 def home():
@@ -308,10 +343,7 @@ def add_capture(capture_id, raw, source, thought=None, images=()):
                 (capture_id, now(), raw, source),
             )
             if (thought or "").strip():
-                c.execute(
-                    "INSERT INTO thoughts (id, created_at, text, by, capture_id) VALUES (?,?,?,?,?)",
-                    (new_id(), now(), thought.strip(), "user", capture_id),
-                )
+                _start_thread(c, f"capture:{capture_id}", thought)
             _event(c, source, "capture.add", capture_id)
         have = {r["filename"] for r in c.execute("SELECT filename FROM attachments WHERE capture_id=?", (capture_id,))}
         folder = home() / "assets" / capture_id
@@ -362,15 +394,14 @@ def _qs(xs):
 
 
 def _paper_dependents(c, pid):
-    """Everything that exists only because the paper is in the library: pinned passages, its discussions, the
-    thoughts and notes attached to it. Card and report live on the paper row itself."""
+    """Everything that exists only because the paper is in the library: pinned passages, its discussions and the
+    notes attached to it. Card and report live on the paper row itself."""
     anchors = _ids(c, "SELECT id FROM anchors WHERE paper_id=?", (pid,))
     scopes = [f"paper:{pid}"] + [f"anchor:{a}" for a in anchors]
     threads = _ids(c, f"SELECT id FROM threads WHERE scope IN ({_qs(scopes)})", scopes)
     return {
         "anchor": anchors, "thread": threads,
         "message": _ids(c, f"SELECT id FROM messages WHERE thread_id IN ({_qs(threads)})", threads) if threads else [],
-        "thought": _ids(c, "SELECT id FROM thoughts WHERE paper_id=?", (pid,)),
         "note": _ids(c, f"SELECT id FROM notes WHERE paper_id=? OR thread_id IN ({_qs(threads) or 'NULL'})", (pid, *threads)),
     }
 
@@ -387,11 +418,10 @@ def _research_using(c, refs):
 
 
 def _removal(c, capture_id):
-    thoughts = _ids(c, "SELECT id FROM thoughts WHERE capture_id=?", (capture_id,))
-    find_threads = _ids(c, "SELECT id FROM threads WHERE scope=?", (f"find:{capture_id}",))
-    find_msgs = _ids(c, f"SELECT id FROM messages WHERE thread_id IN ({_qs(find_threads)})", find_threads) if find_threads else []
-    plan = {"thoughts": thoughts, "find_threads": find_threads,
-            "used_in": _research_using(c, {"thought": thoughts, "thread": find_threads, "message": find_msgs, "capture": [capture_id]}),
+    threads = _ids(c, "SELECT id FROM threads WHERE scope IN (?,?)", (f"find:{capture_id}", f"capture:{capture_id}"))
+    msgs = _ids(c, f"SELECT id FROM messages WHERE thread_id IN ({_qs(threads)})", threads) if threads else []
+    plan = {"threads": threads,
+            "used_in": _research_using(c, {"thread": threads, "message": msgs, "capture": [capture_id]}),
             "papers": [], "kept": []}
     for r in c.execute("SELECT p.id, p.title, p.card IS NOT NULL AS card, p.report IS NOT NULL AS report FROM capture_papers cp "
                        "JOIN papers p ON p.id=cp.paper_id WHERE cp.capture_id=?", (capture_id,)).fetchall():
@@ -406,7 +436,7 @@ def _removal(c, capture_id):
             plan["kept"].append({"id": r["id"], "title": r["title"], "why": why})
         else:
             plan["papers"].append({"id": r["id"], "title": r["title"], "card": bool(r["card"]), "report": bool(r["report"]),
-                                   **{k: deps[k] for k in ("anchor", "thread", "thought", "note")}, "_deps": deps})
+                                   **{k: deps[k] for k in ("anchor", "thread", "note")}, "_deps": deps})
     return plan
 
 
@@ -420,14 +450,13 @@ def capture_removal(capture_id):
 
 
 def delete_capture(capture_id):
-    """Undoing a capture means the user disowns it: the capture, its thoughts, its find discussion, and every paper it
-    alone brought in, with that paper's card, report, pinned passages, discussions, thoughts and notes. A paper that
-    another capture or a research also uses stays, untouched."""
+    """Undoing a capture means the user disowns it: the capture, its discussions (what the user said when collecting
+    it, the find discussion), and every paper it alone brought in, with that paper's card, report, pinned passages,
+    discussions and notes. A paper that another capture or a research also uses stays, untouched."""
     with tx() as c:
         plan = _removal(c, capture_id)
-        threads = plan["find_threads"] + [t for p in plan["papers"] for t in p["_deps"]["thread"]]
-        gone = {"capture": [capture_id], "thought": plan["thoughts"] + [t for p in plan["papers"] for t in p["_deps"]["thought"]],
-                "thread": threads, "note": [n for p in plan["papers"] for n in p["_deps"]["note"]]}
+        threads = plan["threads"] + [t for p in plan["papers"] for t in p["_deps"]["thread"]]
+        gone = {"capture": [capture_id], "thread": threads, "note": [n for p in plan["papers"] for n in p["_deps"]["note"]]}
         if threads:
             gone["message"] = _ids(c, f"SELECT id FROM messages WHERE thread_id IN ({_qs(threads)})", threads)
         for kind, ids in gone.items():
@@ -436,17 +465,15 @@ def delete_capture(capture_id):
         pids = [p["id"] for p in plan["papers"]]
         refs = [capture_id, *threads, *pids]
         c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(refs)})", refs)
-        if threads:
-            c.execute(f"DELETE FROM messages WHERE thread_id IN ({_qs(threads)})", threads)
-        for table, col, ids in (("notes", "id", gone["note"]), ("thoughts", "id", gone["thought"]), ("threads", "id", threads),
-                                ("anchors", "paper_id", pids), ("paper_topics", "paper_id", pids), ("capture_papers", "paper_id", pids),
-                                ("paper_text", "paper_id", pids)):
+        _drop_threads(c, threads)
+        for table, col, ids in (("notes", "id", gone["note"]), ("anchors", "paper_id", pids), ("paper_topics", "paper_id", pids),
+                                ("capture_papers", "paper_id", pids), ("paper_text", "paper_id", pids)):
             if ids:
                 c.execute(f"DELETE FROM {table} WHERE {col} IN ({_qs(ids)})", ids)
         c.execute("DELETE FROM captures WHERE id=?", (capture_id,))
         if pids:
             c.execute(f"DELETE FROM papers WHERE id IN ({_qs(pids)})", pids)
-        _event(c, "user", "capture.delete", capture_id, papers=pids, thoughts=len(gone["thought"]))
+        _event(c, "user", "capture.delete", capture_id, papers=pids, threads=len(threads))
     shutil.rmtree(home() / "assets" / capture_id, ignore_errors=True)
     for pid in pids:
         shutil.rmtree(paper_dir(pid, create=False), ignore_errors=True)
@@ -458,10 +485,7 @@ def get_capture(capture_id):
         if not cap:
             return None
         cap["attachments"] = _rows(c.execute("SELECT id, filename, mime FROM attachments WHERE capture_id=?", (capture_id,)))
-        cap["thoughts"] = _rows(c.execute("SELECT * FROM thoughts WHERE capture_id=? ORDER BY created_at", (capture_id,)))
-        thought_research = _research_for(c, "thought", [t["id"] for t in cap["thoughts"]])
-        for t in cap["thoughts"]:
-            t["research"] = thought_research.get(t["id"], [])
+        cap["threads"] = _threads_of(c, [f"capture:{capture_id}"])
         cap["papers"] = _rows(c.execute(
             "SELECT p.id, p.title, p.card IS NOT NULL AS has_card, cp.state, cp.by, cp.evidence "
             "FROM capture_papers cp JOIN papers p ON p.id=cp.paper_id WHERE cp.capture_id=? ORDER BY cp.at",
@@ -496,7 +520,9 @@ def list_captures(view="inbox", limit=200):
     with tx() as c:
         caps = _rows(c.execute(
             f"SELECT c.id, c.created_at, substr(c.raw,1,300) AS raw, c.source, c.channel, c.title, c.author, c.status, "
-            f"c.note, c.triage, c.agent_id, (SELECT text FROM thoughts t WHERE t.capture_id=c.id ORDER BY created_at DESC LIMIT 1) AS thought, "
+            f"c.note, c.triage, c.agent_id, (SELECT coalesce(t.title, (SELECT m.text FROM messages m WHERE m.thread_id=t.id "
+            f"AND m.role='user' ORDER BY m.created_at, m.rowid LIMIT 1)) FROM threads t WHERE t.scope='capture:' || c.id "
+            f"ORDER BY t.created_at DESC LIMIT 1) AS thought, "
             f"(SELECT status FROM runs r WHERE r.ref=c.id ORDER BY created_at DESC LIMIT 1) AS run_status, "
             f"(SELECT count(*) FROM attachments a WHERE a.capture_id=c.id) AS image_count "
             f"FROM captures c WHERE {where} ORDER BY {order}c.created_at DESC LIMIT ?",
@@ -578,7 +604,6 @@ def counts():
             f"SELECT count(*) FROM captures c WHERE {PENDING}").fetchone()[0]
         out["inbox"] = c.execute(f"SELECT count(*) FROM captures c WHERE c.triage='inbox' OR ({PENDING})").fetchone()[0]
         out["papers"] = c.execute(f"SELECT count(*) FROM papers p WHERE {LISTED}").fetchone()[0]
-        out["thoughts"] = c.execute("SELECT count(*) FROM thoughts").fetchone()[0]
         out["research"] = c.execute("SELECT count(*) FROM research").fetchone()[0]
         out["unsorted"] = c.execute(
             f"SELECT count(*) FROM papers p WHERE {LISTED} AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id)"
@@ -632,20 +657,14 @@ def get_paper(pid, with_anchors=True):
             "FROM capture_papers cp JOIN captures c ON c.id=cp.capture_id WHERE cp.paper_id=? AND cp.state!='rejected' "
             "ORDER BY c.created_at", (pid,),
         ))
-        cap_ids = [x["id"] for x in p["captures"]]
-        q = ",".join("?" * len(cap_ids)) or "''"
-        p["thoughts"] = _rows(c.execute(
-            f"SELECT * FROM thoughts WHERE paper_id=? OR capture_id IN ({q}) ORDER BY created_at", (pid, *cap_ids)
-        ))
+        p["threads"] = _threads_of(c, [f"paper:{pid}"] + [f"capture:{x['id']}" for x in p["captures"]])
         p["notes"] = _rows(c.execute("SELECT * FROM notes WHERE paper_id=? ORDER BY created_at", (pid,)))
         p["research"] = _research_for(c, "paper", [pid]).get(pid, [])
         p["anchors"] = []
-        thought_research = _research_for(c, "thought", [t["id"] for t in p["thoughts"]])
-        for t in p["thoughts"]:
-            t["research"] = thought_research.get(t["id"], [])
         p["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (pid,)))
     if with_anchors:
         p["anchors"] = anchors_for(pid)
+        p["cited_in"] = cited_in(pid)
     return p
 
 
@@ -882,60 +901,7 @@ def set_topics(pid, paths, by):
         _event(c, by, "topics.set", pid, topics=list(paths))
 
 
-# ---------- thoughts & notes ----------
-
-def add_thought(text, by, capture_id=None, paper_id=None, gist=None, tid=None):
-    """tid: the id of what delivered it (an iPhone capture id), so a second delivery adds nothing."""
-    if not (text or "").strip():
-        raise rules.Rejected("想法不能为空")
-    tid = tid or new_id()
-    with tx() as c:
-        c.execute(
-            "INSERT OR IGNORE INTO thoughts (id, created_at, text, by, capture_id, paper_id, gist, gist_by) VALUES (?,?,?,?,?,?,?,?)",
-            (tid, now(), text.strip(), by, capture_id, paper_id, (gist or "").strip() or None, gist and by),
-        )
-    return tid
-
-
-def set_gist(tid, gist, by):
-    """The one sentence that matters, in the user's terms. The agent only fills empty ones; the user's edit is final."""
-    gist = (gist or "").strip()
-    if not gist:
-        raise rules.Rejected("提炼不能为空")
-    with tx() as c:
-        cur = c.execute("SELECT gist_by FROM thoughts WHERE id=?", (tid,)).fetchone()
-        if not cur:
-            raise rules.Rejected("想法不存在")
-        if by != "user" and cur["gist_by"] == "user":
-            raise rules.Rejected("用户已手动改过这条提炼，agent 不能修改")
-        c.execute("UPDATE thoughts SET gist=?, gist_by=? WHERE id=?", (gist, by, tid))
-
-
-def pending_gists(limit=12):
-    with tx() as c:
-        return [r["id"] for r in c.execute(
-            "SELECT id FROM thoughts WHERE gist IS NULL ORDER BY created_at LIMIT ?", (limit,)
-        )]
-
-
-def get_thought(tid):
-    """A thought with everything needed to keep thinking about it: its paper, its researches, its neighbours."""
-    t = next((x for x in list_thoughts() if x["id"] == tid), None)
-    if not t:
-        return None
-    with tx() as c:
-        pid = t["about_paper"]
-        if pid:
-            p = _row(c.execute("SELECT id, title, card, page_count FROM papers WHERE id=?", (pid,)).fetchone())
-            card = p.pop("card") or {}
-            t["paper"] = {**p, "tldr": card.get("tldr"), "results": (card.get("results") or [])[:3]}
-        rids = [r["id"] for r in t["research"]]
-        t["siblings"] = [x for x in list_thoughts() if x["id"] != tid and (
-            (pid and x["about_paper"] == pid) or any(r["id"] in rids for r in x["research"]))][:8]
-        if t["capture_id"]:
-            t["capture"] = _row(c.execute("SELECT id, title, raw, channel, author FROM captures WHERE id=?", (t["capture_id"],)).fetchone())
-    return t
-
+# ---------- notes ----------
 
 def kv_get(key):
     with tx() as c:
@@ -946,21 +912,6 @@ def kv_get(key):
 def kv_set(key, value):
     with tx() as c:
         c.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, value))
-
-
-def list_thoughts():
-    with tx() as c:
-        out = _rows(c.execute(
-            "SELECT t.*, coalesce(p.title, (SELECT p2.title FROM capture_papers cp JOIN papers p2 ON p2.id=cp.paper_id "
-            "WHERE cp.capture_id=t.capture_id AND cp.state='confirmed' LIMIT 1)) AS paper_title, "
-            "coalesce(t.paper_id, (SELECT cp.paper_id FROM capture_papers cp WHERE cp.capture_id=t.capture_id AND cp.state='confirmed' LIMIT 1)) AS about_paper, "
-            "c.title AS capture_title FROM thoughts t LEFT JOIN papers p ON p.id=t.paper_id "
-            "LEFT JOIN captures c ON c.id=t.capture_id ORDER BY t.created_at DESC"
-        ))
-        used = _research_for(c, "thought", [t["id"] for t in out])
-    for t in out:
-        t["research"] = used.get(t["id"], [])
-    return out
 
 
 def add_note(text, by, paper_id=None, topic=None, thread_id=None):
@@ -984,18 +935,115 @@ def thread_for(scope=None, thread_id=None):
         else:
             t = _row(c.execute("SELECT * FROM threads WHERE scope=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (scope,)).fetchone())
         if not t:
-            t = {"id": new_id(), "created_at": now(), "scope": scope, "title": None, "agent_id": None}
-            c.execute("INSERT INTO threads VALUES (?,?,?,?,?)", tuple(t.values()))
+            t = _row(c.execute("SELECT * FROM threads WHERE id=?", (_start_thread(c, scope),)).fetchone())
         t["messages"] = _rows(c.execute(
             "SELECT m.*, r.status AS run_status, r.text AS run_text, r.tools AS run_tools, r.error AS run_error "
             "FROM messages m LEFT JOIN runs r ON r.id=m.run_id WHERE m.thread_id=? ORDER BY m.created_at, m.rowid", (t["id"],),
         ))
         used = _research_for(c, "message", [m["id"] for m in t["messages"]])
+        t["parent"] = _row(c.execute(_HEAD + "WHERE t.id=?", (t["parent_id"],)).fetchone()) if t["parent_id"] else None
+        t["children"] = _rows(c.execute(_HEAD + "WHERE t.parent_id=? ORDER BY t.created_at", (t["id"],)))
+        t["siblings"] = _rows(c.execute(_HEAD + "WHERE t.parent_id IS ? AND t.fork_message_id IS ? AND t.parent_id IS NOT NULL "
+                                                "ORDER BY t.created_at, t.rowid", (t["parent_id"], t["fork_message_id"])))
+        t["path"] = _path(c, t)
+        t["research"] = _research_for(c, "thread", [t["id"]]).get(t["id"], [])
+        t["papers"] = _papers_cited(c, [m["run_text"] or m["text"] for m in t["messages"]])
+        t["scope_title"] = _scope_title(c, t["scope"])
+        kind, _, ref = t["scope"].partition(":")
+        t["scope_papers"] = _rows(c.execute(f"SELECT id, title FROM papers WHERE id IN ({_qs(ref.split('|'))})", ref.split("|"))) if kind == "papers" \
+            else _rows(c.execute("SELECT p.id, p.title FROM capture_papers cp JOIN papers p ON p.id=cp.paper_id "
+                                 "WHERE cp.capture_id=? AND cp.state='confirmed' ORDER BY cp.at", (ref,))) if kind in ("find", "capture") else []
+        t["proposal"] = kind == "research" and bool((c.execute("SELECT proposal FROM research WHERE id=?", (ref,)).fetchone() or [None])[0])
+    forks = {}
+    for ch in t["children"]:
+        if ch["fork_message_id"]:
+            forks.setdefault(ch["fork_message_id"], []).append(ch)
     for m in t["messages"]:
         if m["run_tools"]:
             m["run_tools"] = json.loads(m["run_tools"])
         m["research"] = used.get(m["id"], [])
+        m["forks"] = forks.get(m["id"], [])
     return t
+
+
+# What a discussion is called in lists: its title, else the user's opening words.
+_HEAD = ("SELECT t.id, t.scope, t.created_at, t.title, t.parent_id, t.fork_message_id, (SELECT text FROM messages u "
+         "WHERE u.thread_id=t.id AND u.role='user' ORDER BY u.created_at, u.rowid LIMIT 1) AS first FROM threads t ")
+_CITE = re.compile(r"\[((?:arxiv|doi|openreview|pdf):[^\s\],;]+)", re.I)
+
+
+def _said(c, tid):
+    return _rows(c.execute("SELECT m.id, m.role, m.created_at, coalesce(nullif(m.text, ''), r.text, '') AS text FROM messages m "
+                           "LEFT JOIN runs r ON r.id=m.run_id WHERE m.thread_id=? ORDER BY m.created_at, m.rowid", (tid,)))
+
+
+def _path(c, t):
+    """What a branch inherits, root first: each ancestor with its messages up to where the branch below it forked."""
+    out, cur = [], t
+    while cur["parent_id"]:
+        up = _row(c.execute(_HEAD + "WHERE t.id=?", (cur["parent_id"],)).fetchone())
+        if not up:
+            break
+        msgs = _said(c, up["id"])
+        cut = next((i for i, m in enumerate(msgs) if m["id"] == cur["fork_message_id"]), None)
+        kids = _rows(c.execute(_HEAD + "WHERE t.parent_id=? ORDER BY t.created_at, t.rowid", (up["id"],)))
+        out.insert(0, {**up, "messages": msgs if cut is None else msgs[:cut + 1], "children": kids})
+        cur = up
+    return out
+
+
+def _papers_cited(c, texts):
+    """Library papers named in [arxiv:… p.N]-style citations, in order of first mention."""
+    ids = [i for i in dict.fromkeys(rules.parse_pid(m.group(1)) for s in texts if s for m in _CITE.finditer(s)) if i]
+    if not ids:
+        return []
+    found = {r["id"]: r["title"] for r in c.execute(f"SELECT id, title FROM papers WHERE id IN ({_qs(ids)})", ids)}
+    return [{"id": i, "title": found[i]} for i in ids if i in found]
+
+
+def cited_in(pid):
+    """Backlinks: the discussions whose messages cite this paper, latest activity first."""
+    pattern = "%[" + pid.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    with tx() as c:
+        ids = _ids(c, "SELECT m.thread_id FROM messages m LEFT JOIN runs r ON r.id=m.run_id "
+                      "WHERE coalesce(nullif(m.text, ''), r.text, '') LIKE ? ESCAPE '\\' GROUP BY m.thread_id "
+                      "ORDER BY max(m.created_at) DESC", (pattern,))
+        out = [_row(c.execute(_HEAD + "WHERE t.id=?", (i,)).fetchone()) for i in ids]
+        for t in out:
+            t["scope_title"] = _scope_title(c, t["scope"])
+    return out
+
+
+def _threads_of(c, scopes):
+    """The started discussions of these scopes, oldest first, with the researches that use them."""
+    out = _rows(c.execute(_HEAD + f"WHERE t.scope IN ({_qs(scopes)}) AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id=t.id) "
+                                  f"ORDER BY t.created_at, t.rowid", scopes))
+    used = _research_for(c, "thread", [t["id"] for t in out])
+    for t in out:
+        t["research"] = used.get(t["id"], [])
+    return out
+
+
+def _start_thread(c, scope, text=None, parent_id=None, tid=None, fork=None):
+    """A user who opens a discussion from another one placed it there (parent_by='user')."""
+    tid = tid or new_id()
+    added = c.execute("INSERT OR IGNORE INTO threads (id, created_at, scope, parent_id, parent_by, fork_message_id) VALUES (?,?,?,?,?,?)",
+                      (tid, now(), scope, parent_id, parent_id and "user", fork)).rowcount
+    if added and (text or "").strip():
+        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (new_id(), now(), tid, "user", text.strip(), None))
+    return tid
+
+
+def _drop_threads(c, ids):
+    """Delete discussions and their messages; what grew out of them moves up to their parent."""
+    if not ids:
+        return
+    q = _qs(ids)
+    while c.execute(f"UPDATE threads SET parent_id=(SELECT p.parent_id FROM threads p WHERE p.id=threads.parent_id), "
+                    f"fork_message_id=NULL WHERE parent_id IN ({q}) AND id NOT IN ({q})", (*ids, *ids)).rowcount:
+        pass
+    c.execute(f"DELETE FROM messages WHERE thread_id IN ({q})", ids)
+    c.execute(f"DELETE FROM threads WHERE id IN ({q})", ids)
 
 
 def _scope_title(c, scope):
@@ -1008,20 +1056,21 @@ def _scope_title(c, scope):
         return r and f"{r['title']} ·「{r['quote'][:40]}」"
     if kind == "research":
         return one("SELECT title FROM research WHERE id=?")
-    if kind == "thought":
-        return one("SELECT coalesce(gist, text) FROM thoughts WHERE id=?")
     if kind == "find":
         return one("SELECT raw FROM captures WHERE id=?")
+    if kind == "capture":
+        return one("SELECT coalesce(title, substr(raw,1,80)) FROM captures WHERE id=?")
     if kind == "papers":
         return f"{len(ref.split('|'))} 篇论文"
-    return {"library": "整个论文库", "thoughts": "我的想法"}.get(kind, ref)
+    return {"library": "整个论文库"}.get(kind, ref)
 
 
-def recent_threads(limit=100):
+def recent_threads(limit=300):
     """Every discussion that has started, the latest activity first, whatever it is attached to."""
     with tx() as c:
         out = _rows(c.execute(
-            "SELECT t.id, t.scope, t.created_at, t.agent_id, count(m.id) AS n, max(m.created_at) AS last_at, "
+            "SELECT t.id, t.scope, t.created_at, t.agent_id, t.title, t.title_by, t.parent_id, t.parent_by, t.fork_message_id, count(m.id) AS n, "
+            "max(m.created_at) AS last_at, "
             "(SELECT text FROM messages u WHERE u.thread_id=t.id AND u.role='user' ORDER BY u.created_at, u.rowid LIMIT 1) AS first "
             "FROM threads t JOIN messages m ON m.thread_id=t.id GROUP BY t.id ORDER BY last_at DESC, max(m.rowid) DESC LIMIT ?", (limit,)))
         for t in out:
@@ -1030,9 +1079,11 @@ def recent_threads(limit=100):
 
 
 def paper_discussions(pid):
-    """What the user asked about a paper, on the web, in pinned passages or from the phone, with the answers."""
+    """What the user said and asked about a paper (when collecting it, on the web, in pinned passages, from the
+    phone), with the answers."""
     with tx() as c:
-        scopes = [f"paper:{pid}"] + [f"anchor:{a}" for a in _ids(c, "SELECT id FROM anchors WHERE paper_id=?", (pid,))]
+        scopes = [f"paper:{pid}"] + [f"anchor:{a}" for a in _ids(c, "SELECT id FROM anchors WHERE paper_id=?", (pid,))] + \
+                 [f"capture:{x}" for x in _ids(c, "SELECT capture_id FROM capture_papers WHERE paper_id=? AND state='confirmed'", (pid,))]
         threads = _rows(c.execute(f"SELECT id, scope, created_at FROM threads WHERE scope IN ({_qs(scopes)}) "
                                   f"ORDER BY created_at, rowid", scopes))
         for t in threads:
@@ -1055,9 +1106,63 @@ def message(mid):
     return m
 
 
-def new_thread(scope):
+def new_thread(scope, parent_id=None, text=None, tid=None, fork=None):
+    """A new discussion of a scope, maybe grown out of another (fork: from one of its messages, which names the
+    parent), maybe opened by a line the user only wrote down (no answer asked for). tid: the id of what delivered it
+    (an iPhone capture id), so a second delivery adds nothing."""
     with tx() as c:
-        c.execute("INSERT INTO threads VALUES (?,?,?,?,?)", (new_id(), now(), scope, None, None))
+        if fork:
+            r = c.execute("SELECT thread_id FROM messages WHERE id=?", (fork,)).fetchone()
+            if not r:
+                raise rules.Rejected("要分叉的那条消息不存在了")
+            parent_id = r["thread_id"]
+        if parent_id and not c.execute("SELECT 1 FROM threads WHERE id=?", (parent_id,)).fetchone():
+            raise rules.Rejected("要接着的那段讨论不存在了")
+        return _start_thread(c, scope, text, parent_id, tid, fork)
+
+
+def set_thread_title(tid, title, by):
+    """One line that says what the discussion is about. The agent names it until the user does."""
+    title = re.sub(r"\s+", " ", title or "").strip()
+    if not 1 <= len(title) <= 80:
+        raise rules.Rejected("标题不能为空，最多 80 字")
+    with tx() as c:
+        cur = c.execute("SELECT title_by FROM threads WHERE id=?", (tid,)).fetchone()
+        if not cur:
+            raise rules.Rejected("这段讨论不存在了")
+        if by != "user" and cur["title_by"] == "user":
+            raise rules.Rejected("用户已手动改过这段讨论的标题，agent 不能修改")
+        c.execute("UPDATE threads SET title=?, title_by=? WHERE id=?", (title, by, tid))
+
+
+def move_thread(tid, parent_id, by):
+    """Hang a discussion under the one it grew out of (parent_id None: top level). The agent may place it until
+    the user has."""
+    with tx() as c:
+        cur = c.execute("SELECT parent_by, parent_id FROM threads WHERE id=?", (tid,)).fetchone()
+        if not cur:
+            raise rules.Rejected("这段讨论不存在了")
+        if by != "user" and cur["parent_by"] == "user":
+            raise rules.Rejected("用户已手动调整过这段讨论的位置，agent 不能修改")
+        if cur["parent_id"] == (parent_id or None):
+            return
+        up = parent_id
+        while up:
+            if up == tid:
+                raise rules.Rejected("不能挂到它自己或它下面的讨论上")
+            r = c.execute("SELECT parent_id FROM threads WHERE id=?", (up,)).fetchone()
+            if not r:
+                raise rules.Rejected(f"要挂到的讨论 {up} 不存在")
+            up = r["parent_id"]
+        c.execute("UPDATE threads SET parent_id=?, parent_by=?, fork_message_id=NULL WHERE id=?", (parent_id or None, by, tid))
+        _event(c, by, "thread.move", tid, parent=parent_id)
+
+
+def pending_titles(limit=12):
+    """Started discussions nobody has named yet."""
+    with tx() as c:
+        return _ids(c, "SELECT t.id FROM threads t WHERE t.title IS NULL AND EXISTS "
+                       "(SELECT 1 FROM messages m WHERE m.thread_id=t.id AND m.role='user') ORDER BY t.created_at LIMIT ?", (limit,))
 
 
 def set_thread_agent(thread_id, agent_id):
@@ -1073,7 +1178,7 @@ def add_message(thread_id, role, text, run_id=None):
 
 
 # ---------- research ----------
-# A research gathers materials (discussions, thoughts, papers, ...) into three elements: problem, method, validation.
+# A research gathers materials (discussions, papers, ...) into three elements: problem, method, validation.
 # Only the user establishes a research; the agent only ever proposes drafts the user accepts or discards.
 
 def _research_for(c, kind, refs):
@@ -1099,7 +1204,7 @@ def _check_topics(c, paths):
 def _check_link(c, kind, ref):
     if kind not in LINK_KINDS:
         raise rules.Rejected(f"不能关联 {kind}，可选：{', '.join(LINK_KINDS)}")
-    table = {"paper": "papers", "thought": "thoughts", "message": "messages", "thread": "threads", "doc": "research_docs",
+    table = {"paper": "papers", "message": "messages", "thread": "threads", "doc": "research_docs",
              "capture": "captures", "note": "notes"}[kind]
     if not c.execute(f"SELECT 1 FROM {table} WHERE id=?", (ref,)).fetchone():
         raise rules.Rejected(f"要关联的 {kind} {ref} 不存在")
@@ -1238,12 +1343,6 @@ def _resolve_link(c, kind, ref):
         r = c.execute("SELECT title, card FROM papers WHERE id=?", (ref,)).fetchone()
         code = ((json.loads(r["card"]) if r["card"] else {}).get("resources") or {}).get("code") if r else None
         return r and {"label": r["title"], "code": code}
-    if kind == "thought":
-        r = c.execute(
-            "SELECT t.text, t.created_at, t.capture_id, coalesce(t.paper_id, (SELECT cp.paper_id FROM capture_papers cp "
-            "WHERE cp.capture_id=t.capture_id AND cp.state='confirmed' LIMIT 1)) AS paper_id FROM thoughts t WHERE t.id=?", (ref,),
-        ).fetchone()
-        return r and {"label": r["text"], "at": r["created_at"], "paper_id": r["paper_id"], "capture_id": r["capture_id"]}
     if kind == "message":
         r = c.execute(
             "SELECT m.role, coalesce(nullif(m.text, ''), r.text) AS text, m.created_at, t.scope, t.id AS thread_id "
@@ -1251,11 +1350,8 @@ def _resolve_link(c, kind, ref):
         ).fetchone()
         return r and {"label": (r["text"] or "")[:200], "at": r["created_at"], "role": r["role"], "scope": r["scope"], "thread_id": r["thread_id"]}
     if kind == "thread":
-        r = c.execute(
-            "SELECT t.scope, t.created_at, (SELECT text FROM messages WHERE thread_id=t.id AND role='user' ORDER BY created_at LIMIT 1) AS first "
-            "FROM threads t WHERE t.id=?", (ref,),
-        ).fetchone()
-        return r and {"label": r["first"] or "一段讨论", "at": r["created_at"], "scope": r["scope"]}
+        r = c.execute(_HEAD + "WHERE t.id=?", (ref,)).fetchone()
+        return r and {"label": r["title"] or r["first"] or "一段讨论", "at": r["created_at"], "scope": r["scope"]}
     if kind == "capture":
         r = c.execute("SELECT coalesce(title, substr(raw,1,120)) AS label, created_at FROM captures WHERE id=?", (ref,)).fetchone()
         return r and {"label": r["label"], "at": r["created_at"]}
@@ -1526,9 +1622,7 @@ def anchors_for(pid):
 
 def delete_anchor(aid):
     with tx() as c:
-        for t in c.execute("SELECT id FROM threads WHERE scope=?", (f"anchor:{aid}",)).fetchall():
-            c.execute("DELETE FROM messages WHERE thread_id=?", (t["id"],))
-            c.execute("DELETE FROM threads WHERE id=?", (t["id"],))
+        _drop_threads(c, _ids(c, "SELECT id FROM threads WHERE scope=?", (f"anchor:{aid}",)))
         c.execute("DELETE FROM anchors WHERE id=?", (aid,))
 
 
@@ -1612,7 +1706,7 @@ def search(q, limit=30):
     """"我记得有篇……": the words may come from anywhere, in any order. Every word must match; papers match on title,
     authors, abstract, card, report or full text, and say where (hits)."""
     terms = q.split()[:8]
-    empty = {"papers": [], "captures": [], "thoughts": [], "notes": [], "messages": [], "research": []}
+    empty = {"papers": [], "captures": [], "threads": [], "notes": [], "messages": [], "research": []}
     if not terms:
         return empty
     with tx() as c:
@@ -1624,8 +1718,8 @@ def search(q, limit=30):
         captures = _rows(c.execute(
             f"SELECT id, created_at, title, author, channel, source, substr(raw,1,200) AS raw FROM captures WHERE {where} "
             f"ORDER BY created_at DESC LIMIT ?", (*args, limit)))
-        where, args = _every_word(terms, ["text", "gist"])
-        thoughts = _rows(c.execute(f"SELECT * FROM thoughts WHERE {where} ORDER BY created_at DESC LIMIT ?", (*args, limit)))
+        where, args = _every_word(terms, ["t.title"])
+        threads = _rows(c.execute(_HEAD + f"WHERE {where} ORDER BY t.created_at DESC LIMIT ?", (*args, limit)))
         where, args = _every_word(terms, ["text"])
         notes = _rows(c.execute(f"SELECT * FROM notes WHERE {where} ORDER BY created_at DESC LIMIT ?", (*args, limit)))
         where, args = _every_word(terms, ["coalesce(nullif(m.text, ''), r.text, '')"])
@@ -1649,5 +1743,5 @@ def search(q, limit=30):
         p["tldr"] = card and card.get("tldr")
     for m in messages:
         m["text"] = _snippet(m["text"], terms, 140)
-    return {**empty, "papers": papers, "captures": captures, "thoughts": thoughts, "notes": notes, "messages": messages,
+    return {**empty, "papers": papers, "captures": captures, "threads": threads, "notes": notes, "messages": messages,
             "research": research}
