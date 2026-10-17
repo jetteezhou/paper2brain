@@ -20,6 +20,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 数据默认存放在 `~/paper2brain-data`（SQLite、PDF、截图），不进仓库；可以用 `P2B_HOME` 指定其他目录。
 
+**升级与备份**：数据库带版本号（`PRAGMA user_version`）。新版本第一次打开旧数据库时（`./p2b serve` 或任何一条 `./p2b` 命令），先把原库完整复制到 `~/paper2brain-data/backups/p2b-before-v<N>-<时间>.sqlite`，再按顺序补上缺的表、列和索引，原有数据不删不改（唯一的转换：只写了一句想法、没有任何内容的旧捕获，变成一条独立想法）。服务运行时每天另存一份 `backups/p2b-YYYYMMDD.sqlite`，保留最近 7 份。要回退，停掉服务后把备份复制回 `p2b.sqlite` 即可。
+
 没连接 agent 时，Web 界面照样可以收下内容、确认是哪篇论文、阅读 PDF、调整主题、记想法；快读卡、深读报告和讨论需要连接 agent。
 
 ## 连接 Cursor agent
