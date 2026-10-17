@@ -1465,6 +1465,12 @@ async function submitCapture() {
   capText.value = ''; capThought.value = ''; S.images = []; renderImages(); autosize(capText);
   try {
     const cap = await post('/api/captures', { text, thought, images });
+    if (cap.thought_id) {
+      toast('已记为想法', '去看', () => openItem('thought', cap.thought_id, 'thoughts'));
+      loadState();
+      if (S.view === 'thoughts') load();
+      return;
+    }
     if (cap.duplicate) toast(`${ago(cap.created_at)}收过这条，已移回收件箱${thought ? '并补上想法' : ''}`);
     else toast('已收下，正在整理', '撤销', async () => {
       await api('DELETE', `/api/captures/${enc(cap.id)}`).catch(fail);

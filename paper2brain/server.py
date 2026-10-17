@@ -56,20 +56,18 @@ def captures(q, body):
 
 @route("POST", "/api/captures")
 def capture_add(q, body):
-    earlier = None if body.get("images") else store.same_capture(body.get("text"))
-    if earlier:
-        if (body.get("thought") or "").strip():
-            store.add_thought(body["thought"], "user", capture_id=earlier)
-        store.set_triage(earlier, "inbox")
-        return {**store.get_capture(earlier), "duplicate": True}
     images = []
     for i, img in enumerate(body.get("images") or [], 1):
         mime = img.get("mime") or "image/png"
         name = img.get("name") or f"file-{i}{mimetypes.guess_extension(mime) or ''}"
         images.append((f"{i}-{Path(name).name}", base64.b64decode(img["data"]), mime))
-    cap, _ = store.add_capture(str(uuid.uuid4()), body.get("text", ""), "web", body.get("thought"), images)
-    bg(pipeline.process, cap["id"])
-    return cap
+    got = pipeline.receive(str(uuid.uuid4()), body.get("text", ""), "web", body.get("thought"), images)
+    if got["kind"] == "thought":
+        return {"thought_id": got["thought_id"]}
+    if got["kind"] == "duplicate":
+        return {**got["capture"], "duplicate": True}
+    bg(pipeline.process, got["capture"]["id"])
+    return got["capture"]
 
 
 @route("POST", "/api/find")

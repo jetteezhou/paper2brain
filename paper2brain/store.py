@@ -149,9 +149,21 @@ def _v3_run_queue(c):
     c.execute("CREATE INDEX IF NOT EXISTS runs_status ON runs(status)")
 
 
+def _v4_free_bare_thoughts(c):
+    """A thought typed into the capture box without any content used to become an empty capture that showed up as
+    "no paper found". Such captures become standalone thoughts (the thought keeps its id, text and time)."""
+    bare = _ids(c, "SELECT id FROM captures c WHERE raw='' AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.capture_id=c.id) "
+                   "AND NOT EXISTS (SELECT 1 FROM capture_papers cp WHERE cp.capture_id=c.id) "
+                   "AND NOT EXISTS (SELECT 1 FROM research_links l WHERE l.kind='capture' AND l.ref=c.id)", ())
+    if bare:
+        c.execute(f"UPDATE thoughts SET capture_id=NULL WHERE capture_id IN ({_qs(bare)})", bare)
+        c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(bare)})", bare)
+        c.execute(f"DELETE FROM captures WHERE id IN ({_qs(bare)})", bare)
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
-MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue]
+MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts]
 
 
 def home():
@@ -751,13 +763,14 @@ def set_topics(pid, paths, by):
 
 # ---------- thoughts & notes ----------
 
-def add_thought(text, by, capture_id=None, paper_id=None, gist=None):
+def add_thought(text, by, capture_id=None, paper_id=None, gist=None, tid=None):
+    """tid: the id of what delivered it (an iPhone capture id), so a second delivery adds nothing."""
     if not (text or "").strip():
         raise rules.Rejected("想法不能为空")
-    tid = new_id()
+    tid = tid or new_id()
     with tx() as c:
         c.execute(
-            "INSERT INTO thoughts (id, created_at, text, by, capture_id, paper_id, gist, gist_by) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO thoughts (id, created_at, text, by, capture_id, paper_id, gist, gist_by) VALUES (?,?,?,?,?,?,?,?)",
             (tid, now(), text.strip(), by, capture_id, paper_id, (gist or "").strip() or None, gist and by),
         )
     return tid

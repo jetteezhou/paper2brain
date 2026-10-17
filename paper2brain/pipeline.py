@@ -118,6 +118,31 @@ def attach_pdf(pid, data):
     return store.get_paper(pid)
 
 
+def receive(capture_id, text, source, thought=None, images=()):
+    """Everything the user hands over (web box, iPhone shortcut, agent's ./p2b capture add) comes in here.
+    - only a thought, nothing to look up: a standalone thought;
+    - the same text as an earlier capture (the clipboard still holds the last link): the thought goes onto that
+      capture, which moves back to the inbox;
+    - otherwise a new capture. Idempotent on capture_id, which also names a thought it produced.
+    Returns {"kind": "thought" | "duplicate" | "capture", "created", "capture" | "thought_id"}."""
+    text, thought = (text or "").strip(), (thought or "").strip()
+    existing = store.get_capture(capture_id)
+    if existing:
+        return {"kind": "capture", "created": False, "capture": existing}
+    if not text and not images:
+        if not thought:
+            raise rules.Rejected("内容为空：至少要有文字、链接、图片或一句想法")
+        return {"kind": "thought", "created": True, "thought_id": store.add_thought(thought, "user", tid=capture_id)}
+    earlier = None if images else store.same_capture(text)
+    if earlier:
+        if thought:
+            store.add_thought(thought, "user", capture_id=earlier, tid=capture_id)
+        store.set_triage(earlier, "inbox")
+        return {"kind": "duplicate", "created": False, "capture": store.get_capture(earlier)}
+    cap, created = store.add_capture(capture_id, text, source, thought, images)
+    return {"kind": "capture", "created": created, "capture": cap}
+
+
 def _confirm(capture_id, paper, evidence):
     try:
         store.link(capture_id, paper["id"], "rule", evidence=evidence)

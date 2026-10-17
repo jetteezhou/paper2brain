@@ -11,7 +11,7 @@
 ./p2b ingest <capture_id>
 ```
 
-`capture add` 按 id 幂等，重复执行没有副作用。
+`capture add` 按 id 幂等，重复执行没有副作用。返回里有 `thought_id`（只有一句想法）或 `duplicate_of`（这段内容以前收过，想法已补到那条上）时，不用再处理，回复"已记下"即可。
 
 ## 1. 看清这条捕获
 

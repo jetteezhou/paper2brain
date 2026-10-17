@@ -538,6 +538,48 @@ class Agents(unittest.TestCase):
         self.assertEqual(sorted(name for name, _ in self.spawned), ["_launch", "_watch"])
 
 
+class Receiving(unittest.TestCase):
+    def test_bare_thought_and_repeated_text_do_not_become_captures(self):
+        from paper2brain import pipeline
+        with scratch_home():
+            got = pipeline.receive("sc-1", "  ", "web", "组会想讲 action chunking 的演化")
+            self.assertEqual(got["kind"], "thought")
+            self.assertEqual(pipeline.receive("sc-1", "", "web", "组会想讲 action chunking 的演化")["kind"], "thought")
+            self.assertEqual([t["text"] for t in store.list_thoughts()], ["组会想讲 action chunking 的演化"])
+            self.assertEqual(store.counts()["pending"] + store.counts()["inbox"], 0)
+            first = pipeline.receive("sc-2", "https://arxiv.org/abs/2410.24164", "shortcut")["capture"]
+            store.set_triage(first["id"], "archived")
+            again = pipeline.receive("sc-3", "https://arxiv.org/abs/2410.24164 ", "shortcut", "真机任务有几个？")
+            self.assertEqual((again["kind"], again["capture"]["id"], again["capture"]["triage"]), ("duplicate", "sc-2", "inbox"))
+            self.assertEqual([t["text"] for t in again["capture"]["thoughts"]], ["真机任务有几个？"])
+            self.assertEqual(pipeline.receive("sc-2", "别的", "web")["created"], False)
+
+    def test_icloud_inbox_waits_for_the_api_agent_unless_told_otherwise(self):
+        import json as _json
+        from unittest import mock
+
+        from paper2brain import cursor_api, inbox, pipeline
+        with scratch_home() as home, mock.patch.object(inbox, "INBOX", home / "inbox"), \
+                mock.patch.object(pipeline, "process") as process, mock.patch.object(cursor_api, "watch"):
+            box = home / "inbox"
+            box.mkdir()
+            write = lambda name, obj: (box / name).write_text(_json.dumps(obj, ensure_ascii=False))
+            write("th-1.json", {"id": "th-1", "text": "", "thought": "只是一个念头"})
+            write("sc-1.json", {"id": "sc-1", "text": "https://mp.weixin.qq.com/s/abc", "thought": ""})
+            inbox.drain()
+            self.assertEqual([t["id"] for t in store.list_thoughts()], ["th-1"])
+            self.assertIsNone(store.get_capture("sc-1"))  # the API's agent may still be taking it
+            write("sc-1.agent.json", {"agent": {"id": "bc-phone"}, "run": {"id": "run-phone", "status": "CREATING"}})
+            inbox.drain()
+            cap = store.get_capture("sc-1")
+            self.assertEqual((cap["agent_id"], cap["runs"][0]["id"]), ("bc-phone", "run-phone"))
+            process.assert_called_once_with("sc-1", agent=False)
+            write("sc-2.json", {"id": "sc-2", "text": "https://mp.weixin.qq.com/s/abc", "thought": "再补一句", "local": True})
+            inbox.drain()
+            self.assertEqual([t["text"] for t in store.get_capture("sc-1")["thoughts"]], ["再补一句"])
+            self.assertEqual(sorted(p.name for p in box.iterdir()), ["done"])
+
+
 class Migrations(unittest.TestCase):
     def test_legacy_database_is_upgraded_in_place_after_a_backup(self):
         import sqlite3
@@ -548,11 +590,15 @@ class Migrations(unittest.TestCase):
             legacy.executescript(store.SCHEMA + "CREATE TABLE ideas (id TEXT);")
             legacy.execute("INSERT INTO captures (id, created_at, raw, source) VALUES ('c1', '2026-10-01', 'https://x', 'web')")
             legacy.execute("INSERT INTO thoughts VALUES ('t1', '2026-10-01', '旧想法', 'user', 'c1', NULL)")
+            legacy.execute("INSERT INTO captures (id, created_at, raw, source, status) VALUES ('bare', '2026-10-02', '', 'web', 'unmapped')")
+            legacy.execute("INSERT INTO thoughts VALUES ('t2', '2026-10-02', '只有一句想法', 'user', 'bare', NULL)")
             legacy.execute("INSERT INTO topics VALUES ('VLA', 'VLA', NULL, 0)")
             legacy.commit()
             legacy.close()
 
             self.assertEqual(store.get_capture("c1")["thoughts"][0]["text"], "旧想法")
+            self.assertIsNone(store.get_capture("bare"))
+            self.assertEqual(next(t for t in store.list_thoughts() if t["id"] == "t2")["capture_id"], None)
             c = sqlite3.connect(home / "p2b.sqlite")
             self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], len(store.MIGRATIONS))
             names = {r[0] for r in c.execute("SELECT name FROM sqlite_master")}

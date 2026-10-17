@@ -34,8 +34,13 @@ def run(args):
     cmd = args.cmd
     if cmd == "capture":
         images = [(Path(p).name, Path(p).read_bytes(), mimetypes.guess_type(p)[0] or "image/png") for p in args.image]
-        cap, created = store.add_capture(args.id or str(uuid.uuid4()), args.text, args.source, args.thought, images)
-        return {"created": created, "capture": cap}
+        got = pipeline.receive(args.id or str(uuid.uuid4()), args.text, args.source, args.thought, images)
+        if got["kind"] == "thought":
+            return {"created": True, "thought_id": got["thought_id"], "note": "只有一句想法，已记为想法，不用再处理"}
+        if got["kind"] == "duplicate":
+            return {"created": False, "duplicate_of": got["capture"]["id"],
+                    "note": "这段内容以前收过，想法已补到那条上，不用再处理"}
+        return {"created": got["created"], "capture": got["capture"]}
     if cmd == "ingest":
         return pipeline.ingest(args.capture_id)
     if cmd == "fetch":
