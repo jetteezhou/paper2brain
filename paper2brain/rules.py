@@ -124,6 +124,9 @@ def validate_card(card, pages, figures=()):
         errors.append("resources 必须是对象")
         res = {}
     out["resources"] = {k: res.get(k) for k in ("code", "project", "data", "real_robot", "platform")}
+    for k in ("code", "project", "data"):
+        if out["resources"][k] is not None and not re.match(r"https?://[^\s\"'<>]+$", str(out["resources"][k])):
+            errors.append(f"resources.{k} 只能是 http(s) 链接或 null：{str(out['resources'][k])[:80]!r}")
     takes = card.get("takes") or []
     if not isinstance(takes, list):
         errors.append("takes 必须是数组")
@@ -253,7 +256,7 @@ def validate_code_map(rows, pages, read_file):
         if not isinstance(r, dict) or not _text(r, "component", [], True) or not _text(r, "file", [], True):
             errors.append(f"第 {i} 行需要 component 和 file")
             continue
-        row = {"component": r["component"].strip(), "file": r["file"].strip().lstrip("./"),
+        row = {"component": r["component"].strip(), "file": r["file"].strip().removeprefix("./"),
                "symbol": (r.get("symbol") or "").strip() or None, "note": (r.get("note") or "").strip() or None}
         if r.get("paper_quote"):
             fixed, cite_errors = verify_citations([{"quote": r["paper_quote"], "page": r.get("page")}], pages)

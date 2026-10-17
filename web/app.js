@@ -3,6 +3,8 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const enc = encodeURIComponent;
+// Links filled in by the agent (from papers it read) may be hostile: only http(s) becomes a live href.
+const href = (u) => (/^https?:\/\//i.test(u || '') ? esc(u) : '#');
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -476,7 +478,7 @@ function runsBlock2(runs, label, spec) {
 
 function codeTab(x) {
   const linked = new Set(x.repos.map((r) => r.url.toLowerCase()));
-  const official = x.links.filter((l) => l.kind === 'paper' && l.code && !linked.has(l.code.replace(/\/$/, '').replace(/\.git$/, '').toLowerCase()));
+  const official = x.links.filter((l) => l.kind === 'paper' && /^https?:\/\//i.test(l.code || '') && !linked.has(l.code.replace(/\/$/, '').replace(/\.git$/, '').toLowerCase()));
   const papers = x.links.filter((l) => l.kind === 'paper' && !l.missing);
   const run = liveRun(runsOf(x, 'codemap'));
   let h = `<form class="add-line repo-add" data-form="repo-add" data-id="${x.id}"><input placeholder="关联代码仓库：GitHub 链接、git 地址或本机路径">
@@ -640,7 +642,7 @@ function captureDetail(c, papers) {
   const rawExtra = c.raw && c.raw.replace(/https?:\/\/\S+/g, '').trim();
   const running = c.runs.find((r) => live(r.status));
   let h = `<div class="src-bar"><span class="chip">${esc(channel(c))}</span>${c.author ? `<span>${esc(c.author)}</span>` : ''}<span>${ago(c.created_at)}</span>
-    ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">打开原文 ↗</a>` : ''}<span class="grow"></span>
+    ${c.url ? `<a href="${href(c.url)}" target="_blank" rel="noopener">打开原文 ↗</a>` : ''}<span class="grow"></span>
     ${tb('deep', '待深读')}${tb('archived', '存档')}${tb('ignored', '忽略')}
     <button class="btn sm ghost" data-action="undo-capture" data-id="${c.id}" title="删除这条捕获及由它产生的内容">撤销收下</button></div>
     <div class="hint" style="margin-top:4px">当前在：${triage[c.triage]}</div>`;
@@ -661,7 +663,7 @@ function captureDetail(c, papers) {
   } else if (c.status === 'needs_confirm' && !papers.length) {
     h += `<div class="notice"><h3>这条解读讲的是哪篇论文？</h3>${(c.candidates || []).map((m) => `
       <div class="cand"><div class="cand-body"><div class="cand-title">${esc(m.title)}</div>
-      <div class="cand-meta">${esc(authors(m.authors))} · ${esc(m.published || '')} · <a href="${esc(m.url)}" target="_blank">${esc(idLabel(m.pid))}</a>${m.score ? ` · 标题相似度 ${Math.round(m.score * 100)}%` : ''}</div>
+      <div class="cand-meta">${esc(authors(m.authors))} · ${esc(m.published || '')} · <a href="${href(m.url)}" target="_blank" rel="noopener">${esc(idLabel(m.pid))}</a>${m.score ? ` · 标题相似度 ${Math.round(m.score * 100)}%` : ''}</div>
       <div class="cand-meta">${esc(m.why || '')}</div></div>
       <button class="btn sm primary" data-action="link" data-id="${c.id}" data-paper="${esc(m.pid)}">就是这篇</button></div>`).join('')}
       ${manualLink(c.id, '都不是？粘贴论文链接、DOI 或 PDF 链接，或把 PDF 拖进来')}</div>`;
@@ -747,8 +749,8 @@ function paperCard(p, { capture, inReader } = {}) {
     body = `<div class="tldr">${esc(card.tldr)}</div>${figuresHtml(p)}
       <dl class="kv"><dt>问题</dt><dd>${inline(card.problem)}</dd><dt>方法</dt><dd>${inline(card.method)}</dd>
       <dt>结果</dt><dd><ul class="results">${card.results.map((r) => `<li>${inline(r.text)} ${cite(p.id, r.page, r.quote)}</li>`).join('')}</ul></dd></dl>
-      <div class="res-row">${res.code ? `<a href="${esc(res.code)}" target="_blank">代码 ↗</a>` : '<span>代码：<b>未知</b></span>'}
-        ${res.project ? `<a href="${esc(res.project)}" target="_blank">项目页 ↗</a>` : ''}${res.data ? `<a href="${esc(res.data)}" target="_blank">数据 ↗</a>` : ''}
+      <div class="res-row">${res.code ? `<a href="${href(res.code)}" target="_blank" rel="noopener">代码 ↗</a>` : '<span>代码：<b>未知</b></span>'}
+        ${res.project ? `<a href="${href(res.project)}" target="_blank" rel="noopener">项目页 ↗</a>` : ''}${res.data ? `<a href="${href(res.data)}" target="_blank" rel="noopener">数据 ↗</a>` : ''}
         <span>真机实验：<b>${robot}</b></span>${res.platform ? `<span>平台：<b>${esc(res.platform)}</b></span>` : ''}</div>
       <div class="relevance"><b>和你的关系</b>　${inline(card.relevance)}</div>
       ${takes ? `<div class="takes"><div class="block-title" style="margin:10px 0 4px">解读观点<span class="line"></span></div>${takes}</div>` : ''}`;
@@ -762,7 +764,7 @@ function paperCard(p, { capture, inReader } = {}) {
   }
   return `<article class="paper" data-anchor-surface="card" data-pid="${esc(p.id)}">
     ${inReader ? '' : `<h1 class="paper-title">${esc(p.title)}</h1>`}
-    <div class="paper-meta">${esc(authors(p.authors))}${p.published ? ' · ' + esc(p.published) : ''} · ${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(idLabel(p.id))} ↗</a>` : esc(idLabel(p.id))}${p.page_count ? ` · ${p.page_count} 页` : ' · <span style="color:var(--amber)">没有全文</span>'}
+    <div class="paper-meta">${esc(authors(p.authors))}${p.published ? ' · ' + esc(p.published) : ''} · ${p.url ? `<a href="${href(p.url)}" target="_blank" rel="noopener">${esc(idLabel(p.id))} ↗</a>` : esc(idLabel(p.id))}${p.page_count ? ` · ${p.page_count} 页` : ' · <span style="color:var(--amber)">没有全文</span>'}
     ${capture && p.captures?.length > 1 ? ` · <a href="#" data-action="select" data-kind="paper" data-id="${esc(p.id)}">共 ${p.captures.length} 个来源</a>` : ''}
     ${capture ? ` · <a href="#" data-action="unlink" data-id="${capture.id}" data-paper="${esc(p.id)}" title="这条捕获不是讲这篇">不是这篇？</a>` : ''}</div>
     ${topicsRow(p)}
@@ -914,7 +916,7 @@ function renderReader(fresh) {
         <div class="title">${esc(p.title)}</div>
         ${p.pdf_path && p.outline?.length ? `<select class="toc" data-change="toc" title="跳到原文的某一节"><option value="">原文目录…</option>${p.outline.map((s) =>
           `<option value="${s.page}|${esc(s.title)}">${'　'.repeat(Math.min(s.level, 3) - 1)}${esc(short(s.title, 48))}　p.${s.page}</option>`).join('')}</select>` : ''}
-        ${p.url ? `<a class="btn sm ghost" href="${esc(p.url)}" target="_blank">${esc(idLabel(p.id).split(' ')[0])} ↗</a>` : ''}
+        ${p.url ? `<a class="btn sm ghost" href="${href(p.url)}" target="_blank" rel="noopener">${esc(idLabel(p.id).split(' ')[0])} ↗</a>` : ''}
         <button class="btn sm ghost" data-action="wide">调整面板宽度</button>
       </div>
       <div class="reader-body ${S.wide ? 'wide' : ''}">

@@ -86,7 +86,7 @@ def reader(path, commit):
     """file -> text at commit, or None when the file does not exist there."""
     def read(file):
         try:
-            return _git(path, "show", f"{commit}:{file.lstrip('./')}", timeout=120)
+            return _git(path, "show", f"{commit}:{file.removeprefix('./')}", timeout=120)
         except RuntimeError:
             return None
     return read
@@ -95,4 +95,4 @@ def reader(path, commit):
 def web_url(url, commit, file, line=None):
     if not url.startswith("https://github.com/"):
         return None
-    return f"{url}/blob/{commit}/{file.lstrip('./')}" + (f"#L{line}" if line else "")
+    return f"{url}/blob/{commit}/{file.removeprefix('./')}" + (f"#L{line}" if line else "")

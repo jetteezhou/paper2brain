@@ -57,6 +57,18 @@ class Rules(unittest.TestCase):
                                                ["for dexter-\nous tasks such as\nlaundry folding."])
         self.assertEqual(errors, [])
 
+    def test_card_links_must_be_http(self):
+        ok = rules.validate_card({**CARD, "resources": {"code": "https://github.com/a/b", "project": None}}, PAGES)
+        self.assertEqual(ok["resources"]["code"], "https://github.com/a/b")
+        for bad in ("javascript:alert(1)", "JaVaScRiPt:x", "data:text/html,x", "//evil.com"):
+            with self.assertRaisesRegex(rules.Rejected, "resources.code"):
+                rules.validate_card({**CARD, "resources": {"code": bad}}, PAGES)
+
+    def test_code_map_keeps_dotted_paths(self):
+        files = {".github/workflows/ci.yml": "name: ci\non: [push, pull_request]\n"}
+        rows = [{"component": "ci", "file": "./.github/workflows/ci.yml", "snippet": "on: [push, pull_request]"}]
+        self.assertEqual(rules.validate_code_map(rows, PAGES, files.get)[0]["file"], ".github/workflows/ci.yml")
+
     def test_report_needs_three_citations(self):
         with self.assertRaisesRegex(rules.Rejected, "至少要有 3 条"):
             rules.validate_report({"sections": [{"heading": "h", "body": "b", "citations": [{"quote": "flow matching action expert", "page": 1}]}]}, PAGES)
