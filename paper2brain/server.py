@@ -299,7 +299,9 @@ def thought_update(q, body, tid):
 
 @route("POST", "/api/thoughts")
 def thought_add(q, body):
-    return {"id": store.add_thought(body.get("text"), "user", body.get("capture_id"), body.get("paper_id"))}
+    """by_agent: the user keeps an agent's answer from a discussion as a thought; it is labelled as the agent's words."""
+    by = "agent" if body.get("by_agent") else "user"
+    return {"id": store.add_thought(body.get("text"), by, body.get("capture_id"), body.get("paper_id"))}
 
 
 @route("POST", "/api/notes")

@@ -386,7 +386,8 @@ class Store(unittest.TestCase):
         store.add_message(store.thread_for(f"paper:{pid}")["id"], "user", "为什么用 flow matching？")
         j = next(p for p in store.list_papers() if p["id"] == pid)["jumps"]
         self.assertEqual((j["report"], j["anchors"], j["chat"]), (["方法"], 1, 1))
-        self.assertEqual(store.list_captures("inbox")[0]["papers"][0]["jumps"]["report"], ["方法"])
+        mine = next(c for c in store.list_captures("inbox") if c["id"] == self.cid)
+        self.assertEqual(mine["papers"][0]["jumps"]["report"], ["方法"])
 
     def test_find_request_becomes_a_capture_with_its_own_discussion(self):
         from unittest import mock
@@ -632,7 +633,13 @@ class Receiving(unittest.TestCase):
             self.assertEqual(got["kind"], "thought")
             self.assertEqual(pipeline.receive("sc-1", "", "web", "组会想讲 action chunking 的演化")["kind"], "thought")
             self.assertEqual([t["text"] for t in store.list_thoughts()], ["组会想讲 action chunking 的演化"])
-            self.assertEqual(store.counts()["pending"] + store.counts()["inbox"], 0)
+            self.assertEqual(store.counts()["inbox"], 0)
+            pending = pipeline.receive("sc-9", "只有中文描述的一段解读", "web")["capture"]["id"]
+            store.update_capture(pending, status="unmapped")
+            store.set_triage(pending, "archived")
+            self.assertEqual([c["id"] for c in store.list_captures("inbox")], [pending])  # needs the user: stays in sight
+            store.set_triage(pending, "ignored")
+            self.assertEqual(store.list_captures("inbox"), [])
             first = pipeline.receive("sc-2", "https://arxiv.org/abs/2410.24164", "shortcut")["capture"]
             store.set_triage(first["id"], "archived")
             again = pipeline.receive("sc-3", "https://arxiv.org/abs/2410.24164 ", "shortcut", "真机任务有几个？")

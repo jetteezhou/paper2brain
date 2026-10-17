@@ -485,18 +485,21 @@ def _topics_of(c, paper_ids):
     return out
 
 
+PENDING = "c.status IN ('needs_confirm','unmapped','failed') AND c.triage!='ignored'"
+
+
 def list_captures(view="inbox", limit=200):
-    where = {"pending": "c.status IN ('needs_confirm','unmapped','failed') AND c.triage!='ignored'"}.get(
-        view, "c.triage=?" if view in TRIAGE else "1=1"
-    )
-    args = (view,) if view in TRIAGE else ()
+    """The inbox also holds, first, every capture that needs the user's word (PENDING), wherever it was filed."""
+    where = {"pending": PENDING, "inbox": f"(c.triage='inbox' OR ({PENDING}))"}.get(view, "c.triage=?" if view in TRIAGE else "1=1")
+    args = (view,) if view in TRIAGE and view != "inbox" else ()
+    order = f"({PENDING}) DESC, " if view == "inbox" else ""
     with tx() as c:
         caps = _rows(c.execute(
             f"SELECT c.id, c.created_at, substr(c.raw,1,300) AS raw, c.source, c.channel, c.title, c.author, c.status, "
             f"c.note, c.triage, c.agent_id, (SELECT text FROM thoughts t WHERE t.capture_id=c.id ORDER BY created_at DESC LIMIT 1) AS thought, "
             f"(SELECT status FROM runs r WHERE r.ref=c.id ORDER BY created_at DESC LIMIT 1) AS run_status, "
             f"(SELECT count(*) FROM attachments a WHERE a.capture_id=c.id) AS image_count "
-            f"FROM captures c WHERE {where} ORDER BY c.created_at DESC LIMIT ?",
+            f"FROM captures c WHERE {where} ORDER BY {order}c.created_at DESC LIMIT ?",
             (*args, limit),
         ))
         ids = [x["id"] for x in caps]
@@ -572,8 +575,8 @@ def counts():
         for r in c.execute("SELECT triage, count(*) n FROM captures GROUP BY triage"):
             out[r["triage"]] = r["n"]
         out["pending"] = c.execute(
-            "SELECT count(*) FROM captures WHERE status IN ('needs_confirm','unmapped','failed') AND triage!='ignored'"
-        ).fetchone()[0]
+            f"SELECT count(*) FROM captures c WHERE {PENDING}").fetchone()[0]
+        out["inbox"] = c.execute(f"SELECT count(*) FROM captures c WHERE c.triage='inbox' OR ({PENDING})").fetchone()[0]
         out["papers"] = c.execute(f"SELECT count(*) FROM papers p WHERE {LISTED}").fetchone()[0]
         out["thoughts"] = c.execute("SELECT count(*) FROM thoughts").fetchone()[0]
         out["research"] = c.execute("SELECT count(*) FROM research").fetchone()[0]
