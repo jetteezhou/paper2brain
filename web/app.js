@@ -552,7 +552,7 @@ function experimentCard(e) {
     ${e.conclusion_text ? `<div class="exp-row"><span class="hint">结论</span>${inline(e.conclusion_text)}</div>` : ''}
     ${e.raw ? `<details><summary class="hint">原始结果</summary><pre>${esc(e.raw)}</pre></details>` : ''}
     <div class="exp-acts"><button class="btn sm ghost" data-action="exp-edit" data-id="${e.id}">编辑</button>
-      <button class="btn sm ghost" data-action="exp-structure" data-id="${e.id}" ${agentOn() && !run && e.raw ? '' : 'disabled'}>让 agent 整理</button>
+      <button class="btn sm ghost" data-action="exp-structure" data-id="${e.id}" ${agentOn() && !run && e.raw && e.edited_by !== 'user' ? '' : 'disabled'} title="${e.edited_by === 'user' ? '你改过这条记录，agent 不再改动' : ''}">让 agent 整理</button>
       <button class="btn sm ghost" data-action="exp-delete" data-id="${e.id}">删除</button></div>
     ${e.runs.length && !run && e.runs[0].status === 'ERROR' ? `<div class="hint" style="color:var(--red)">agent 整理出错：${esc(e.runs[0].error || '')}</div>` : ''}</div>`;
 }

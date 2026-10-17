@@ -1090,8 +1090,8 @@ def add_experiment(rid, raw, by, title=None):
 
 
 def update_experiment(eid, by, base_rev=None, **fields):
-    """title / target / setup / results / conclusion / conclusion_text / status. The agent structures only what the
-    user has not edited since (revision guard)."""
+    """title / target / setup / results / conclusion / conclusion_text / status. The agent structures a record until
+    the user edits it; from then on the user's version stands (a fresh revision does not get the agent past that)."""
     if "status" in fields and fields["status"] not in EXPERIMENT_STATUS:
         raise rules.Rejected(f"未知状态：{fields['status']}")
     if fields.get("conclusion") not in (None, *CONCLUSIONS):
@@ -1099,9 +1099,11 @@ def update_experiment(eid, by, base_rev=None, **fields):
     if "results" in fields:
         fields["results"] = json.dumps(fields["results"] or [], ensure_ascii=False)
     with tx() as c:
-        cur = c.execute("SELECT revision FROM experiments WHERE id=?", (eid,)).fetchone()
+        cur = c.execute("SELECT revision, edited_by FROM experiments WHERE id=?", (eid,)).fetchone()
         if not cur:
             raise rules.Rejected("实验不存在")
+        if by != "user" and cur["edited_by"] == "user":
+            raise rules.Rejected("用户已手动改过这条实验记录，agent 不能修改。需要补充时在回复里告诉用户")
         rules.check_revision(cur["revision"], base_rev)
         cols = ", ".join(f"{k}=?" for k in fields)
         c.execute(f"UPDATE experiments SET {cols}, updated_at=?, edited_by=?, revision=revision+1 WHERE id=?",

@@ -208,6 +208,17 @@ class Store(unittest.TestCase):
         ok = rules.validate_experiment({"title": "t", "conclusion_text": "超过 0.9 的成功线"}, raw, "验证方案：成功率 ≥ 0.9")
         self.assertEqual(ok["conclusion_text"], "超过 0.9 的成功线")
 
+    def test_agent_cannot_overwrite_user_edited_experiment(self):
+        rid = store.add_research("exp", "user")
+        eid = store.add_experiment(rid, "success=0.9", "user")
+        rev = store.update_experiment(eid, "agent", 1, title="agent 整理")
+        rev = store.update_experiment(eid, "user", rev, title="用户改的标题")
+        for base in (None, rev):
+            with self.assertRaisesRegex(rules.Rejected, "用户已手动改过"):
+                store.update_experiment(eid, "agent", base, title="agent 覆盖")
+        e = store.get_experiment(eid)
+        self.assertEqual((e["title"], e["edited_by"]), ("用户改的标题", "user"))
+
     def test_code_map_snippets_are_verbatim(self):
         files = {"src/policy.py": "import torch\n\ndef chunk(actions, horizon=50):\n    return actions.unfold(0, horizon, 1)\n"}
         rows = [{"component": "action chunk", "paper_quote": "frequencies of up to 50 Hz", "page": 2,
