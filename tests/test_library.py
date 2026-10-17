@@ -461,8 +461,8 @@ class scratch_home:
         os.environ["P2B_HOME"] = self.old
 
 
-class Agents(unittest.TestCase):
-    """Run queue, timeouts and restart recovery, with the Cursor API mocked out."""
+class AgentHarness(unittest.TestCase):
+    """A scratch library with the Cursor API mocked out: nothing is sent, started threads are recorded."""
     def setUp(self):
         from unittest import mock
 
@@ -483,6 +483,9 @@ class Agents(unittest.TestCase):
 
     status = staticmethod(lambda rid: store.get_run(rid)["status"])
 
+
+class Agents(AgentHarness):
+    """Run queue, timeouts and restart recovery."""
     def test_queue_holds_runs_beyond_the_limit_and_one_per_agent(self):
         self.cfg["max_agents"] = 1
         a = self.api.start_async("card", "p1", "写卡 1")
@@ -536,6 +539,40 @@ class Agents(unittest.TestCase):
         self.assertEqual(self.status("pending-lost"), "CREATING")  # requeued and sent again with the same agent id
         self.assertEqual(self.status("pending-old"), "ERROR")
         self.assertEqual(sorted(name for name, _ in self.spawned), ["_launch", "_watch"])
+
+
+class Discussions(AgentHarness):
+    def test_history_paper_record_phone_log_and_continuing_the_capture_agent(self):
+        from paper2brain import cli
+        pid, cid = "arxiv:2410.24164", "sc-phone"
+        store.add_capture(cid, "https://arxiv.org/abs/2410.24164", "shortcut")
+        store.upsert_paper(pid, "π0")
+        store.link(cid, pid, "rule")
+        store.update_capture(cid, agent_id="bc-phone")
+        old = store.thread_for("library")
+        store.add_message(old["id"], "user", "上周问的：π0 和 FAST 的区别")
+        store.new_thread("library")
+        store.add_message(store.thread_for("library")["id"], "user", "新的问题")
+        self.assertEqual([t["first"] for t in store.recent_threads()], ["新的问题", "上周问的：π0 和 FAST 的区别"])
+
+        out = cli.run(cli.parser().parse_args(["discuss", "log", "--paper", pid, "--question", "真机做了几个任务？", "--answer", "7 个 [arxiv:2410.24164 p.9]"]))
+        self.assertTrue(out["logged"])
+        aid = store.add_anchor(pid, "card", "flow matching", "user")
+        store.add_message(store.thread_for(f"anchor:{aid}")["id"], "user", "这段为什么这样设计？")
+        d = store.paper_discussions(pid)
+        self.assertEqual([[m["text"] for m in t["messages"]] for t in d],
+                         [["真机做了几个任务？", "7 个 [arxiv:2410.24164 p.9]"], ["这段为什么这样设计？"]])
+        self.assertEqual(d[1]["passage"], "flow matching")
+        self.assertIn("discussions", cli.run(cli.parser().parse_args(["show", "paper", pid])))
+        self.assertEqual(store.recent_threads()[0]["scope_title"], "π0 ·「flow matching」")
+
+        first = self.api.discuss(f"paper:{pid}", "和 OpenVLA 比呢？")
+        run = store.get_run(first)
+        self.assertEqual((run["agent_id"], run["launch"]["new"]), ("bc-phone", False))
+        self.assertIn("librarian/discuss.md", run["prompt"])
+        store.update_run(first, status="FINISHED")
+        second = self.api.discuss(f"paper:{pid}", "再展开一点")
+        self.assertEqual(store.get_run(second)["prompt"], self.api.WEB_MARK + "再展开一点")
 
 
 class Receiving(unittest.TestCase):

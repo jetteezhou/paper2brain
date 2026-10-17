@@ -11,11 +11,21 @@
 5. **被拒绝就修正后重交**。`./p2b` 返回的错误信息就是修改依据（比如某条引用在原文里找不到），改完再提交，最多重试 3 次。
 6. 和用户说话用中文，简短直接。专有名词、方法名保留英文。
 
+## 用户在 Cursor 手机端直接追问时
+
+paper2brain 发给你的任务都以"先读 librarian/""你是 paper2brain"或"（网页讨论）"开头。**不是这样开头的消息，是用户在 Cursor App 里直接打的字**（多半是收下一篇论文后在手机上追问）。按 `librarian/discuss.md` 回答；回答完，把这一问一答记到那篇论文的讨论里，用户回到电脑上能接着看：
+
+```
+./p2b discuss log --paper <讨论的论文> --question "用户原话" --answer "你的回答"
+```
+
+一条消息涉及几篇论文时，记到最相关的那篇。以"（网页讨论）"开头的消息已经在网页上了，不要再记。
+
 ## 常用命令
 
 ```
 ./p2b show capture <id>        # 捕获详情：原文、快照正文、候选论文、已关联论文、用户想法
-./p2b show paper <paper_id>    # 论文详情：元数据、快读卡、主题、来源、想法、笔记
+./p2b show paper <paper_id>    # 论文详情：元数据、快读卡、主题、来源、想法、笔记、discussions（用户在网页 / 划词 / 手机上问过什么）
 ./p2b text <paper_id> --pages 1-3
 ./p2b find "English title"     # 按标题检索（arXiv + Crossref），返回 pid 和相似度
 ./p2b find --keywords "flow matching VLA"   # 按关键词检索 arXiv（全部命中），找论文时用（见 librarian/find.md）

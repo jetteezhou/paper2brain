@@ -618,7 +618,7 @@ def get_paper(pid, with_anchors=True):
         p["topics"] = _topics_of(c, [pid])[pid]
         p["topic_by"] = {r["topic"]: r["by"] for r in c.execute("SELECT topic, by FROM paper_topics WHERE paper_id=?", (pid,))}
         p["captures"] = _rows(c.execute(
-            "SELECT c.id, c.created_at, c.channel, c.title, c.author, c.url, substr(c.raw,1,300) AS raw, c.triage, cp.state, cp.by "
+            "SELECT c.id, c.created_at, c.channel, c.title, c.author, c.url, substr(c.raw,1,300) AS raw, c.triage, c.agent_id, cp.state, cp.by "
             "FROM capture_papers cp JOIN captures c ON c.id=cp.capture_id WHERE cp.paper_id=? AND cp.state!='rejected' "
             "ORDER BY c.created_at", (pid,),
         ))
@@ -886,6 +886,52 @@ def thread_for(scope=None, thread_id=None):
             m["run_tools"] = json.loads(m["run_tools"])
         m["research"] = used.get(m["id"], [])
     return t
+
+
+def _scope_title(c, scope):
+    kind, _, ref = scope.partition(":")
+    one = lambda sql: (c.execute(sql, (ref,)).fetchone() or [None])[0]  # noqa: E731
+    if kind == "paper":
+        return one("SELECT title FROM papers WHERE id=?")
+    if kind == "anchor":
+        r = c.execute("SELECT a.quote, p.title FROM anchors a JOIN papers p ON p.id=a.paper_id WHERE a.id=?", (ref,)).fetchone()
+        return r and f"{r['title']} ·「{r['quote'][:40]}」"
+    if kind == "research":
+        return one("SELECT title FROM research WHERE id=?")
+    if kind == "thought":
+        return one("SELECT coalesce(gist, text) FROM thoughts WHERE id=?")
+    if kind == "find":
+        return one("SELECT raw FROM captures WHERE id=?")
+    if kind == "papers":
+        return f"{len(ref.split('|'))} 篇论文"
+    return {"library": "整个论文库", "thoughts": "我的想法"}.get(kind, ref)
+
+
+def recent_threads(limit=100):
+    """Every discussion that has started, the latest activity first, whatever it is attached to."""
+    with tx() as c:
+        out = _rows(c.execute(
+            "SELECT t.id, t.scope, t.created_at, t.agent_id, count(m.id) AS n, max(m.created_at) AS last_at, "
+            "(SELECT text FROM messages u WHERE u.thread_id=t.id AND u.role='user' ORDER BY u.created_at, u.rowid LIMIT 1) AS first "
+            "FROM threads t JOIN messages m ON m.thread_id=t.id GROUP BY t.id ORDER BY last_at DESC, max(m.rowid) DESC LIMIT ?", (limit,)))
+        for t in out:
+            t["scope_title"] = _scope_title(c, t["scope"])
+    return out
+
+
+def paper_discussions(pid):
+    """What the user asked about a paper, on the web, in pinned passages or from the phone, with the answers."""
+    with tx() as c:
+        scopes = [f"paper:{pid}"] + [f"anchor:{a}" for a in _ids(c, "SELECT id FROM anchors WHERE paper_id=?", (pid,))]
+        threads = _rows(c.execute(f"SELECT id, scope, created_at FROM threads WHERE scope IN ({_qs(scopes)}) "
+                                  f"ORDER BY created_at, rowid", scopes))
+        for t in threads:
+            if t["scope"].startswith("anchor:"):
+                t["passage"] = c.execute("SELECT quote FROM anchors WHERE id=?", (t["scope"][7:],)).fetchone()[0]
+            t["messages"] = [{"role": m["role"], "at": m["created_at"], "text": (m["text"] or "")[:1500]} for m in c.execute(
+                "SELECT m.role, m.created_at, coalesce(nullif(m.text, ''), r.text) AS text FROM messages m "
+                "LEFT JOIN runs r ON r.id=m.run_id WHERE m.thread_id=? ORDER BY m.created_at, m.rowid", (t["id"],))]
+    return [t for t in threads if t["messages"]]
 
 
 def message(mid):

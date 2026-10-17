@@ -3,6 +3,7 @@ Docs: https://cursor.com/docs/cloud-agent/api/endpoints"""
 import base64
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -164,7 +165,9 @@ def _launch(r):
         run = _send(r["agent_id"], r["prompt"], _images.pop(placeholder, ()), launch.get("name"), launch.get("new"))
     except Exception as e:
         store.update_run(placeholder, status="ERROR", error=str(e))
-        if launch.get("new"):
+        # ponytail: guesses Cursor's wording for an agent that is gone (archived / expired); the next message then
+        # starts a fresh agent instead of failing on the old one forever.
+        if launch.get("new") or re.search(r"Cursor API (404|410)|archived", str(e), re.I):
             store.forget_agent(r["agent_id"])
         pump()
         return
@@ -367,12 +370,24 @@ def scope_text(scope):
     return "整个论文库。用 `./p2b search` 和 `./p2b papers` 检索。"
 
 
+# Follow-ups sent from the web start with this, so the agent can tell them from what the user types in the Cursor app
+# (those it logs back with ./p2b discuss log; see librarian/README.md).
+WEB_MARK = "（网页讨论）"
+
+
 def discuss(scope, text, thread_id=None, start=False, images=()):
     """Continue the scope's latest discussion, or an older one the user jumped back to. start=True opens a new
     research: the agent first reads what the user brought and drafts, instead of just answering."""
     thread = store.thread_for(scope, thread_id)
-    if thread["agent_id"]:
-        prompt, name = text, None
+    if not thread["agent_id"] and scope.startswith("paper:"):
+        # the agent that took this paper's capture (from the phone, too) already knows it, and what was asked there
+        agent = next((c["agent_id"] for c in reversed(store.get_paper(scope[6:], with_anchors=False)["captures"])
+                      if c.get("agent_id")), None)
+        if agent:
+            store.set_thread_agent(thread["id"], agent)
+            thread["agent_id"] = agent
+    if thread["agent_id"] and any(m["run_id"] for m in thread["messages"]):
+        prompt, name = WEB_MARK + text, None
     else:
         opening = "这是研究的开端：按 librarian/research.md 的“开启研究”一节处理。\n" if start else ""
         prompt = (

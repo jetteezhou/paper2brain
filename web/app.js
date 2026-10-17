@@ -22,7 +22,7 @@ const post = (u, b = {}) => api('POST', u, b);
 const S = {
   view: 'inbox', arg: null, state: null, list: [], sel: null, detail: null,
   open: new Set(['VLM', 'VLA', 'WAM']), images: [], reader: null, threads: {},
-  picker: null, scope: 'library', thoughts: [], search: null, seen: {}, scopeTitles: {}, scopePapers: {}, researchTab: {},
+  picker: null, thoughts: [], search: null, seen: {}, scopeTitles: {}, scopePapers: {}, researchTab: {},
 };
 
 const VIEWS = {
@@ -36,7 +36,7 @@ const VIEWS = {
   unsorted: { title: '未归类', kind: 'papers', empty: ['都归好类了', 'agent 拿不准的论文会留在这里。'] },
   thoughts: { title: '想法', kind: 'thoughts', empty: ['还没有想法', '收下内容时在“想法”一栏顺手写一句，或者在上面直接记。<br>agent 会帮每条想法补一句提炼，点开可以接着往下想。'] },
   research: { title: '研究', kind: 'research', empty: ['还没有研究', '在讨论、想法或论文卡片上点“加入研究”，或者在上面直接开一个。<br>素材攒够了，再和 agent 一起推敲三要素：研究问题、研究方法、验证方案。'] },
-  discuss: { title: '讨论', kind: 'page' },
+  discuss: { title: '讨论', kind: 'threads', empty: ['还没有讨论', '在论文、想法、研究上点“讨论”，或者从上面开始一段新讨论。<br>每段讨论都会留在这里，点“新对话”后旧的也找得回来。'] },
   search: { title: '搜索', kind: 'search' },
 };
 
@@ -197,7 +197,7 @@ async function load() {
     } else if (v.kind === 'research') S.list = await get('/api/research' + (S.arg ? `?topic=${enc(S.arg)}` : ''));
     else if (S.view === 'search') S.search = await get(`/api/search?q=${enc(S.arg || '')}`);
     else if (v.kind === 'thoughts') S.list = await get('/api/thoughts');
-    else if (S.view === 'discuss') { await loadThread(scopeKey(), S.threadId); S.threadId = null; }
+    else if (v.kind === 'threads') S.list = await get('/api/threads/recent');
     if ((S.view === 'topic' || S.view === 'research') && S.arg) {
       const other = await get(S.view === 'topic' ? `/api/research?topic=${enc(S.arg)}` : `/api/papers?topic=${enc(S.arg)}`);
       S.otherCount = other.length;
@@ -210,7 +210,7 @@ async function load() {
   else if (!S.sel && v.kind !== 'page' && S.list.length && innerWidth > 900) select(itemKind(S.list[0]), S.list[0].id);
 }
 
-const itemKind = (x) => (x.stage !== undefined ? 'research' : x.raw !== undefined ? 'capture' : x.text !== undefined ? 'thought' : 'paper');
+const itemKind = (x) => (x.last_at !== undefined ? 'thread' : x.stage !== undefined ? 'research' : x.raw !== undefined ? 'capture' : x.text !== undefined ? 'thought' : 'paper');
 
 async function select(kind, id) {
   S.sel = { kind, id };
@@ -229,6 +229,9 @@ async function loadDetail(force) {
       const cap = await get(`/api/captures/${enc(S.sel.id)}`);
       const papers = await Promise.all(cap.papers.filter((p) => p.state === 'confirmed').map((p) => get(`/api/papers/${enc(p.id)}`)));
       d = { cap, papers };
+    } else if (S.sel.kind === 'thread') {
+      const scope = S.list.find((x) => x.id === S.sel.id)?.scope || (await get(`/api/threads?id=${enc(S.sel.id)}`)).scope;
+      d = { thread: await loadThread(scope, S.sel.id) };
     } else if (S.sel.kind === 'research') d = { research: await get(`/api/research/${enc(S.sel.id)}`) };
     else if (S.sel.kind === 'thought') {
       d = { thought: await get(`/api/thoughts/${enc(S.sel.id)}`) };
@@ -302,7 +305,6 @@ function render() {
 function renderBody() {
   const v = VIEWS[S.view];
   $('#body').classList.toggle('single', v.kind === 'page');
-  if (S.view === 'discuss') { $('#list').innerHTML = ''; $('#detail').innerHTML = discussPage(); scrollChat(); return; }
   $('#list').innerHTML = S.view === 'search' ? searchList() : listHtml();
 }
 
@@ -322,6 +324,7 @@ function listHtml() {
   const title = S.arg && (S.view === 'topic' || S.view === 'research') ? S.arg.replace('/', ' / ') : v.title;
   if (v.kind === 'research') return researchList(title);
   if (v.kind === 'thoughts') return thoughtsList();
+  if (v.kind === 'threads') return threadsList();
   const keys = v.kind === 'captures' && ['inbox', 'pending'].includes(S.view) ? '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>D</kbd> 深读 <kbd>A</kbd> 存档' : '<kbd>J</kbd><kbd>K</kbd> 移动 <kbd>↵</kbd> 阅读';
   const head = listHead(title, S.list.length ? `${S.list.length} 条` : '', S.list.length ? (v.kind === 'papers' ? `${selectToggle('paper')}　` : '') + keys : '') + topicTabs() + (v.kind === 'papers' ? selectBar('paper') : '');
   if (!S.list.length) return head + `<div class="empty"><b>${v.empty[0]}</b>${v.empty[1]}</div>`;
@@ -424,6 +427,7 @@ function renderDetail() {
   if (!S.sel || !d) { el.innerHTML = S.list.length ? '<div class="empty" style="padding-top:120px">选择左侧一条查看</div>' : ''; return; }
   if (d.error) { el.innerHTML = `<div class="empty"><b>打不开</b>${esc(d.error)}</div>`; return; }
   const back = innerWidth <= 900 ? '<button class="btn sm ghost" data-action="back">← 返回列表</button>' : '';
+  if (d.thread) { el.innerHTML = `<div class="detail thread">${back}<div class="chatbox">${chatHtml(d.thread.scope)}</div></div>`; scrollChat(); return; }
   el.innerHTML = `<div class="detail">${back}${d.thought ? thoughtDetail(d.thought) : d.research ? researchDetail(d.research) : d.cap ? captureDetail(d.cap, d.papers) : paperDetail(d.papers[0])}</div>`;
   decorateDetail();
 }
@@ -1271,8 +1275,9 @@ function chatHtml(scope) {
   } else msgs = t.messages.map((m) => msgHtml(m, scope)).join('');
   const disabled = !agentOn();
   return `<div class="chat" data-scope="${esc(scope)}">
-    <div class="chat-head">范围：${esc(scopeLabel(scope))}${t?.proposal ? `<a href="#" class="chip violet" data-action="open-research" data-id="${esc(scope.slice(9))}">有修改稿待你确认 →</a>` : ''}${t?.pinned ? `<span class="chip amber">${ago(t.created_at)}的一段讨论</span>` : ''}<span class="grow"></span>
-      ${t?.pinned ? `<button class="btn sm ghost" data-action="chat-latest" data-scope="${esc(scope)}">回到最新对话</button>` : ''}
+    <div class="chat-head">范围：${esc(scopeLabel(scope))}${t?.proposal ? `<a href="#" class="chip violet" data-action="open-research" data-id="${esc(scope.slice(9))}">有修改稿待你确认 →</a>` : ''}${t?.pinned && S.view !== 'discuss' ? `<span class="chip amber">${ago(t.created_at)}的一段讨论</span>` : ''}<span class="grow"></span>
+      ${S.view === 'discuss' && !S.reader ? scopeOpen(scope) : ''}
+      ${t?.pinned && S.view !== 'discuss' ? `<button class="btn sm ghost" data-action="chat-latest" data-scope="${esc(scope)}">回到最新对话</button>` : ''}
       ${t?.agent_id ? `<a class="btn sm ghost" href="https://cursor.com/agents/${esc(t.agent_id)}" target="_blank">在 Cursor 中继续 ↗</a>` : ''}
       ${t?.messages.length && !scope.startsWith('research:') ? `<button class="btn sm ghost" data-action="compose-thread" data-scope="${esc(scope)}" title="把这段讨论作为素材开一个研究">转成研究</button>` : ''}
       ${t?.messages.length ? `<button class="btn sm ghost" data-action="chat-new" data-scope="${esc(scope)}">新对话</button>` : ''}</div>
@@ -1308,17 +1313,30 @@ function scrollChat() {
   document.querySelectorAll('.msgs').forEach((el) => (el.scrollTop = el.scrollHeight));
 }
 
-const scopeKey = () => S.scope;
+const SCOPE_KIND = { library: '论文库', thoughts: '我的想法', topic: '主题', paper: '论文', papers: '多篇论文', find: '找论文', anchor: '划词', thought: '想法', research: '研究' };
 
-function discussPage() {
+function threadsList() {
   const topics = S.state ? S.state.topics.flatMap((t) => [t, ...t.children]) : [];
-  const scope = S.scope;
-  const chip = (s, label) => `<button class="scope ${scope === s ? 'on' : ''}" data-action="scope" data-scope="${esc(s)}">${esc(label)}</button>`;
-  return `<div class="page"><div style="padding:18px 20px 10px"><h2 class="page-title">讨论</h2>
-    <div class="scope-bar">${chip('library', '整个论文库')}${chip('thoughts', '我的想法')}${/^(research|find|papers):/.test(scope) ? chip(scope, scopeLabel(scope)) : ''}
-      <select class="scope ${scope.startsWith('topic:') ? 'on' : ''}" data-change="scope"><option value="">按主题…</option>
-      ${topics.map((t) => `<option value="topic:${esc(t.path)}" ${scope === 'topic:' + t.path ? 'selected' : ''}>${t.path.includes('/') ? '　' : ''}${esc(t.name)}</option>`).join('')}</select></div></div>
-    <div style="flex:1;min-height:0;border-top:1px solid var(--line)">${chatHtml(scope)}</div></div>`;
+  let h = listHead('讨论', S.list.length ? `${S.list.length} 段` : '') +
+    `<div class="scope-bar new-thread"><span class="hint">新讨论</span>
+      <button class="scope" data-action="new-thread" data-scope="library">整个论文库</button><button class="scope" data-action="new-thread" data-scope="thoughts">我的想法</button>
+      <select class="scope" data-change="new-thread"><option value="">按主题…</option>${topics.map((t) => `<option value="topic:${esc(t.path)}">${t.path.includes('/') ? '　' : ''}${esc(t.name)}</option>`).join('')}</select></div>`;
+  if (!S.list.length) return h + `<div class="empty"><b>${VIEWS.discuss.empty[0]}</b>${VIEWS.discuss.empty[1]}</div>`;
+  return h + S.list.map((t) => {
+    const k = t.scope.split(':')[0];
+    return `<div class="item ${S.sel?.id === t.id ? 'on' : ''}" data-action="select" data-kind="thread" data-id="${t.id}">
+      <div class="item-meta"><span class="chip">${esc(SCOPE_KIND[k] || k)}</span>${['library', 'thoughts'].includes(k) ? '' : `<span class="src">${esc(short(plain(t.scope_title || ''), 36))}</span>`}<time>${ago(t.last_at)}</time></div>
+      <div class="item-title">${esc(t.first || '（还没有提问）')}</div><div class="hint">${t.n} 条消息</div></div>`;
+  }).join('');
+}
+
+/** A way back from a discussion to what it is about. */
+function scopeOpen(scope) {
+  const [k, ...rest] = scope.split(':'), ref = rest.join(':');
+  if (k === 'paper') return `<button class="btn sm ghost" data-action="read" data-pid="${esc(ref)}">打开论文</button>`;
+  if (k === 'research') return `<a href="#" class="btn sm ghost" data-action="open-research" data-id="${esc(ref)}">打开研究</a>`;
+  if (k === 'thought') return `<a href="#" class="btn sm ghost" data-action="open-thought" data-id="${esc(ref)}">打开想法</a>`;
+  return '';
 }
 
 async function sendChat(scope, text) {
@@ -1726,8 +1744,10 @@ async function openThreadAt(scope, threadId, mid) {
     if (S.reader?.pid === pid) { S.reader.tab = 'chat'; renderPanel(); } else { S.pendingTab = 'chat'; openReader(pid); }
     return;
   }
-  S.scope = scope;
-  S.threadId = threadId;
+  const t = await loadThread(scope, threadId).catch(fail);
+  if (!t) return;
+  t.pinned = true;
+  S.wantSel = { kind: 'thread', id: t.id };
   const fromReader = !!S.reader;
   if (fromReader) closeReader(false);
   if (S.view === 'discuss') { if (fromReader) go('discuss'); load(); } else go('discuss');
@@ -2042,7 +2062,17 @@ const actions = {
     } catch (e) { fail(e); el.disabled = false; }
   },
   sug: (el) => sendChat(el.dataset.scope, el.textContent),
-  'chat-new': async (el) => { S.threads[el.dataset.scope] = await post('/api/threads', { scope: el.dataset.scope }); refreshChat(el.dataset.scope); },
+  'chat-new': async (el) => {
+    const t = await post('/api/threads', { scope: el.dataset.scope }).catch(fail);
+    if (!t) return;
+    if (S.view === 'discuss' && !S.reader) return openThreadAt(el.dataset.scope, t.id);
+    S.threads[el.dataset.scope] = t;
+    refreshChat(el.dataset.scope);
+  },
+  'new-thread': async (el) => {
+    const t = await post('/api/threads', { scope: el.dataset.scope }).catch(fail);
+    if (t) openThreadAt(el.dataset.scope, t.id);
+  },
   'save-note': async (el) => {
     const scope = el.dataset.scope, t = S.threads[scope], m = t.messages.find((x) => x.id === el.dataset.mid);
     const [k, ...rest] = scope.split(':'), ref = rest.join(':');
@@ -2052,8 +2082,7 @@ const actions = {
       if (S.reader) S.reader.paper = await get(`/api/papers/${enc(S.reader.pid)}`);
     } catch (e) { fail(e); }
   },
-  scope: async (el) => { S.scope = el.dataset.scope; renderBody(); await loadThread(S.scope); renderBody(); },
-  'discuss-thoughts': async () => { S.scope = 'thoughts'; go('discuss'); },
+  'discuss-thoughts': () => openThreadAt('thoughts'),
   'goto-capture': (el, e) => { e.preventDefault(); openItem('capture', el.dataset.id, 'inbox'); },
   'rm-image': (el) => { S.images.splice(+el.dataset.i, 1); renderImages(); },
   'close-modal': closeModal,
@@ -2114,8 +2143,9 @@ document.addEventListener('change', async (e) => {
     e.target.value = '';
     return;
   }
-  if (e.target.dataset.change === 'scope' && e.target.value) {
-    S.scope = e.target.value; renderBody(); await loadThread(S.scope); renderBody();
+  if (e.target.dataset.change === 'new-thread' && e.target.value) {
+    const scope = e.target.value, t = await post('/api/threads', { scope }).catch(fail);
+    if (t) openThreadAt(scope, t.id);
   }
 });
 
@@ -2289,10 +2319,11 @@ async function refresh(force) {
     await loadState();
     const v = VIEWS[S.view];
     const editing = document.activeElement?.closest?.('#list, #detail') && document.activeElement.matches('input, textarea, select');
-    if (['captures', 'papers', 'research', 'thoughts'].includes(v.kind)) {
+    if (['captures', 'papers', 'research', 'thoughts', 'threads'].includes(v.kind)) {
       const list = v.kind === 'captures' ? await get(`/api/captures?view=${S.view}`)
         : v.kind === 'research' ? await get('/api/research' + (S.arg ? `?topic=${enc(S.arg)}` : ''))
         : v.kind === 'thoughts' ? await get('/api/thoughts')
+        : v.kind === 'threads' ? await get('/api/threads/recent')
           : await get('/api/papers' + (S.view === 'topic' ? `?topic=${enc(S.arg)}` : S.view === 'unsorted' ? '?unsorted=1' : ''));
       const typingInList = document.activeElement?.closest?.('#list') && document.activeElement.matches('input');
       if ((force || changed('list', list)) && !typingInList) { S.list = list; renderBody(); }

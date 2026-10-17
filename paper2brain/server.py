@@ -296,6 +296,11 @@ def thread_get(q, body):
     return store.thread_for(q.get("scope"), q.get("id"))
 
 
+@route("GET", "/api/threads/recent")
+def threads_recent(q, body):
+    return store.recent_threads()
+
+
 @route("GET", "/api/messages/([^/]+)")
 def message_get(q, body, mid):
     return store.message(mid)

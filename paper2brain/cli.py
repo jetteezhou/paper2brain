@@ -155,7 +155,19 @@ def run(args):
         p = store.get_paper(to_pid(args.id))
         if p:
             p.pop("runs")
+            p["discussions"] = store.paper_discussions(p["id"])
         return p
+    if cmd == "discuss":
+        pid = to_pid(args.paper)
+        if not store.get_paper(pid):
+            raise rules.Rejected(f"论文 {pid} 不在库里")
+        if not args.question.strip():
+            raise rules.Rejected("--question 不能为空")
+        thread = store.thread_for(f"paper:{pid}")
+        store.add_message(thread["id"], "user", args.question.strip())
+        if (args.answer or "").strip():
+            store.add_message(thread["id"], "assistant", args.answer.strip())
+        return {"logged": True, "thread": thread["id"]}
     if cmd == "text":
         pid = to_pid(args.paper)
         pages = store.pages(pid)
@@ -229,6 +241,12 @@ def parser():
     s.add_argument("--paper")
     s.add_argument("--topic")
     s.add_argument("--thread")
+
+    s = sub.add_parser("discuss", help="把用户在 Cursor 手机端的追问和你的回答记到这篇论文的讨论里（网页上能看到）")
+    s.add_argument("action", choices=["log"])
+    s.add_argument("--paper", required=True)
+    s.add_argument("--question", required=True, help="用户原话")
+    s.add_argument("--answer", help="你的回答（Markdown）")
 
     sub.add_parser("doc", help="研究附件的全文（用户开研究时带来的构思稿、笔记等）").add_argument("id")
     sub.add_parser("repo", help="代码仓库（只读）：本地路径、当前 commit、最近提交").add_argument("id")
