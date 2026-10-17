@@ -17,7 +17,7 @@ TOPIC_TREE = [
     ("WAM", ["世界模型", "表征研究", "WAN base", "V-JEPA"]),
 ]
 TRIAGE = ("inbox", "deep", "archived", "ignored")
-JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch"}
+JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch", "for_papers"}
 # WAITING: queued here until there is room to start it; the others are Cursor's own statuses of a live run.
 UNFINISHED = ("WAITING", "CREATING", "RUNNING", "QUEUED")
 _UNFINISHED_SQL = "('WAITING','CREATING','RUNNING','QUEUED')"
@@ -170,9 +170,16 @@ def _v5_searchable_fulltext(c):
             c.execute("INSERT OR REPLACE INTO paper_text VALUES (?,?)", (pid, "\n".join(json.loads(path.read_text()))))
 
 
+def _v6_topic_proposals(c):
+    """Topics the agent proposes wait (state 'proposed') until the user accepts them."""
+    c.execute("ALTER TABLE topics ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
+    c.execute("ALTER TABLE topics ADD COLUMN reason TEXT")
+    c.execute("ALTER TABLE topics ADD COLUMN for_papers TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
-MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext]
+MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals]
 
 
 def home():
@@ -732,7 +739,7 @@ def put_report(pid, report, by, base_rev=None):
 
 def topic_tree():
     with tx() as c:
-        rows = _rows(c.execute("SELECT * FROM topics ORDER BY parent IS NOT NULL, position"))
+        rows = _rows(c.execute("SELECT * FROM topics WHERE state='active' ORDER BY parent IS NOT NULL, position"))
         n = {r["topic"]: r["n"] for r in c.execute(
             f"SELECT pt.topic, count(DISTINCT pt.paper_id) n FROM paper_topics pt JOIN papers p ON p.id=pt.paper_id "
             f"WHERE {LISTED} GROUP BY pt.topic"
@@ -752,6 +759,109 @@ def topic_tree():
     return tree
 
 
+def topic_proposals():
+    with tx() as c:
+        return _rows(c.execute("SELECT path, name, parent, reason, for_papers FROM topics WHERE state='proposed' ORDER BY rowid"))
+
+
+def _topic_name(name):
+    name = re.sub(r"\s+", " ", name or "").strip()
+    if not name or "/" in name or len(name) > 30:
+        raise rules.Rejected("主题名不能为空、不能含 /，最多 30 字")
+    return name
+
+
+def _topic_parent(c, parent, path=None):
+    """'' or None: top level. Otherwise an active top-level topic: the tree is two levels deep."""
+    if not parent:
+        return None
+    if parent == path or not c.execute("SELECT 1 FROM topics WHERE path=? AND parent IS NULL AND state='active'", (parent,)).fetchone():
+        raise rules.Rejected(f"上级主题只能是一个已有的一级主题：{parent}")
+    return parent
+
+
+def add_topic(name, parent, by, reason=None, papers=()):
+    """The user adds a topic directly; the agent only proposes one (with a reason) for the user to accept."""
+    name = _topic_name(name)
+    if by != "user" and not (reason or "").strip():
+        raise rules.Rejected("提议新主题要写 --why：为什么现有主题放不下")
+    with tx() as c:
+        parent = _topic_parent(c, parent)
+        path = f"{parent}/{name}" if parent else name
+        if c.execute("SELECT state FROM topics WHERE path=?", (path,)).fetchone():
+            raise rules.Rejected(f"主题 {path} 已经有了（或已被提议）")
+        known = _papers_in(c, papers)
+        position = c.execute("SELECT coalesce(max(position), -1) + 1 FROM topics WHERE parent IS ?", (parent,)).fetchone()[0]
+        c.execute("INSERT INTO topics (path, name, parent, position, state, reason, for_papers) VALUES (?,?,?,?,?,?,?)",
+                  (path, name, parent, position, "active" if by == "user" else "proposed", (reason or "").strip() or None,
+                   json.dumps(known) if known else None))
+        _event(c, by, "topic.add" if by == "user" else "topic.propose", path)
+    return path
+
+
+def _papers_in(c, papers):
+    missing = [p for p in papers if not c.execute("SELECT 1 FROM papers WHERE id=?", (p,)).fetchone()]
+    if missing:
+        raise rules.Rejected(f"论文不在库里：{missing}")
+    return list(dict.fromkeys(papers))
+
+
+def _repath(c, old, new, name, parent):
+    """Give a topic (and its children) a new path, carrying every paper, research, note and discussion along.
+    The new row goes in before the old one goes out, so references never point at nothing."""
+    r = c.execute("SELECT * FROM topics WHERE path=?", (old,)).fetchone()
+    c.execute("INSERT INTO topics (path, name, parent, position, state, reason, for_papers) VALUES (?,?,?,?,?,?,?)",
+              (new, name, parent, r["position"], r["state"], r["reason"], r["for_papers"]))
+    for child in c.execute("SELECT path, name FROM topics WHERE parent=?", (old,)).fetchall():
+        _repath(c, child["path"], f"{new}/{child['name']}", child["name"], new)
+    for table in ("paper_topics", "research_topics"):
+        c.execute(f"UPDATE {table} SET topic=? WHERE topic=?", (new, old))
+    c.execute("UPDATE notes SET topic=? WHERE topic=?", (new, old))
+    c.execute("UPDATE threads SET scope=? WHERE scope=?", (f"topic:{new}", f"topic:{old}"))
+    c.execute("DELETE FROM topics WHERE path=?", (old,))
+
+
+def edit_topic(path, name, parent):
+    """Rename and / or move a topic (the user only). parent '' moves it to the top level."""
+    name = _topic_name(name)
+    with tx() as c:
+        cur = c.execute("SELECT * FROM topics WHERE path=? AND state='active'", (path,)).fetchone()
+        if not cur:
+            raise rules.Rejected(f"主题不存在：{path}")
+        parent = _topic_parent(c, parent, path)
+        if parent and c.execute("SELECT 1 FROM topics WHERE parent=?", (path,)).fetchone():
+            raise rules.Rejected("有子主题的一级主题不能移到别的主题下面")
+        new = f"{parent}/{name}" if parent else name
+        if new == path:
+            return path
+        if c.execute("SELECT 1 FROM topics WHERE path=?", (new,)).fetchone():
+            raise rules.Rejected(f"主题 {new} 已经有了")
+        _repath(c, path, new, name, parent)
+        if parent != cur["parent"]:
+            c.execute("UPDATE topics SET position=(SELECT coalesce(max(position), -1) + 1 FROM topics WHERE parent IS ?) WHERE path=?",
+                      (parent, new))
+        _event(c, "user", "topic.edit", new, was=path)
+    return new
+
+
+def decide_topic(path, accept):
+    """Accepting a proposed topic also files the papers the agent proposed it for, unless the user fixed their topics."""
+    with tx() as c:
+        r = _row(c.execute("SELECT * FROM topics WHERE path=? AND state='proposed'", (path,)).fetchone())
+        if not r:
+            raise rules.Rejected("没有这个待确认的主题")
+        if not accept:
+            c.execute("DELETE FROM topics WHERE path=?", (path,))
+        else:
+            if r["parent"] and not c.execute("SELECT 1 FROM topics WHERE path=? AND state='active'", (r["parent"],)).fetchone():
+                raise rules.Rejected(f"上级主题 {r['parent']} 已经不在了")
+            c.execute("UPDATE topics SET state='active' WHERE path=?", (path,))
+            for pid in r["for_papers"] or []:
+                if c.execute("SELECT 1 FROM papers WHERE id=? AND topics_locked=0", (pid,)).fetchone():
+                    c.execute("INSERT OR IGNORE INTO paper_topics VALUES (?,?,?)", (pid, path, "agent"))
+        _event(c, "user", "topic.accept" if accept else "topic.reject", path)
+
+
 def set_topics(pid, paths, by):
     """The agent may classify until the user touches a paper's topics; from then on the user's choice is kept."""
     with tx() as c:
@@ -760,10 +870,7 @@ def set_topics(pid, paths, by):
             raise rules.Rejected(f"论文 {pid} 不在库里")
         if by != "user" and p["topics_locked"]:
             raise rules.Rejected("用户已手动调整过这篇论文的主题，agent 不能修改")
-        known = {r["path"] for r in c.execute("SELECT path FROM topics")}
-        unknown = [t for t in paths if t not in known]
-        if unknown:
-            raise rules.Rejected(f"未知主题：{unknown}。可用主题见 ./p2b topics")
+        _check_topics(c, paths)
         c.execute("DELETE FROM paper_topics WHERE paper_id=?", (pid,))
         for t in dict.fromkeys(paths):
             c.execute("INSERT INTO paper_topics VALUES (?,?,?)", (pid, t, by))
@@ -980,10 +1087,10 @@ def _research_for(c, kind, refs):
 
 
 def _check_topics(c, paths):
-    known = {r["path"] for r in c.execute("SELECT path FROM topics")}
+    known = {r["path"] for r in c.execute("SELECT path FROM topics WHERE state='active'")}
     unknown = [t for t in paths if t not in known]
     if unknown:
-        raise rules.Rejected(f"未知主题：{unknown}。可用主题见 ./p2b topics")
+        raise rules.Rejected(f"未知主题：{unknown}。可用主题见 ./p2b topics；放不下时用 ./p2b topic propose 提议新主题")
 
 
 def _check_link(c, kind, ref):

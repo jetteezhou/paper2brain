@@ -36,6 +36,7 @@ paper2brain 发给你的任务都以"先读 librarian/""你是 paper2brain"或"�
 ./p2b report put <arxiv:id> --file /tmp/report.json
 ./p2b topics
 ./p2b topic set <arxiv:id> "VLA/推理加速" ["WAM/世界模型" ...]
+./p2b topic propose --name "..." [--parent VLA] --why "..." [--paper <id>]   # 提议新主题，用户确认后生效
 ./p2b thought add --text "..." [--gist "一句话提炼"] [--capture <id>] [--paper <arxiv:id>]
 ./p2b thought show <id> [<id> ...]   # 想法 + 论文、研究、同类想法
 ./p2b thought gist <id> --text "..." # 一句话提炼（见 librarian/thought.md）

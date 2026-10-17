@@ -575,6 +575,55 @@ class Discussions(AgentHarness):
         self.assertEqual(store.get_run(second)["prompt"], self.api.WEB_MARK + "再展开一点")
 
 
+class Topics(unittest.TestCase):
+    def test_user_edits_the_tree_and_everything_follows(self):
+        with scratch_home():
+            pid, cid = "arxiv:2303.04137", store.new_id()
+            store.add_capture(cid, "dp", "web")
+            store.upsert_paper(pid, "Diffusion Policy")
+            store.link(cid, pid, "rule")
+            path = store.add_topic("模仿学习", "VLA", "user")
+            store.set_topics(pid, [path], "agent")
+            rid = store.add_research("r", "user", topics=[path])
+            store.add_message(store.thread_for(f"topic:{path}")["id"], "user", "这个方向在解决什么？")
+            renamed = store.edit_topic(path, "模仿学习与 BC", "VLA")
+            self.assertEqual(store.get_paper(pid)["topics"], ["VLA/模仿学习与 BC"])
+            moved = store.edit_topic(renamed, "模仿学习与 BC", "")
+            self.assertEqual((moved, store.get_paper(pid)["topics"], store.get_research(rid)["topics"]),
+                             ("模仿学习与 BC", ["模仿学习与 BC"], ["模仿学习与 BC"]))
+            self.assertEqual(store.thread_for(f"topic:{moved}")["messages"][0]["text"], "这个方向在解决什么？")
+            store.edit_topic("WAM", "World Models", "")
+            tree = {t["path"]: [ch["path"] for ch in t["children"]] for t in store.topic_tree()}
+            self.assertIn("World Models/V-JEPA", tree["World Models"])
+            self.assertEqual([p["id"] for p in store.list_papers("模仿学习与 BC")], [pid])
+            with self.assertRaisesRegex(rules.Rejected, "子主题"):
+                store.edit_topic("VLA", "VLA", "VLM")
+            with self.assertRaisesRegex(rules.Rejected, "已经有了"):
+                store.add_topic("tokenizer", "VLA", "user")
+
+    def test_agent_proposes_user_decides(self):
+        from paper2brain import cli
+        with scratch_home():
+            store.upsert_paper("arxiv:2303.04137", "Diffusion Policy")
+            store.upsert_paper("arxiv:2304.13705", "ACT")
+            store.set_topics("arxiv:2304.13705", ["VLA"], "user")  # the user fixed this one
+            with self.assertRaisesRegex(rules.Rejected, "--why"):
+                store.add_topic("灵巧手", None, "agent")
+            out = cli.run(cli.parser().parse_args(["topic", "propose", "--name", "模仿学习", "--parent", "VLA", "--why", "BC 类工作没位置",
+                                                   "--paper", "arxiv:2303.04137", "--paper", "2304.13705"]))
+            path = out["proposed"]
+            self.assertEqual([p["path"] for p in store.topic_proposals()], [path])
+            with self.assertRaisesRegex(rules.Rejected, "未知主题"):
+                store.set_topics("arxiv:2303.04137", [path], "agent")
+            store.decide_topic(path, True)
+            self.assertEqual(store.get_paper("arxiv:2303.04137")["topics"], [path])
+            self.assertEqual(store.get_paper("arxiv:2304.13705")["topics"], ["VLA"])
+            store.add_topic("灵巧手", None, "agent", "没位置")
+            store.decide_topic("灵巧手", False)
+            self.assertEqual(store.topic_proposals(), [])
+            self.assertNotIn("灵巧手", [t["path"] for t in store.topic_tree()])
+
+
 class Receiving(unittest.TestCase):
     def test_bare_thought_and_repeated_text_do_not_become_captures(self):
         from paper2brain import pipeline

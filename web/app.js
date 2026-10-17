@@ -279,14 +279,16 @@ function renderSide() {
   const tree = S.state.topics.map((t) => {
     const open = S.open.has(t.path);
     const on = inTopic(t.path);
+    const edit = (path) => `<button class="nav-edit" data-action="topic-edit" data-path="${esc(path)}" title="改名 / 移动">⋯</button>`;
     return `<div class="nav-item ${on ? 'on' : ''}" data-action="go" data-view="topic" data-arg="${esc(t.path)}">
-        <span class="caret ${open ? 'open' : ''}" data-action="toggle-tree" data-path="${esc(t.path)}"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>${esc(t.name)}</span>${t.count ? `<span class="n">${t.count}</span>` : ''}</div>` +
-      (open ? t.children.map((ch) => `<div class="nav-item tree-child ${inTopic(ch.path) ? 'on' : ''}" data-action="go" data-view="topic" data-arg="${esc(ch.path)}"><span>${esc(ch.name)}</span>${ch.count ? `<span class="n">${ch.count}</span>` : ''}</div>`).join('') : '');
-  }).join('');
+        <span class="caret ${open ? 'open' : ''}" data-action="toggle-tree" data-path="${esc(t.path)}"><svg width="10" height="10" viewBox="0 0 10 10"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>${esc(t.name)}</span>${t.count ? `<span class="n">${t.count}</span>` : ''}${edit(t.path)}</div>` +
+      (open ? t.children.map((ch) => `<div class="nav-item tree-child ${inTopic(ch.path) ? 'on' : ''}" data-action="go" data-view="topic" data-arg="${esc(ch.path)}"><span>${esc(ch.name)}</span>${ch.count ? `<span class="n">${ch.count}</span>` : ''}${edit(ch.path)}</div>`).join('') : '');
+  }).join('') + (S.state.topic_proposals.length
+    ? `<div class="nav-item proposals" data-action="topic-proposals"><span>agent 提议了 ${S.state.topic_proposals.length} 个新主题</span></div>` : '');
   $('#nav').innerHTML =
     item('inbox', '收件箱', c.inbox) + item('pending', '待处理', c.pending, true) + item('deep', '待深读', c.deep) +
     item('papers', '全部论文', c.papers) + item('thoughts', '想法', c.thoughts) + item('research', '研究', c.research) + item('discuss', '讨论') +
-    `<div class="nav-label">主题</div>${tree}${item('unsorted', '未归类', c.unsorted)}` +
+    `<div class="nav-label">主题<button class="nav-add" data-action="topic-new" title="新建主题">+</button></div>${tree}${item('unsorted', '未归类', c.unsorted)}` +
     `<div class="nav-label">归档</div>${item('archived', '已存档', c.archived)}${item('ignored', '已忽略', c.ignored)}`;
   const a = S.state.agent;
   $('#agent-status').innerHTML = a.enabled
@@ -1783,6 +1785,32 @@ async function researchPost(path, body, okMessage) {
   loadState();
 }
 
+const allTopics = () => S.state.topics.flatMap((t) => [t, ...t.children]);
+
+function topicModal(path) {
+  const t = path && allTopics().find((x) => x.path === path);
+  const parent = path?.includes('/') ? path.split('/')[0] : '';
+  const roots = S.state.topics.filter((x) => x.path !== path);
+  modal(`<h3>${t ? '改名或移动主题' : '新建主题'}</h3>
+    <form data-form="topic" data-path="${esc(path || '')}" class="research-create">
+      <input name="name" value="${esc(t?.name || '')}" placeholder="主题名，比如：模仿学习" maxlength="30" aria-label="主题名">
+      <label class="hint">放在 <select name="parent" ${t?.children?.length ? 'disabled title="有子主题的一级主题不能移动"' : ''}><option value="">（作为一级主题）</option>${roots.map((r) => `<option value="${esc(r.path)}" ${r.path === parent ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}</select> 下面</label>
+      ${t ? '<p class="hint">这个主题下的论文、研究和讨论会跟着一起改名或移动。</p>' : ''}
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn" data-action="close-modal">取消</button><button class="btn primary">${t ? '保存' : '新建'}</button></div></form>`);
+  $('.modal input[name="name"]').focus();
+}
+
+function proposalsModal() {
+  const ps = S.state.topic_proposals;
+  if (!ps.length) return closeModal();
+  modal(`<h3>agent 提议的新主题</h3><p class="hint" style="margin-top:0">采用后才会出现在主题树里，agent 列出的论文会自动归进去（你手动调整过主题的论文除外）。</p>
+    ${ps.map((p) => `<div class="cand"><div class="cand-body"><div class="cand-title">${esc(p.parent ? `${p.parent} / ${p.name}` : p.name)}</div>
+      <div class="cand-meta">${esc(p.reason || '')}${p.for_papers?.length ? ` · 采用后归入 ${p.for_papers.length} 篇论文` : ''}</div></div>
+      <button class="btn sm primary" data-action="topic-decide" data-path="${esc(p.path)}" data-accept="1">采用</button>
+      <button class="btn sm ghost" data-action="topic-decide" data-path="${esc(p.path)}">不要</button></div>`).join('')}
+    <div style="text-align:right;margin-top:10px"><button class="btn" data-action="close-modal">关闭</button></div>`);
+}
+
 function removalText(plan) {
   const lines = ['撤销这次收下？下面这些会被永久删除：', `· 这条收下的内容${plan.thoughts.length ? `，和它上面的 ${plan.thoughts.length} 条想法` : ''}`];
   for (const p of plan.papers) {
@@ -1798,6 +1826,16 @@ function removalText(plan) {
 const actions = {
   go: (el) => { if (el.dataset.view === 'topic' && S.view === 'topic' && S.arg === el.dataset.arg) return; go(el.dataset.view, el.dataset.arg); },
   'toggle-tree': (el, e) => { e.stopPropagation(); const p = el.dataset.path; S.open.has(p) ? S.open.delete(p) : S.open.add(p); renderSide(); },
+  'topic-new': (el, e) => { e.stopPropagation(); topicModal(); },
+  'topic-edit': (el, e) => { e.stopPropagation(); topicModal(el.dataset.path); },
+  'topic-proposals': () => proposalsModal(),
+  'topic-decide': async (el) => {
+    try { await post('/api/topics/decide', { path: el.dataset.path, accept: !!el.dataset.accept }); } catch (e) { fail(e); return; }
+    toast(el.dataset.accept ? `已采用主题「${el.dataset.path}」` : '已忽略这个提议');
+    await loadState();
+    proposalsModal();
+    if (VIEWS[S.view].kind === 'papers') load();
+  },
   select: (el, e) => {
     e.preventDefault();
     if (S.selecting && S.selecting.kind === el.dataset.kind && el.closest('#list')) {
@@ -2222,6 +2260,23 @@ document.addEventListener('submit', async (e) => {
   e.preventDefault();
   if (form.dataset.form === 'selpop') {
     createAnchor(form.querySelector('input').value.trim());
+    return;
+  }
+  if (form.dataset.form === 'topic') {
+    const f = new FormData(form), path = form.dataset.path;
+    try {
+      const r = path
+        ? await post('/api/topics/edit', { path, name: f.get('name'), parent: f.get('parent') ?? (path.includes('/') ? path.split('/')[0] : '') })
+        : await post('/api/topics', { name: f.get('name'), parent: f.get('parent') });
+      closeModal();
+      toast(path ? '主题已更新' : `已新建主题「${r.path}」`);
+      if (path) {
+        S.open.delete(path);
+        if (S.arg === path) return go(S.view, r.path);
+      }
+      await loadState();
+      if (VIEWS[S.view].kind !== 'page') load();
+    } catch (err) { fail(err); }
     return;
   }
   if (form.dataset.form === 'cmp-repo') {

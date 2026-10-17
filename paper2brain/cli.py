@@ -73,8 +73,13 @@ def run(args):
             rev = store.put_report(pid, rules.validate_report(_read_json(args.file), pages), "agent", args.base_rev)
         return {"accepted": True, "revision": rev}
     if cmd == "topics":
-        return store.topic_tree()
+        return {"tree": store.topic_tree(), "proposed": store.topic_proposals()}
     if cmd == "topic":
+        if args.action == "propose":
+            path = store.add_topic(args.name, args.parent, "agent", args.why, [to_pid(p) for p in args.paper_for])
+            return {"proposed": path, "note": "已交给用户确认；采用后才能用，你列的论文会自动归进去"}
+        if not args.paper or not args.paths:
+            raise rules.Rejected("用法：./p2b topic set <论文> <主题> [<主题> ...]")
         pid = to_pid(args.paper)
         store.set_topics(pid, args.paths, "agent")
         return {"paper": pid, "topics": args.paths}
@@ -222,11 +227,15 @@ def parser():
         s.add_argument("--file", required=True, help="JSON 文件路径，- 表示标准输入")
         s.add_argument("--base-rev", type=int)
 
-    sub.add_parser("topics", help="主题树")
-    s = sub.add_parser("topic", help="设置论文主题（覆盖 agent 之前的设置）")
-    s.add_argument("action", choices=["set"])
-    s.add_argument("paper")
-    s.add_argument("paths", nargs="+")
+    sub.add_parser("topics", help="主题树（tree）和待用户确认的提议（proposed）")
+    s = sub.add_parser("topic", help="set 设置论文主题（覆盖 agent 之前的设置）/ propose 提议新主题，用户确认后生效")
+    s.add_argument("action", choices=["set", "propose"])
+    s.add_argument("paper", nargs="?")
+    s.add_argument("paths", nargs="*")
+    s.add_argument("--name", help="propose：新主题名")
+    s.add_argument("--parent", help="propose：放在哪个一级主题下（不写就是一级主题）")
+    s.add_argument("--why", help="propose：为什么现有主题放不下")
+    s.add_argument("--paper", dest="paper_for", action="append", default=[], help="propose：采用后归进去的论文")
 
     s = sub.add_parser("thought", help="想法：add 记一条 / show 查看（含论文、研究、同类想法）/ gist 写一句话提炼")
     s.add_argument("action", choices=["add", "show", "gist"])

@@ -39,7 +39,23 @@ class Reply:
 @route("GET", "/api/state")
 def state(q, body):
     agent = {**cursor_api.status(), "home": str(store.home()), "repo_dir": str(WEB.parent)}
-    return {"counts": store.counts(), "topics": store.topic_tree(), "agent": agent}
+    return {"counts": store.counts(), "topics": store.topic_tree(), "topic_proposals": store.topic_proposals(), "agent": agent}
+
+
+@route("POST", "/api/topics")
+def topic_add(q, body):
+    return {"path": store.add_topic(body.get("name"), body.get("parent"), "user")}
+
+
+@route("POST", "/api/topics/edit")
+def topic_edit(q, body):
+    return {"path": store.edit_topic(body.get("path"), body.get("name"), body.get("parent"))}
+
+
+@route("POST", "/api/topics/decide")
+def topic_decide(q, body):
+    store.decide_topic(body.get("path"), body.get("accept") is True)
+    return {"ok": True}
 
 
 @route("GET", "/api/search")

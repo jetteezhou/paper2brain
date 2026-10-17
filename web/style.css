@@ -67,6 +67,14 @@ a:hover { text-decoration: underline; }
 .nav-item .n.hot { color: var(--amber); font-weight: 600; }
 .nav-label { margin: 16px 10px 4px; font-size: 11.5px; color: var(--faint); letter-spacing: .5px; }
 .tree-child { padding-left: 32px; font-size: 13.5px; }
+.nav-edit, .nav-add { border: 0; background: none; color: var(--faint); cursor: pointer; padding: 0 4px; border-radius: 5px; line-height: 18px; }
+.nav-edit { visibility: hidden; margin-left: auto; }
+.nav-item .n + .nav-edit { margin-left: 2px; }
+.nav-item:hover .nav-edit, .nav-edit:focus-visible { visibility: visible; }
+.nav-edit:hover, .nav-add:hover { color: var(--text); background: rgba(0,0,0,.06); }
+.nav-label { display: flex; align-items: center; }
+.nav-add { margin-left: auto; font-size: 15px; }
+.nav-item.proposals { color: var(--violet); font-size: 12.5px; padding-left: 32px; }
 .caret { width: 14px; display: inline-grid; place-items: center; color: var(--faint); transition: transform .15s; }
 .caret.open { transform: rotate(90deg); }
 .agent-status { margin: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; display: flex; gap: 8px; align-items: center; }
