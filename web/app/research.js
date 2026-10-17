@@ -1,15 +1,16 @@
 // Research: discussions and papers converging on three elements (problem, method, validation), plus code,
 // experiments and writing. Only the user establishes a research; the agent's changes arrive as drafts.
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { html, get, post, del, enc, ago, short, firstLine, idLabel, plain, threadName, live, Md, mdHtml, citeHtml, readBase64 } from './lib.js';
+import { html, get, post, del, enc, ago, short, firstLine, idLabel, plain, threadName, live, Md, mdHtml, citeHtml, readBase64, diffText } from './lib.js';
 import {
   appState, agentOn, selected, useLive, refresh, toast, fail, openModal, closeModal, openItem, openReader, openThread, openCapture, openResearch,
 } from './state.js';
-import { ListDetail, TopicsRow, TopicTabs, RunCard } from './papers.js';
+import { ListDetail, TopicsRow, TopicTabs, RunCard, openCompare } from './papers.js';
 
 const STAGE = { forming: ['构思中', 'chip amber'], established: ['已确立', 'chip green-solid'] };
 export const StageChip = ({ stage }) => html`<span class=${STAGE[stage][1]}>${STAGE[stage][0]}</span>`;
-export const ResearchChip = ({ x }) => html`<a href="#" class="chip research-chip" title="打开这个研究" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); openResearch(x.id); }}>${STAGE[x.stage][0]} · ${short(x.title, 22)}</a>`;
+export const ROLE_NAME = { method: '方法借鉴', baseline: 'baseline', support: '支持证据', counter: '反面证据', reproduce: '待复现' };
+export const ResearchChip = ({ x }) => html`<a href="#" class="chip research-chip" title="打开这个研究" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); openResearch(x.id); }}>${STAGE[x.stage][0]} · ${short(x.title, 22)}${x.role ? ` · 作为 ${ROLE_NAME[x.role]}` : ''}</a>`;
 const ElementsChip = ({ n }) => html`<span class=${`chip ${n === 3 ? 'green' : ''}`} title="研究问题 / 研究方法 / 验证方案">三要素 ${n}/3</span>`;
 
 const FIELDS = [
@@ -38,20 +39,32 @@ function RunsBlock({ runs, label, spec }) {
 
 // ---------- overview: the three elements ----------
 
+const Diff = ({ a, b }) => html`<div class="diff">${diffText(a, b).map(([op, t]) => (op === '=' ? t : html`<${op === '+' ? 'ins' : 'del'}>${t}<//>`))}</div>`;
+
+/** One row per changed part of a draft: what is there now against what the agent proposes, ticked to take it. */
+function DraftRows({ rows, cur, p, pick, setPick }) {
+  const flip = (k) => { const s = new Set(pick); s.has(k) ? s.delete(k) : s.add(k); setPick(s); };
+  return rows.map(([k, l]) => html`<div class=${`pr-row ${pick.has(k) ? '' : 'off'}`}>
+    <label class="pr-label"><span><input type="checkbox" checked=${pick.has(k)} onChange=${() => flip(k)} /> ${l}</span>${cur(k) ? html`<span class="chip">修改</span>` : html`<span class="chip green">新增</span>`}</label>
+    <div class="pr-new">${cur(k) ? html`<${Diff} a=${cur(k)} b=${p[k]} />` : html`<${Md} text=${p[k]} />`}</div></div>`);
+}
+
 function Proposal({ x }) {
   const p = x.proposal;
   const current = (k) => (k === 'title' ? x.title : k === 'summary' ? x.summary : x.body?.[k]) || '';
   const rows = [['title', '名称'], ['summary', '一句话'], ...FIELDS.map(([k, l]) => [k, l])].filter(([k]) => p[k] && p[k] !== current(k));
+  const [pick, setPick] = useState(() => new Set(rows.map(([k]) => k)));
+  const all = pick.size === rows.length;
+  const establishable = x.stage !== 'established' && ELEMENTS.every(([k]) => (pick.has(k) && p[k]) || x.body?.[k]);
   const decide = (op) => {
     if (op === 'accept-establish' && !confirm('采用修改稿并确立这个研究？')) return;
-    act(`${enc(x.id)}/proposal`, { action: op === 'discard' ? 'discard' : 'accept', establish: op === 'accept-establish', base_rev: x.revision },
+    act(`${enc(x.id)}/proposal`, { action: op === 'discard' ? 'discard' : 'accept', establish: op === 'accept-establish', base_rev: x.revision, fields: [...pick] },
       { accept: '已采用修改稿', 'accept-establish': '已采用并确立', discard: '已放弃修改稿' }[op]);
   };
-  return html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动研究</span></div>
-    ${rows.length ? rows.map(([k, l]) => html`<div class="pr-row"><div class="pr-label">${l} ${current(k) ? html`<span class="chip">修改</span>` : html`<span class="chip green">新增</span>`}</div><div class="pr-new"><${Md} text=${p[k]} /></div></div>`)
-      : html`<div class="hint">和现在的内容一样。</div>`}
-    <div class="proposal-acts"><button class="btn primary" onClick=${() => decide('accept')}>采用</button>
-      ${p.problem && p.method && p.validation && x.stage !== 'established' ? html`<button class="btn" onClick=${() => decide('accept-establish')}>采用并确立</button>` : null}
+  return html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动研究${rows.length > 1 ? ' · 可以只勾选其中几项' : ''}</span></div>
+    ${rows.length ? html`<${DraftRows} rows=${rows} cur=${current} p=${p} pick=${pick} setPick=${setPick} />` : html`<div class="hint">和现在的内容一样。</div>`}
+    <div class="proposal-acts"><button class="btn primary" disabled=${rows.length && !pick.size} onClick=${() => decide('accept')}>${all ? '采用' : `采用勾选的 ${pick.size} 项，其余放弃`}</button>
+      ${establishable ? html`<button class="btn" onClick=${() => decide('accept-establish')}>${all ? '采用并确立' : '采用勾选的并确立'}</button>` : null}
       <button class="btn" onClick=${() => openThread(`research:${x.id}`)}>继续调整（去讨论）</button>
       <button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>`;
 }
@@ -92,7 +105,7 @@ function Overview({ x, edit }) {
       <button class="btn sm ghost" disabled=${!agentOn.value || !!run} title=${agentOn.value ? '让 agent 根据素材起草三要素，作为修改稿交给你确认' : '需要先连接 agent'} onClick=${draft}>${run ? html`<span class="spin"></span>起草中` : '让 agent 起草'}</button>
       <button class="btn sm ghost" onClick=${edit}>编辑</button></div>
     ${run ? html`<div class="card-wait"><span class="spin"></span>Agent 正在起草：读素材、查库里的相关工作。写好后会作为修改稿等你确认…</div>` : null}
-    ${x.proposal ? html`<${Proposal} x=${x} />` : null}
+    ${x.proposal ? html`<${Proposal} key=${x.proposal.at} x=${x} />` : null}
     <div class="elements">${ELEMENTS.map(([k, label, hint]) => x.body?.[k]
       ? html`<div class="element"><h3>${label}</h3><${Md} text=${x.body[k]} /></div>`
       : html`<div class="element blank" title="点一下补上" onClick=${edit}><h3>${label}</h3><div class="hint">${hint}</div></div>`)}
@@ -122,12 +135,37 @@ function PaperPicker({ rid }) {
       ${papers && !papers.length ? html`<p class="hint">库里还没有论文</p>` : null}</div>`;
 }
 
+/** In the research's own words, only one per paper; the user sets it. */
+export const RoleSelect = ({ value, onChange }) => html`<select class="role-select" value=${value || ''} title="这篇在研究里的用途" onClick=${(e) => e.stopPropagation()} onChange=${(e) => onChange(e.target.value)}>
+  <option value="">用途…</option>${Object.entries(ROLE_NAME).map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select>`;
+
+function FindSeeds({ x, seeds }) {
+  const [text, setText] = useState(''), [busy, setBusy] = useState(false);
+  const go = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try { const c = await post(`/api/research/${enc(x.id)}/find`, { text }); closeModal(); toast('已交给 agent 去找，这一轮会出现在素材里'); refresh(); openCapture(c.id); } catch (err) { setBusy(false); fail(err); }
+  };
+  return html`<h3>以这些论文为种子找更多</h3>
+    <p class="hint" style="margin-top:0">agent 从种子的共同方向出发找；之前几轮里你点过“不对路？”的论文会被避开。觉得对路的论文加入研究，就成了下一轮的种子。</p>
+    <div class="pick-list">${seeds.map((l) => html`<div class="pick"><span class="pick-title serif">${short(l.label, 90)}</span>${l.role ? html`<span class="chip">${ROLE_NAME[l.role]}</span>` : null}</div>`)}</div>
+    <form class="research-create" style="margin-top:10px" onSubmit=${go}><textarea rows="2" value=${text} onInput=${(e) => setText(e.target.value)} placeholder="补充要求（可选）：比如“要有真机实验”“2024 年以后”“换一条技术路线”"></textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn" onClick=${closeModal}>取消</button><button class="btn primary" disabled=${busy || !agentOn.value}>${agentOn.value ? '开始找' : '需要先连接 agent'}</button></div></form>`;
+}
+
 function Materials({ x }) {
   const kindLabel = (l) => ({ paper: '论文', message: l.role === 'user' ? '你在讨论里说' : 'agent 在讨论里说', thread: '讨论', capture: '收下的内容', note: '笔记', doc: '附件' }[l.kind] || l.kind);
   const unlink = async (e, l) => { e.stopPropagation(); await post(`/api/research/${enc(x.id)}/unlink`, { kind: l.kind, ref: l.ref }).catch(fail); refresh(); };
-  return html`<div class="block"><div class="block-title">素材 · ${x.links.length}<span class="line"></span><button class="btn sm ghost" onClick=${() => openModal(html`<${PaperPicker} rid=${x.id} />`)}>+ 关联库里的论文</button></div>
+  const setRole = (l, role) => act(`${enc(x.id)}/links`, { kind: 'paper', ref: l.ref, role }, role ? `已标为${ROLE_NAME[role]}` : '已清除用途');
+  const papers = x.links.filter((l) => l.kind === 'paper' && !l.missing);
+  return html`<div class="block"><div class="block-title">素材 · ${x.links.length}<span class="line"></span>
+      ${papers.length ? html`<button class="btn sm ghost" title="ResearchRabbit 式：用这些论文表达方向，逐轮修正" onClick=${() => openModal(html`<${FindSeeds} x=${x} seeds=${papers} />`)}>以论文为种子找更多</button>` : null}
+      ${papers.length > 1 ? html`<button class="btn sm ghost" onClick=${() => openCompare(papers.map((l) => l.ref))}>对比论文</button>` : null}
+      <button class="btn sm ghost" onClick=${() => openModal(html`<${PaperPicker} rid=${x.id} />`)}>+ 关联库里的论文</button></div>
+    ${papers.length ? html`<p class="hint" style="margin:0 0 6px">给论文标上用途（baseline、方法借鉴、反面证据……），agent 起草三要素时会按用途使用它们。</p>` : null}
     ${x.links.length ? x.links.map((l) => html`<div class=${`source ${l.missing ? 'missing' : ''}`} title=${l.missing ? '' : '跳过去看'} onClick=${() => !l.missing && openSource(l)}>
         <span class="source-kind">${kindLabel(l)}</span><span class=${`source-label ${l.kind === 'paper' ? 'serif' : ''}`}>${l.missing ? '（已删除）' : short(plain(l.label), 160)}</span>
+        ${l.kind === 'paper' && !l.missing ? html`<${RoleSelect} value=${l.role} onChange=${(r) => setRole(l, r)} />` : null}
         ${l.at ? html`<time>${ago(l.at)}</time>` : null}<button class="x" title="移出素材" onClick=${(e) => unlink(e, l)}>×</button></div>`)
       : html`<div class="hint">还没有素材。在讨论、讨论消息或论文卡片上点“加入研究”，就会出现在这里，点一下能跳回去。</div>`}</div>`;
 }
@@ -254,6 +292,19 @@ function Experiments({ x }) {
 
 const SECTIONS = [['abstract', '摘要', 'Abstract：背景、问题、核心洞见、主要结果（带数字）、意义'], ['introduction', '引言', 'Introduction：背景 → 问题 → 现有不足（引用）→ 洞见与方法 → 结果 → 贡献']];
 
+function WritingProposal({ x }) {
+  const w = x.writing, p = w.proposal;
+  const rows = SECTIONS.filter(([k]) => p[k] && p[k] !== w[k]);
+  const [pick, setPick] = useState(() => new Set(rows.map(([k]) => k)));
+  const all = pick.size === rows.length;
+  const decide = (op) => act(`${enc(x.id)}/writing/proposal`, { action: op, base_rev: op === 'accept' ? w.revision : undefined, fields: [...pick] }, op === 'discard' ? '已放弃修改稿' : '已采用修改稿');
+  return html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的写作修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动草稿</span></div>
+    ${p.note ? html`<div class="hint" style="margin-bottom:6px">${p.note}</div>` : null}
+    ${rows.length ? html`<${DraftRows} rows=${rows} cur=${(k) => w[k] || ''} p=${p} pick=${pick} setPick=${setPick} />` : html`<div class="hint">和现在的内容一样。</div>`}
+    <div class="proposal-acts"><button class="btn primary" disabled=${rows.length && !pick.size} onClick=${() => decide('accept')}>${all ? '采用' : `采用勾选的 ${pick.size} 项，其余放弃`}</button>
+      <button class="btn" onClick=${() => openThread(`research:${x.id}`)}>继续调整（去讨论）</button><button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>`;
+}
+
 function Writing({ x }) {
   const w = x.writing, run = liveRun(runsOf(x, 'writing'));
   const [editing, setEditing] = useState(null);
@@ -279,18 +330,13 @@ function Writing({ x }) {
     Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([out.bib], { type: 'text/plain' })), download: 'references.bib' }).click();
     toast(out.bib ? 'BibTeX 已下载' : '草稿里还没有引用');
   };
-  const decide = (op) => act(`${enc(x.id)}/writing/proposal`, { action: op, base_rev: op === 'accept' ? w.revision : undefined }, op === 'discard' ? '已放弃修改稿' : '已采用修改稿');
   return html`<p class="hint" style="margin-top:12px">完整论文在 Overleaf 写；这里用 Markdown 打磨摘要和引言，和 agent 反复迭代。引用写成 [arxiv:2410.24164]，导出时转成 \\cite。</p>
     <form class="add-line" onSubmit=${draft}><input value=${ins} onInput=${(e) => setIns(e.target.value)} disabled=${!can} placeholder="给 agent 的要求（可选）：比如“引言更强调 sim2real 的数据瓶颈”" />
       <button class="btn sm primary" disabled=${!can}>${run ? html`<span class="spin"></span>写作中` : has ? '让 agent 改写' : '让 agent 起草'}</button></form>
     <div class="tab-acts"><button class="btn sm" onClick=${() => openThread(`research:${x.id}`)}>在讨论里迭代</button>
       <button class="btn sm" disabled=${!has} onClick=${exportLatex}>复制 LaTeX</button><button class="btn sm" disabled=${!has} onClick=${exportBib}>下载 BibTeX</button></div>
     ${run ? html`<div class="card-wait"><span class="spin"></span>Agent 正在写：读三要素、实验记录和相关论文。写好后会作为修改稿等你确认…</div>` : null}
-    ${w.proposal ? html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的写作修改稿</b><span class="hint">${ago(w.proposal.at)} · 采用后才会改动草稿</span></div>
-      ${w.proposal.note ? html`<div class="hint" style="margin-bottom:6px">${w.proposal.note}</div>` : null}
-      ${SECTIONS.filter(([k]) => w.proposal[k]).map(([k, l]) => html`<div class="pr-row"><div class="pr-label">${l} ${w[k] ? html`<span class="chip">修改</span>` : html`<span class="chip green">新增</span>`}</div><div class="pr-new"><${Md} text=${w.proposal[k]} /></div></div>`)}
-      <div class="proposal-acts"><button class="btn primary" onClick=${() => decide('accept')}>采用</button>
-        <button class="btn" onClick=${() => openThread(`research:${x.id}`)}>继续调整（去讨论）</button><button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>` : null}
+    ${w.proposal ? html`<${WritingProposal} key=${w.proposal.at} x=${x} />` : null}
     ${SECTIONS.map(([k, label, hint]) => editing === k
       ? html`<form class="element writing-form" onSubmit=${(e) => save(e, k)}><h3>${label}</h3><textarea rows="12" ref=${(el) => el?.focus()}>${w[k] || ''}</textarea>
           <div style="display:flex;gap:8px;margin-top:8px"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${() => setEditing(null)}>取消</button></div></form>`
@@ -370,19 +416,26 @@ export function ResearchView({ topic }) {
 
 function Picker({ ctx }) {
   const [all] = useLive('/api/research', { poll: false });
-  const [q, setQ] = useState('');
+  const [q, setQ] = useState(''), [role, setRole] = useState('');
+  const hasPaper = (ctx.links || []).some((l) => l.kind === 'paper');
   const done = (id, message) => { closeModal(); toast(message, '查看', () => openResearch(id)); refresh(); };
+  const withRole = (l) => (role && l.kind === 'paper' ? { ...l, role } : l);
   const join = async (x) => {
-    try { for (const l of ctx.links) await post(`/api/research/${enc(x.id)}/links`, l); done(x.id, `已作为素材加入「${x.title}」`); } catch (e) { fail(e); }
+    try { for (const l of ctx.links) await post(`/api/research/${enc(x.id)}/links`, withRole(l)); done(x.id, `已作为素材加入「${x.title}」`); } catch (e) { fail(e); }
   };
   const create = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target), title = (f.get('title') || '').trim();
     if (!title) { toast('给这个研究起个名字'); return; }
-    try { const x = await post('/api/research', { title, summary: f.get('summary'), topics: ctx.topics || [], links: ctx.links || [] }); done(x.id, '已开始研究（构思中）'); } catch (err) { fail(err); }
+    try {
+      const x = await post('/api/research', { title, summary: f.get('summary'), topics: ctx.topics || [], links: ctx.links || [] });
+      if (role) for (const l of ctx.links.filter((l) => l.kind === 'paper')) await post(`/api/research/${enc(x.id)}/links`, withRole(l));
+      done(x.id, '已开始研究（构思中）');
+    } catch (err) { fail(err); }
   };
   const shown = (all || []).filter((x) => x.title.toLowerCase().includes(q.toLowerCase()));
   return html`<h3>${ctx.heading || '加入研究'}</h3>
+    ${hasPaper ? html`<p class="hint" style="margin:0 0 8px">在研究里的用途（可选）：<${RoleSelect} value=${role} onChange=${setRole} /></p>` : null}
     ${all?.length ? html`<p class="hint" style="margin:0 0 4px">作为素材加入已有的研究：</p><input class="picker-filter" value=${q} onInput=${(e) => setQ(e.target.value)} placeholder="筛选…" autofocus />
       <div class="pick-list">${shown.map((x) => html`<div class="pick" onClick=${() => join(x)}><${StageChip} stage=${x.stage} /><span class="pick-title">${x.title}</span><span class="hint">${x.topics.join(' ')}</span></div>`)}</div>
       <div class="block-title" style="margin-top:16px">或者开始一个新研究<span class="line"></span></div>` : null}

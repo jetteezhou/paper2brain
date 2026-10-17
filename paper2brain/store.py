@@ -24,6 +24,7 @@ _UNFINISHED_SQL = "('WAITING','CREATING','RUNNING','QUEUED')"
 RESEARCH_ELEMENTS = ("problem", "method", "validation")
 RESEARCH_FIELDS = RESEARCH_ELEMENTS + ("notes",)
 LINK_KINDS = ("paper", "message", "thread", "capture", "note", "doc")
+MATERIAL_ROLES = ("method", "baseline", "support", "counter", "reproduce")
 # A paper shows up in lists, topics and search when a capture is confirmed to be about it or a research uses it.
 LISTED = ("(EXISTS (SELECT 1 FROM capture_papers lc WHERE lc.paper_id=p.id AND lc.state='confirmed') "
           "OR EXISTS (SELECT 1 FROM research_links lr WHERE lr.kind='paper' AND lr.ref=p.id))")
@@ -211,10 +212,15 @@ def _v8_fork_point(c):
     c.execute("ALTER TABLE threads ADD COLUMN fork_message_id TEXT")
 
 
+def _v9_material_roles(c):
+    """role: what a paper does in the research (MATERIAL_ROLES), set by the user; NULL until they say."""
+    c.execute("ALTER TABLE research_links ADD COLUMN role TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
-              _v7_discussion_tree, _v8_fork_point]
+              _v7_discussion_tree, _v8_fork_point, _v9_material_roles]
 
 
 def home():
@@ -492,6 +498,7 @@ def get_capture(capture_id):
             (capture_id,),
         ))
         cap["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (capture_id,)))
+        cap["research"] = _research_for(c, "capture", [capture_id]).get(capture_id, [])
     return cap
 
 
@@ -1232,10 +1239,10 @@ def _research_for(c, kind, refs):
     if refs:
         q = ",".join("?" * len(refs))
         for r in c.execute(
-            f"SELECT l.ref, x.id, x.title, x.stage FROM research_links l JOIN research x ON x.id=l.research_id "
+            f"SELECT l.ref, l.role, x.id, x.title, x.stage FROM research_links l JOIN research x ON x.id=l.research_id "
             f"WHERE l.kind=? AND l.ref IN ({q}) ORDER BY x.updated_at DESC", (kind, *refs),
         ):
-            out.setdefault(r["ref"], []).append({"id": r["id"], "title": r["title"], "stage": r["stage"]})
+            out.setdefault(r["ref"], []).append({"id": r["id"], "title": r["title"], "stage": r["stage"], "role": r["role"]})
     return out
 
 
@@ -1276,7 +1283,7 @@ def add_research(title, by, summary=None, topics=(), links=()):
         for t in dict.fromkeys(topics):
             c.execute("INSERT INTO research_topics VALUES (?,?)", (rid, t))
         for kind, ref in dict.fromkeys(links):
-            c.execute("INSERT INTO research_links VALUES (?,?,?,?,?)", (rid, kind, ref, by, now()))
+            c.execute("INSERT INTO research_links (research_id, kind, ref, by, at) VALUES (?,?,?,?,?)", (rid, kind, ref, by, now()))
         _event(c, by, "research.add", rid)
     return rid
 
@@ -1332,16 +1339,21 @@ def propose(rid, draft, by, base_rev=None):
         _event(c, by, "research.propose", rid)
 
 
-def accept_proposal(rid, base_rev=None):
+def accept_proposal(rid, base_rev=None, fields=None):
+    """fields: the parts of the draft the user takes (None: all of it); the rest of the draft is dropped and
+    those parts keep what they had."""
     with tx() as c:
         cur = _current(c, rid, base_rev)
         if not cur["proposal"]:
             raise rules.Rejected("没有待确认的修改稿")
         p = json.loads(cur["proposal"])
-        body = {k: p.get(k) for k in RESEARCH_FIELDS}
+        take = lambda k: p.get(k) and (fields is None or k in fields)  # noqa: E731
+        old = json.loads(cur["body"]) if cur["body"] else {}
+        body = {k: p[k] if take(k) else old.get(k) for k in RESEARCH_FIELDS}
         c.execute(
             "UPDATE research SET title=?, summary=?, body=?, proposal=NULL, updated_at=?, edited_by='agent', revision=revision+1 WHERE id=?",
-            (p.get("title") or cur["title"], p.get("summary") or cur["summary"], json.dumps(body, ensure_ascii=False), now(), rid),
+            (p["title"] if take("title") else cur["title"], p["summary"] if take("summary") else cur["summary"],
+             json.dumps(body, ensure_ascii=False), now(), rid),
         )
         _event(c, "user", "research.accept", rid)
         return cur["revision"] + 1
@@ -1362,13 +1374,25 @@ def set_research_topics(rid, topics):
         c.execute("UPDATE research SET updated_at=? WHERE id=?", (now(), rid))
 
 
-def link_research(rid, kind, ref, by):
+def link_research(rid, kind, ref, by, role=None):
+    """role: None leaves it as it is; '' clears it. Only the user sets roles."""
+    if role is not None and (by != "user" or role not in MATERIAL_ROLES + ("",)):
+        raise rules.Rejected(f"素材角色只能由用户设置，可选：{', '.join(MATERIAL_ROLES)}")
     with tx() as c:
         if not c.execute("SELECT 1 FROM research WHERE id=?", (rid,)).fetchone():
             raise rules.Rejected("研究不存在")
         _check_link(c, kind, ref)
-        c.execute("INSERT OR IGNORE INTO research_links VALUES (?,?,?,?,?)", (rid, kind, ref, by, now()))
+        c.execute("INSERT OR IGNORE INTO research_links (research_id, kind, ref, by, at) VALUES (?,?,?,?,?)", (rid, kind, ref, by, now()))
+        if role is not None:
+            c.execute("UPDATE research_links SET role=? WHERE research_id=? AND kind=? AND ref=?", (role or None, rid, kind, ref))
         c.execute("UPDATE research SET updated_at=? WHERE id=?", (now(), rid))
+
+
+def rejected_in_research(rid):
+    """Papers the user turned down ("不对路") in the paper searches started from this research."""
+    with tx() as c:
+        return _ids(c, "SELECT DISTINCT cp.paper_id FROM research_links l JOIN capture_papers cp ON cp.capture_id=l.ref "
+                       "WHERE l.research_id=? AND l.kind='capture' AND cp.state='rejected'", (rid,))
 
 
 def unlink_research(rid, kind, ref):
@@ -1420,7 +1444,7 @@ def get_research(rid):
         x["links"] = []
         for r in c.execute("SELECT * FROM research_links WHERE research_id=? ORDER BY at", (rid,)).fetchall():
             info = _resolve_link(c, r["kind"], r["ref"])
-            x["links"].append({"kind": r["kind"], "ref": r["ref"], "by": r["by"], "missing": info is None, **(info or {})})
+            x["links"].append({"kind": r["kind"], "ref": r["ref"], "by": r["by"], "role": r["role"], "missing": info is None, **(info or {})})
         x["runs"] = _rows(c.execute("SELECT * FROM runs WHERE ref=? ORDER BY created_at DESC", (rid,)))
     x["elements_done"] = _elements_done(x["body"])
     x.update(research_extras(rid))
@@ -1578,12 +1602,12 @@ def propose_writing(rid, draft, by, base_rev=None):
                   (json.dumps({**draft, "by": by, "at": now()}, ensure_ascii=False), rid))
 
 
-def accept_writing(rid, base_rev=None):
+def accept_writing(rid, base_rev=None, fields=None):
     w = get_writing(rid)
     if not w["proposal"]:
         raise rules.Rejected("没有待确认的写作修改稿")
     p = w["proposal"]
-    update_writing(rid, base_rev, "agent", **{k: p[k] for k in ("abstract", "introduction") if p.get(k)})
+    update_writing(rid, base_rev, "agent", **{k: p[k] for k in ("abstract", "introduction") if p.get(k) and (fields is None or k in fields)})
     with tx() as c:
         c.execute("UPDATE writing SET proposal=NULL WHERE research_id=?", (rid,))
 
@@ -1602,7 +1626,7 @@ def add_doc(rid, filename, mime, data, text, by):
     path.write_bytes(data)
     with tx() as c:
         c.execute("INSERT INTO research_docs VALUES (?,?,?,?,?,?,?)", (did, now(), rid, filename, mime, str(path), text))
-        c.execute("INSERT INTO research_links VALUES (?,?,?,?,?)", (rid, "doc", did, by, now()))
+        c.execute("INSERT INTO research_links (research_id, kind, ref, by, at) VALUES (?,?,?,?,?)", (rid, "doc", did, by, now()))
     return did
 
 

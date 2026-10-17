@@ -52,6 +52,20 @@ export const readBase64 = (f) => new Promise((ok, bad) => {
   reader.onerror = bad;
   reader.readAsDataURL(f);
 });
+/** Sentence-level diff of two texts: [[op, text]], op '=' kept, '-' removed, '+' added; removals come first. */
+export function diffText(a, b) {
+  const split = (s) => (s || '').split(/(?<=[。！？；\n]|[.!?;] )/).filter(Boolean);
+  const x = split(a), y = split(b), n = x.length, m = y.length;
+  const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = [];
+  for (let i = 0, j = 0; i < n || j < m;) {
+    if (i < n && j < m && x[i] === y[j]) { out.push(['=', x[i++]]); j++; }
+    else if (i < n && (j === m || L[i + 1][j] >= L[i][j + 1])) out.push(['-', x[i++]]);
+    else out.push(['+', y[j++]]);
+  }
+  return out;
+}
 // Links filled in by the agent (from papers it read) may be hostile: only http(s) becomes a live href.
 export const href = (u) => (/^https?:\/\//i.test(u || '') ? u : '#');
 

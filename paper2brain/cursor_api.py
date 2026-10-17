@@ -405,7 +405,23 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
     return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare)
 
 
-def find_papers(capture_id):
+ROLE_NAMES = {"method": "方法借鉴", "baseline": "baseline", "support": "支持证据", "counter": "反面证据", "reproduce": "待复现"}
+
+
+def _seeds_text(rid):
+    x = store.get_research(rid)
+    title = lambda pid: (store.get_paper(pid, with_anchors=False) or {}).get("title", "")  # noqa: E731
+    seeds = [f"- {l['ref']}《{l['label']}》" + (f"（用户标为：{ROLE_NAMES[l['role']]}）" if l["role"] else "")
+             for l in x["links"] if l["kind"] == "paper" and not l["missing"]]
+    rejected = [f"- {pid}《{title(pid)}》" for pid in store.rejected_in_research(rid)]
+    return (
+        f"\n\n这次是从研究出发找（按 librarian/find.md 的“从种子论文找”一节）：研究《{x['title']}》（{rid}），"
+        f"`./p2b research show {rid}` 可看三要素。\n种子论文（已在研究里，不要重复挑）：\n" + "\n".join(seeds)
+        + ("\n用户在之前几轮里标为不对路的（避开它们和同类）：\n" + "\n".join(rejected) if rejected else "")
+    )
+
+
+def find_papers(capture_id, research_id=None):
     """The request opens the discussion of the found set (scope find:<capture>): the same agent searches, links its
     picks to the capture, then compares them; follow-ups continue with it."""
     cap = store.get_capture(capture_id)
@@ -413,6 +429,7 @@ def find_papers(capture_id):
     prompt = (
         f"先读 librarian/README.md、librarian/find.md 和 librarian/discuss.md。\n"
         f"用户请你找论文（捕获 ID：{capture_id}，讨论线程 ID：{thread['id']}）。\n\n用户的原话：{cap['raw']}"
+        + (_seeds_text(research_id) if research_id else "")
     )
 
     def prepare(placeholder):

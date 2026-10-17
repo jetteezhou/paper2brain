@@ -358,7 +358,7 @@ def research_proposal(q, body, rid):
     if body.get("action") == "discard":
         store.discard_proposal(rid)
     else:
-        store.accept_proposal(rid, body.get("base_rev"))
+        store.accept_proposal(rid, body.get("base_rev"), body.get("fields"))
         if body.get("establish"):
             store.establish(rid, "user")
     return _research(rid)
@@ -372,8 +372,25 @@ def research_topics(q, body, rid):
 
 @route("POST", "/api/research/([^/]+)/links")
 def research_link(q, body, rid):
-    store.link_research(rid, body["kind"], body["ref"], "user")
+    store.link_research(rid, body["kind"], body["ref"], "user", body.get("role"))
     return _research(rid)
+
+
+@route("POST", "/api/research/([^/]+)/find")
+def research_find(q, body, rid):
+    """ResearchRabbit-style: the research's papers are the seeds; what the user turned down last time is avoided.
+    The search is a find capture kept among the research's materials, so each round stays visible."""
+    x = _research(rid)
+    if not any(l["kind"] == "paper" and not l["missing"] for l in x["links"]):
+        raise rules.Rejected("素材里还没有论文，先关联一两篇作为种子")
+    if not cursor_api.status()["enabled"]:
+        raise rules.Rejected("需要先连接 agent")
+    text = (body.get("text") or "").strip() or f"以研究「{x['title']}」素材里的论文为种子，找更多对口的论文"
+    cap, _ = store.add_capture(str(uuid.uuid4()), text, "find")
+    store.update_capture(cap["id"], status="finding", channel="find", title="找论文：" + pipeline.short_title(text, 60))
+    store.link_research(rid, "capture", cap["id"], "user")
+    cursor_api.find_papers(cap["id"], rid)
+    return store.get_capture(cap["id"])
 
 
 @route("POST", "/api/research/([^/]+)/unlink")
@@ -494,7 +511,7 @@ def writing_proposal(q, body, rid):
     if body.get("action") == "discard":
         store.discard_writing(rid)
     else:
-        store.accept_writing(rid, body.get("base_rev"))
+        store.accept_writing(rid, body.get("base_rev"), body.get("fields"))
     return _research(rid)
 
 

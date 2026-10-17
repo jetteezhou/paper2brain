@@ -238,6 +238,29 @@ class Store(unittest.TestCase):
         self.assertEqual((r["title"], r["body"]["validation"], r["proposal"], r["stage"]),
                          ("t", "v [arxiv:2410.24164 p.3]", None, "forming"))
 
+    def test_user_takes_part_of_a_draft_and_keeps_the_rest(self):
+        rid = store.add_research("x", "user")
+        rev = store.update_research(rid, body={"problem": "我的问题", "method": "我的方法", "notes": "我的备注"})
+        store.propose(rid, {"title": "t", "summary": None, "problem": "新问题", "method": "新方法", "validation": "新验证", "notes": None}, "agent", rev)
+        store.accept_proposal(rid, fields=["method", "validation"])
+        r = store.get_research(rid)
+        self.assertEqual((r["title"], r["body"], r["proposal"]),
+                         ("x", {"problem": "我的问题", "method": "新方法", "validation": "新验证", "notes": "我的备注"}, None))
+
+    def test_material_roles_belong_to_the_user_and_show_on_the_paper(self):
+        store.upsert_paper("arxiv:2501.00091", "seed")
+        rid = store.add_research("x", "user", links=[("paper", "arxiv:2501.00091")])
+        with self.assertRaisesRegex(rules.Rejected, "只能由用户"):
+            store.link_research(rid, "paper", "arxiv:2501.00091", "agent", "baseline")
+        with self.assertRaisesRegex(rules.Rejected, "可选"):
+            store.link_research(rid, "paper", "arxiv:2501.00091", "user", "whatever")
+        store.link_research(rid, "paper", "arxiv:2501.00091", "user", "baseline")
+        store.link_research(rid, "paper", "arxiv:2501.00091", "agent")  # re-linking keeps the role
+        self.assertEqual(store.get_research(rid)["links"][0]["role"], "baseline")
+        self.assertEqual(store.get_paper("arxiv:2501.00091")["research"][0]["role"], "baseline")
+        store.link_research(rid, "paper", "arxiv:2501.00091", "user", "")
+        self.assertIsNone(store.get_research(rid)["links"][0]["role"])
+
     def test_discussion_title_keeps_words_and_user_edit_wins(self):
         store.upsert_paper("arxiv:2601.00021", "titled")
         tid = store.new_thread("paper:arxiv:2601.00021", text="和 diffusion policy 对比一下")
@@ -479,6 +502,31 @@ class Store(unittest.TestCase):
         self.assertEqual(thread["agent_id"], cap["runs"][0]["agent_id"])
         self.assertEqual(cap["agent_id"], cap["runs"][0]["agent_id"])
         self.assertIn("flow matching 做动作头", cursor_api.scope_text(f"find:{cap['id']}"))
+
+    def test_finding_from_a_research_uses_its_papers_as_seeds_and_avoids_rejects(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        store.upsert_paper("arxiv:2501.00081", "seed paper")
+        store.upsert_paper("arxiv:2501.00082", "off-track paper")
+        rid = store.add_research("一步动作头", "user")
+        with self.assertRaisesRegex(rules.Rejected, "种子"):
+            server.research_find({}, {}, rid)
+        store.link_research(rid, "paper", "arxiv:2501.00081", "user", "baseline")
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "config", return_value=AGENT_CFG), \
+                mock.patch.object(cursor_api, "_spawn"):
+            first = server.research_find({}, {}, rid)
+            store.link(first["id"], "arxiv:2501.00082", "agent")
+            store.unlink(first["id"], "arxiv:2501.00082", "user")
+            second = server.research_find({}, {"text": "要有真机"}, rid)
+        self.assertEqual(store.get_capture(second["id"])["research"][0]["id"], rid)
+        self.assertEqual(store.rejected_in_research(rid), ["arxiv:2501.00082"])
+        prompt = store.get_run(second["runs"][0]["id"])["prompt"]
+        self.assertIn("arxiv:2501.00081《seed paper》（用户标为：baseline）", prompt)
+        self.assertIn("arxiv:2501.00082《off-track paper》", prompt)
+        self.assertIn("要有真机", prompt)
 
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}

@@ -5,7 +5,7 @@ import {
   html, get, post, del, enc, ago, short, firstLine, idLabel, channel, authors, live, href, plain, mdHtml, citeHtml, readBase64,
 } from './lib.js';
 import {
-  appState, agentOn, selected, useLive, refresh, toast, fail, go, openReader, openThread, openPaper, openResearch, openCapture,
+  appState, agentOn, selected, useLive, refresh, toast, fail, go, openReader, openThread, openPaper, openResearch, openCapture, openModal, closeModal,
 } from './state.js';
 import { ThreadLines, JotForm, scopeLabel } from './discuss.js';
 import { researchPicker, openComposer, ResearchChip, StageChip } from './research.js';
@@ -180,7 +180,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
   }
   const unlink = async (e) => {
     e.preventDefault();
-    if (!confirm('这条捕获不是讲这篇论文？之后 agent 也不会再把它们关联起来。')) return;
+    if (!confirm(capture.source === 'find' ? '这篇不对路？会从这次找到的论文里移除，之后从同一研究再找时 agent 会避开它。' : '这条捕获不是讲这篇论文？之后 agent 也不会再把它们关联起来。')) return;
     await post(`/api/captures/${enc(capture.id)}/unlink`, { paper: p.id }).catch(fail);
     refresh();
   };
@@ -194,7 +194,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
     <div class="paper-meta">${authors(p.authors)}${p.published ? ' · ' + p.published : ''} · ${p.url ? html`<a href=${href(p.url)} target="_blank" rel="noopener">${idLabel(p.id)} ↗</a>` : idLabel(p.id)}
       ${p.page_count ? ` · ${p.page_count} 页` : html` · <span style="color:var(--amber)">没有全文</span>`}
       ${capture && p.captures?.length > 1 ? html` · <a href="#" onClick=${(e) => { e.preventDefault(); openPaper(p.id); }}>共 ${p.captures.length} 个来源</a>` : null}
-      ${capture ? html` · <a href="#" title="这条捕获不是讲这篇" onClick=${unlink}>不是这篇？</a>` : null}</div>
+      ${capture ? html` · <a href="#" title=${capture.source === 'find' ? '不是你要找的方向' : '这条捕获不是讲这篇'} onClick=${unlink}>${capture.source === 'find' ? '不对路？' : '不是这篇？'}</a>` : null}</div>
     <${TopicsRow} owner=${p} />
     <${Jumps} p=${p} j=${fullJumps(p)} full />
     ${p.page_count ? null : html`<div class="notice" style="margin-top:12px">没下载到这篇论文的 PDF（可能需要登录或不公开）。上传 PDF 后才能写快读卡、深读和对照原文。<br /><${PdfButton} paper=${p.id} /></div>`}
@@ -340,9 +340,14 @@ function LinkButton({ cid, pid }) {
   }}>${busy ? html`<span class="spin"></span>拉取全文…` : '就是这篇'}</button>`;
 }
 
-function CapturePaper({ pid, capture }) {
+function CapturePaper({ pid, capture, why }) {
   const [p] = useLive(`/api/papers/${enc(pid)}`);
-  return p ? html`<${PaperCard} paper=${p} capture=${capture} />` : html`<div class="card-wait"><span class="spin"></span></div>`;
+  if (!p) return html`<div class="card-wait"><span class="spin"></span></div>`;
+  const r = capture.research?.[0], seeded = r && p.research?.some((x) => x.id === r.id);
+  const seed = async () => { await post(`/api/research/${enc(r.id)}/links`, { kind: 'paper', ref: p.id }).catch(fail); toast(`已加入「${r.title}」，下一轮会作为种子`); refresh(); };
+  return html`${capture.source === 'find' && (why || r) ? html`<div class="find-why"><span class="hint">入选理由</span><${Html} s=${why ? inlineMd(why) : '（见讨论）'} />
+      ${r ? (seeded ? html`<span class="chip green">已在研究里</span>` : html`<button class="btn sm" onClick=${seed}>对路，加入研究</button>`) : null}</div>` : null}
+    <${PaperCard} paper=${p} capture=${capture} />`;
 }
 
 function CaptureDetail({ id, view }) {
@@ -364,8 +369,10 @@ function CaptureDetail({ id, view }) {
   let notice = null;
   if (find) {
     notice = html`<div class="notice info"><h3>你让 agent 找的论文</h3><div class="find-ask">${c.raw}</div>
-      <p class="hint">${running ? html`<span class="spin"></span> agent 正在检索、挑选、入库，挑中的论文会陆续出现在下面…` : papers.length ? `找到 ${papers.length} 篇，都已入库；每篇的入选理由在讨论里。` : 'agent 没有关联到论文，去讨论里看它的说明，或者换个说法再找。'}</p>
-      <button class="btn primary sm" onClick=${() => openThread(`find:${c.id}`)}>${papers.length > 1 ? `一起讨论这 ${papers.length} 篇 →` : '去讨论 →'}</button></div>`;
+      <p class="hint">${running ? html`<span class="spin"></span> agent 正在检索、挑选、入库，挑中的论文会陆续出现在下面…` : papers.length ? `找到 ${papers.length} 篇，都已入库；入选理由写在每篇上方，比较和分析在讨论里。` : 'agent 没有关联到论文，去讨论里看它的说明，或者换个说法再找。'}</p>
+      ${c.research?.length ? html`<p class="hint">从研究 <${ResearchChip} x=${c.research[0]} /> 的论文出发找的。对路的点“对路，加入研究”，下一轮就成了种子；不对路的点“不对路？”，下一轮会避开。</p>` : null}
+      <button class="btn primary sm" onClick=${() => openThread(`find:${c.id}`)}>${papers.length > 1 ? `一起讨论这 ${papers.length} 篇 →` : '去讨论 →'}</button>
+      ${papers.length > 1 && papers.length <= 5 ? html` <button class="btn sm" onClick=${() => openCompare(papers.map((p) => p.id))}>对比这 ${papers.length} 篇</button>` : null}</div>`;
   } else if (c.status === 'needs_confirm' && !papers.length) {
     notice = html`<div class="notice"><h3>这条解读讲的是哪篇论文？</h3>${(c.candidates || []).map((m) => html`
       <div class="cand"><div class="cand-body"><div class="cand-title">${m.title}</div>
@@ -394,7 +401,7 @@ function CaptureDetail({ id, view }) {
     <div class="thoughts"><${ThreadLines} threads=${c.threads} paperId=${papers[0]?.id} />
       <${JotForm} scope=${`capture:${c.id}`} placeholder=${c.threads.length ? '再补一句…（记下就开一段讨论，不叫 agent 回答）' : '补一句：为什么收它？'} /></div>
     ${notice}
-    ${papers.map((p) => html`<${CapturePaper} key=${p.id} pid=${p.id} capture=${c} />`)}
+    ${papers.map((p) => html`<${CapturePaper} key=${p.id} pid=${p.id} capture=${c} why=${p.evidence} />`)}
     <${RunsBlock} c=${c} /></div>`;
 }
 
@@ -467,6 +474,7 @@ export function PapersView({ view, topic }) {
   const title = topic ? topic.replace('/', ' / ') : v.title;
   const bar = picking && html`<div class="select-bar"><span>已选 ${picking.size} 篇论文</span><span class="grow"></span>
     <button class="btn sm primary" disabled=${picking.size < 2} title="把选中的几篇放在一起，和 agent 对比着讨论" onClick=${() => openThread(`papers:${chosen().map((x) => x.id).join('|')}`)}>一起讨论</button>
+    <button class="btn sm" disabled=${picking.size < 2 || picking.size > 5} title="2–5 篇的快读卡按字段并排对照" onClick=${() => openCompare([...picking])}>对比</button>
     <button class="btn sm" disabled=${!picking.size} onClick=${() => { const links = chosen().map((x) => ({ kind: 'paper', ref: x.id, label: x.title })); setPicking(null); openComposer({ links }); }}>开始研究</button>
     <button class="btn sm" disabled=${!picking.size} onClick=${() => { const ids = [...picking]; setPicking(null); researchPicker({ heading: `把 ${ids.length} 篇论文加入研究`, links: ids.map((ref) => ({ kind: 'paper', ref })) }); }}>加入研究</button>
     <button class="btn sm ghost" onClick=${() => setPicking(null)}>取消</button></div>`;
@@ -478,6 +486,34 @@ export function PapersView({ view, topic }) {
   return html`<${ListDetail} hasSel=${!!sel} list=${html`${head}${body}`}
     detail=${sel ? html`<${PaperDetail} key=${sel} pid=${sel} />` : list?.length ? html`<div class="empty" style="padding-top:120px">选择左侧一条查看</div>` : null} />`;
 }
+
+// ---------- compare: quick cards side by side, field by field, every result one click from its page ----------
+
+const md = (s) => html`<${Html} s=${inlineMd(s)} />`;
+const COMPARE_ROWS = [
+  ['一句话', (c) => md(c.tldr)],
+  ['问题', (c) => md(c.problem)],
+  ['方法', (c) => md(c.method)],
+  ['结果', (c, p) => html`<ul class="results">${c.results.map((r) => html`<li><${Html} s=${`${inlineMd(r.text)} ${citeHtml(p.id, r.page, r.quote)}`} /></li>`)}</ul>`],
+  ['平台', (c) => c.resources?.platform || '未知'],
+  ['真机实验', (c) => ({ true: '有', false: '无' }[c.resources?.real_robot] || '未知')],
+  ['代码', (c) => (c.resources?.code ? html`<a href=${href(c.resources.code)} target="_blank" rel="noopener">${short(c.resources.code.replace(/^https?:\/\/(www\.)?github\.com\//, ''), 40)} ↗</a>` : '未知')],
+];
+
+function Compare({ ids }) {
+  const [ps, setPs] = useState(null);
+  useEffect(() => { Promise.all(ids.map((id) => get(`/api/papers/${enc(id)}`))).then(setPs, (e) => { fail(e); closeModal(); }); }, []);
+  if (!ps) return html`<div class="empty"><span class="spin"></span></div>`;
+  const open = (pid) => { closeModal(); openPaper(pid); };
+  return html`<h3>对比 ${ps.length} 篇论文</h3>
+    <div class="table-wrap" onClickCapture=${(e) => e.target.closest('.cite') && closeModal()}><table class="cmap compare"><thead><tr><th></th>
+      ${ps.map((p) => html`<th><a href="#" class="serif" onClick=${(e) => { e.preventDefault(); open(p.id); }}>${p.title}</a><div class="hint">${idLabel(p.id)}${p.published ? ' · ' + p.published.slice(0, 7) : ''}</div></th>`)}</tr></thead>
+      <tbody>${COMPARE_ROWS.map(([label, cell], i) => html`<tr><th>${label}</th>${ps.map((p) => html`<td>${p.card ? cell(p.card, p) : i ? '—' : html`<span class="hint">还没有快读卡</span>`}</td>`)}</tr>`)}
+        <tr><th>主题</th>${ps.map((p) => html`<td>${p.topics.map((t) => html`<span class="chip topic">${t}</span>`)}</td>`)}</tr></tbody></table></div>
+    <div class="proposal-acts" style="justify-content:flex-end"><button class="btn" onClick=${closeModal}>关闭</button>
+      <button class="btn primary" onClick=${() => { closeModal(); openThread(`papers:${ids.join('|')}`); }}>和 agent 讨论差异</button></div>`;
+}
+export const openCompare = (ids) => openModal(html`<${Compare} ids=${ids} />`, true);
 
 // ---------- search ----------
 

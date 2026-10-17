@@ -404,6 +404,17 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .pr-row { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(0,0,0,.06); }
 .pr-label { font-size: 12.5px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .proposal-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.pr-row.off .pr-new { opacity: .45; }
+.pr-label input { margin: 0 2px 0 0; vertical-align: -2px; }
+.diff { white-space: pre-wrap; font-size: 13.5px; line-height: 1.7; }
+.diff ins { text-decoration: none; background: rgba(80, 170, 90, .28); border-radius: 3px; }
+.diff del { color: var(--red); background: var(--red-soft); border-radius: 3px; }
+.role-select { flex: none; border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; font-size: 12px; background: var(--panel); color: var(--muted); }
+.find-why { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-top: 18px; padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; }
+.find-why .btn { margin-left: auto; }
+.cmap.compare tbody th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+.cmap.compare thead th { white-space: normal; min-width: 200px; font-size: 13.5px; color: var(--text); }
+.cmap.compare .results { margin: 0; padding-left: 16px; }
 .research-form { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
 .research-form input, .research-form textarea { border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px 11px; background: var(--panel); outline: none; resize: vertical; line-height: 1.55; }
 .research-form input:focus, .research-form textarea:focus { border-color: var(--accent); }
