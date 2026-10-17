@@ -97,8 +97,19 @@ def capture_get(q, body, cid):
     return cap
 
 
+@route("GET", "/api/captures/([^/]+)/removal")
+def capture_removal(q, body, cid):
+    return store.capture_removal(cid)
+
+
 @route("DELETE", "/api/captures/([^/]+)")
 def capture_delete(q, body, cid):
+    for r in (store.get_capture(cid) or {}).get("runs", []):
+        if r["status"] in ("CREATING", "RUNNING") and not r["id"].startswith("pending-"):
+            try:
+                cursor_api.cancel(r["agent_id"], r["id"])
+            except cursor_api.AgentError:
+                pass  # finishing against a deleted capture only fails its own writes
     store.delete_capture(cid)
     return {"ok": True}
 

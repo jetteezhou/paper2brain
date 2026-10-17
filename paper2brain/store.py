@@ -21,6 +21,9 @@ JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta"
 RESEARCH_ELEMENTS = ("problem", "method", "validation")
 RESEARCH_FIELDS = RESEARCH_ELEMENTS + ("notes",)
 LINK_KINDS = ("paper", "thought", "message", "thread", "capture", "note", "doc")
+# A paper shows up in lists, topics and search when a capture is confirmed to be about it or a research uses it.
+LISTED = ("(EXISTS (SELECT 1 FROM capture_papers lc WHERE lc.paper_id=p.id AND lc.state='confirmed') "
+          "OR EXISTS (SELECT 1 FROM research_links lr WHERE lr.kind='paper' AND lr.ref=p.id))")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS captures (
@@ -312,12 +315,102 @@ def set_triage(capture_id, triage):
         _event(c, "user", "capture.triage", capture_id, triage=triage)
 
 
-def delete_capture(capture_id):
-    """Removes the capture and what was derived only from it. Papers stay: they are facts and may have other sources."""
+def _ids(c, sql, args):
+    return [r[0] for r in c.execute(sql, args)]
+
+
+def _qs(xs):
+    return ",".join("?" * len(xs))
+
+
+def _paper_dependents(c, pid):
+    """Everything that exists only because the paper is in the library: pinned passages, its discussions, the
+    thoughts and notes attached to it. Card and report live on the paper row itself."""
+    anchors = _ids(c, "SELECT id FROM anchors WHERE paper_id=?", (pid,))
+    scopes = [f"paper:{pid}"] + [f"anchor:{a}" for a in anchors]
+    threads = _ids(c, f"SELECT id FROM threads WHERE scope IN ({_qs(scopes)})", scopes)
+    return {
+        "anchor": anchors, "thread": threads,
+        "message": _ids(c, f"SELECT id FROM messages WHERE thread_id IN ({_qs(threads)})", threads) if threads else [],
+        "thought": _ids(c, "SELECT id FROM thoughts WHERE paper_id=?", (pid,)),
+        "note": _ids(c, f"SELECT id FROM notes WHERE paper_id=? OR thread_id IN ({_qs(threads) or 'NULL'})", (pid, *threads)),
+    }
+
+
+def _research_using(c, refs):
+    """Titles of researches that use any of these (kind, [ids]) as material."""
+    out = set()
+    for kind, ids in refs.items():
+        if ids:
+            out |= {r[0] for r in c.execute(
+                f"SELECT x.title FROM research_links l JOIN research x ON x.id=l.research_id WHERE l.kind=? AND l.ref IN ({_qs(ids)})",
+                (kind, *ids))}
+    return sorted(out)
+
+
+def _removal(c, capture_id):
+    thoughts = _ids(c, "SELECT id FROM thoughts WHERE capture_id=?", (capture_id,))
+    find_threads = _ids(c, "SELECT id FROM threads WHERE scope=?", (f"find:{capture_id}",))
+    find_msgs = _ids(c, f"SELECT id FROM messages WHERE thread_id IN ({_qs(find_threads)})", find_threads) if find_threads else []
+    plan = {"thoughts": thoughts, "find_threads": find_threads,
+            "used_in": _research_using(c, {"thought": thoughts, "thread": find_threads, "message": find_msgs, "capture": [capture_id]}),
+            "papers": [], "kept": []}
+    for r in c.execute("SELECT p.id, p.title, p.card IS NOT NULL AS card, p.report IS NOT NULL AS report FROM capture_papers cp "
+                       "JOIN papers p ON p.id=cp.paper_id WHERE cp.capture_id=?", (capture_id,)).fetchall():
+        others = c.execute("SELECT count(*) FROM capture_papers WHERE paper_id=? AND capture_id!=? AND state!='rejected'",
+                           (r["id"], capture_id)).fetchone()[0]
+        deps = _paper_dependents(c, r["id"])
+        research = _research_using(c, {"paper": [r["id"]], **deps})
+        if c.execute("SELECT 1 FROM code_maps WHERE paper_id=?", (r["id"],)).fetchone() and not research:
+            research = ["（方法—代码对照）"]
+        if others or research:
+            why = (["还有另外 %d 条收下的内容讲的是它" % others] if others else []) + [f"研究《{t}》用到了它" for t in research]
+            plan["kept"].append({"id": r["id"], "title": r["title"], "why": why})
+        else:
+            plan["papers"].append({"id": r["id"], "title": r["title"], "card": bool(r["card"]), "report": bool(r["report"]),
+                                   **{k: deps[k] for k in ("anchor", "thread", "thought", "note")}, "_deps": deps})
+    return plan
+
+
+def capture_removal(capture_id):
+    """What undoing this capture deletes, for the confirmation dialog."""
     with tx() as c:
+        plan = _removal(c, capture_id)
+    for p in plan["papers"]:
+        p.pop("_deps")
+    return plan
+
+
+def delete_capture(capture_id):
+    """Undoing a capture means the user disowns it: the capture, its thoughts, its find discussion, and every paper it
+    alone brought in, with that paper's card, report, pinned passages, discussions, thoughts and notes. A paper that
+    another capture or a research also uses stays, untouched."""
+    with tx() as c:
+        plan = _removal(c, capture_id)
+        threads = plan["find_threads"] + [t for p in plan["papers"] for t in p["_deps"]["thread"]]
+        gone = {"capture": [capture_id], "thought": plan["thoughts"] + [t for p in plan["papers"] for t in p["_deps"]["thought"]],
+                "thread": threads, "note": [n for p in plan["papers"] for n in p["_deps"]["note"]]}
+        if threads:
+            gone["message"] = _ids(c, f"SELECT id FROM messages WHERE thread_id IN ({_qs(threads)})", threads)
+        for kind, ids in gone.items():
+            if ids:
+                c.execute(f"DELETE FROM research_links WHERE kind=? AND ref IN ({_qs(ids)})", (kind, *ids))
+        pids = [p["id"] for p in plan["papers"]]
+        refs = [capture_id, *threads, *pids]
+        c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(refs)})", refs)
+        if threads:
+            c.execute(f"DELETE FROM messages WHERE thread_id IN ({_qs(threads)})", threads)
+        for table, col, ids in (("notes", "id", gone["note"]), ("thoughts", "id", gone["thought"]), ("threads", "id", threads),
+                                ("anchors", "paper_id", pids), ("paper_topics", "paper_id", pids), ("capture_papers", "paper_id", pids)):
+            if ids:
+                c.execute(f"DELETE FROM {table} WHERE {col} IN ({_qs(ids)})", ids)
         c.execute("DELETE FROM captures WHERE id=?", (capture_id,))
-        _event(c, "user", "capture.delete", capture_id)
+        if pids:
+            c.execute(f"DELETE FROM papers WHERE id IN ({_qs(pids)})", pids)
+        _event(c, "user", "capture.delete", capture_id, papers=pids, thoughts=len(gone["thought"]))
     shutil.rmtree(home() / "assets" / capture_id, ignore_errors=True)
+    for pid in pids:
+        shutil.rmtree(paper_dir(pid, create=False), ignore_errors=True)
 
 
 def get_capture(capture_id):
@@ -442,12 +535,11 @@ def counts():
         out["pending"] = c.execute(
             "SELECT count(*) FROM captures WHERE status IN ('needs_confirm','unmapped','failed') AND triage!='ignored'"
         ).fetchone()[0]
-        out["papers"] = c.execute("SELECT count(DISTINCT paper_id) FROM capture_papers WHERE state='confirmed'").fetchone()[0]
+        out["papers"] = c.execute(f"SELECT count(*) FROM papers p WHERE {LISTED}").fetchone()[0]
         out["thoughts"] = c.execute("SELECT count(*) FROM thoughts").fetchone()[0]
         out["research"] = c.execute("SELECT count(*) FROM research").fetchone()[0]
         out["unsorted"] = c.execute(
-            "SELECT count(DISTINCT cp.paper_id) FROM capture_papers cp WHERE cp.state='confirmed' "
-            "AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=cp.paper_id)"
+            f"SELECT count(*) FROM papers p WHERE {LISTED} AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id)"
         ).fetchone()[0]
     return out
 
@@ -515,20 +607,22 @@ def get_paper(pid, with_anchors=True):
 
 
 def list_papers(topic=None):
-    """topic=None: every paper with a confirmed source; '' : papers without a topic; a path includes its children."""
+    """topic=None: every listed paper (LISTED); '' : papers without a topic; a path includes its children."""
     sql = (
         "SELECT p.id, p.title, p.authors, p.published, p.card, p.report IS NOT NULL AS has_report, "
-        "max(c.created_at) AS last_captured, (SELECT min(CASE c2.triage WHEN 'deep' THEN 0 ELSE 1 END) FROM capture_papers cp2 "
-        "JOIN captures c2 ON c2.id=cp2.capture_id WHERE cp2.paper_id=p.id AND cp2.state='confirmed') = 0 AS deep "
-        "FROM papers p JOIN capture_papers cp ON cp.paper_id=p.id AND cp.state='confirmed' JOIN captures c ON c.id=cp.capture_id "
+        "coalesce((SELECT max(c.created_at) FROM capture_papers cp JOIN captures c ON c.id=cp.capture_id "
+        "WHERE cp.paper_id=p.id AND cp.state='confirmed'), p.created_at) AS last_captured, "
+        "EXISTS (SELECT 1 FROM capture_papers cp2 JOIN captures c2 ON c2.id=cp2.capture_id WHERE cp2.paper_id=p.id "
+        "AND cp2.state='confirmed' AND c2.triage='deep') AS deep "
+        f"FROM papers p WHERE {LISTED} "
     )
     args = ()
     if topic == "":
-        sql += "WHERE NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id) "
+        sql += "AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id) "
     elif topic:
-        sql += "WHERE EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id AND (pt.topic=? OR pt.topic LIKE ?)) "
+        sql += "AND EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id AND (pt.topic=? OR pt.topic LIKE ?)) "
         args = (topic, topic + "/%")
-    sql += "GROUP BY p.id ORDER BY last_captured DESC"
+    sql += "ORDER BY last_captured DESC"
     with tx() as c:
         out = _rows(c.execute(sql, args))
         topics = _topics_of(c, [p["id"] for p in out])
@@ -607,12 +701,12 @@ def topic_tree():
     with tx() as c:
         rows = _rows(c.execute("SELECT * FROM topics ORDER BY parent IS NOT NULL, position"))
         n = {r["topic"]: r["n"] for r in c.execute(
-            "SELECT pt.topic, count(DISTINCT pt.paper_id) n FROM paper_topics pt "
-            "JOIN capture_papers cp ON cp.paper_id=pt.paper_id AND cp.state='confirmed' GROUP BY pt.topic"
+            f"SELECT pt.topic, count(DISTINCT pt.paper_id) n FROM paper_topics pt JOIN papers p ON p.id=pt.paper_id "
+            f"WHERE {LISTED} GROUP BY pt.topic"
         )}
         under = {r["parent"]: r["n"] for r in c.execute(
             "SELECT t.parent, count(DISTINCT pt.paper_id) n FROM paper_topics pt JOIN topics t ON t.path=pt.topic "
-            "JOIN capture_papers cp ON cp.paper_id=pt.paper_id AND cp.state='confirmed' WHERE t.parent IS NOT NULL GROUP BY t.parent"
+            f"JOIN papers p ON p.id=pt.paper_id WHERE t.parent IS NOT NULL AND {LISTED} GROUP BY t.parent"
         )}
     tree = []
     for r in rows:
@@ -1295,8 +1389,8 @@ def search(q, limit=30):
     like = f"%{q.strip()}%"
     with tx() as c:
         papers = _rows(c.execute(
-            "SELECT DISTINCT p.id, p.title, p.card FROM papers p JOIN capture_papers cp ON cp.paper_id=p.id AND cp.state='confirmed' "
-            "WHERE p.id LIKE ? OR p.title LIKE ? OR p.abstract LIKE ? OR p.card LIKE ? OR p.report LIKE ? LIMIT ?",
+            f"SELECT p.id, p.title, p.card FROM papers p WHERE {LISTED} "
+            "AND (p.id LIKE ? OR p.title LIKE ? OR p.abstract LIKE ? OR p.card LIKE ? OR p.report LIKE ?) LIMIT ?",
             (like, like, like, like, like, limit),
         ))
         captures = _rows(c.execute(

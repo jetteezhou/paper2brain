@@ -116,12 +116,39 @@ class Store(unittest.TestCase):
         with self.assertRaisesRegex(rules.Rejected, "已被修改"):
             store.put_card("arxiv:2410.24164", CARD, "agent", base_rev=rev)
 
-    def test_delete_capture_keeps_paper(self):
-        store.link(self.cid, "arxiv:2410.24164", "agent")
+    def test_undo_capture_deletes_what_only_it_brought_in(self):
+        only, shared, used = "arxiv:2601.00011", "arxiv:2601.00012", "arxiv:2601.00013"
+        for pid in (only, shared, used):
+            store.upsert_paper(pid, pid)
+            store.link(self.cid, pid, "rule")
+        other = store.new_id()
+        store.add_capture(other, "另一篇解读", "test")
+        store.link(other, shared, "rule")
+        rid = store.add_research("用到它", "user", links=[("paper", used)])
+        store.put_card(only, CARD, "agent")
+        store.set_topics(only, ["VLA"], "agent")
+        aid = store.add_anchor(only, "card", "flow matching", "user")
+        store.add_message(store.thread_for(f"anchor:{aid}")["id"], "user", "这段？")
+        store.add_message(store.thread_for(f"paper:{only}")["id"], "user", "讲讲")
+        on_paper = store.add_thought("关于这篇的想法", "user", paper_id=only)
+        store.link_research(rid, "thought", store.get_capture(self.cid)["thoughts"][0]["id"], "user")
+        (store.paper_dir(only) / "pages.json").write_text("[]")
+
+        plan = store.capture_removal(self.cid)
+        self.assertEqual([p["id"] for p in plan["papers"]], [only])
+        self.assertEqual((len(plan["papers"][0]["anchor"]), len(plan["papers"][0]["thread"]), plan["papers"][0]["card"]), (1, 2, True))
+        self.assertEqual({p["id"]: len(p["why"]) for p in plan["kept"]}, {shared: 1, used: 1})
+        self.assertEqual((len(plan["thoughts"]), plan["used_in"]), (1, ["用到它"]))
+
         store.delete_capture(self.cid)
         self.assertIsNone(store.get_capture(self.cid))
-        self.assertIsNotNone(store.get_paper("arxiv:2410.24164"))
-        self.assertFalse(any(t["capture_id"] == self.cid for t in store.list_thoughts()))
+        self.assertIsNone(store.get_paper(only))
+        self.assertFalse(store.paper_dir(only, create=False).exists())
+        self.assertIsNone(store.get_anchor(aid))
+        self.assertFalse(any(t["id"] == on_paper or t["capture_id"] == self.cid for t in store.list_thoughts()))
+        self.assertEqual([l["kind"] for l in store.get_research(rid)["links"]], ["paper"])
+        listed = {p["id"] for p in store.list_papers()}
+        self.assertTrue({shared, used} <= listed and only not in listed)
 
     def test_any_pdf_becomes_a_paper(self):
         import pymupdf

@@ -1750,6 +1750,18 @@ async function researchPost(path, body, okMessage) {
   loadState();
 }
 
+function removalText(plan) {
+  const lines = ['撤销这次收下？下面这些会被永久删除：', `· 这条收下的内容${plan.thoughts.length ? `，和它上面的 ${plan.thoughts.length} 条想法` : ''}`];
+  for (const p of plan.papers) {
+    const parts = [p.card && '快读卡', p.report && '深读报告', p.anchor.length && `${p.anchor.length} 段划词`,
+      p.thread.length && `${p.thread.length} 段讨论`, p.thought.length && `${p.thought.length} 条想法`, p.note.length && `${p.note.length} 条笔记`].filter(Boolean);
+    lines.push(`· 论文《${short(p.title, 40)}》${parts.length ? `及其${parts.join('、')}` : ''}（只有这条收下讲它）`);
+  }
+  if (plan.used_in.length) lines.push(`· 上面的想法或讨论会从研究《${plan.used_in.join('》《')}》的素材里移除`);
+  if (plan.kept.length) lines.push('', '保留：', ...plan.kept.map((p) => `· 论文《${short(p.title, 40)}》：${p.why.join('；')}`));
+  return lines.join('\n');
+}
+
 const actions = {
   go: (el) => { if (el.dataset.view === 'topic' && S.view === 'topic' && S.arg === el.dataset.arg) return; go(el.dataset.view, el.dataset.arg); },
   'toggle-tree': (el, e) => { e.stopPropagation(); const p = el.dataset.path; S.open.has(p) ? S.open.delete(p) : S.open.add(p); renderSide(); },
@@ -1766,7 +1778,8 @@ const actions = {
   back: () => $('#body').classList.remove('show-detail'),
   triage: (el, e) => { e.stopPropagation(); triage(el.dataset.id, el.dataset.t).catch(fail); },
   'undo-capture': async (el) => {
-    if (!confirm('撤销这次收下？这条捕获、它的想法和关联会被删除，论文本身会保留。')) return;
+    const plan = await get(`/api/captures/${enc(el.dataset.id)}/removal`).catch(fail);
+    if (!plan || !confirm(removalText(plan))) return;
     await api('DELETE', `/api/captures/${enc(el.dataset.id)}`).catch(fail);
     toast('已撤销');
     S.sel = null; S.detail = null; refresh(true);
