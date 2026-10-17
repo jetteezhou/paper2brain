@@ -382,6 +382,43 @@ class Store(unittest.TestCase):
         self.assertIn("V-JEPA", tree["WAM"])
 
 
+class Server(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        from paper2brain import server
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+
+    def req(self, method, path, body=None, **headers):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port)
+        c.request(method, path, body=body, headers={"Host": f"127.0.0.1:{self.port}", **headers})
+        r = c.getresponse()
+        r.read()
+        return r.status
+
+    def test_only_this_host_and_same_origin_json_writes(self):
+        own = f"http://127.0.0.1:{self.port}"
+        self.assertEqual(self.req("GET", "/api/state"), 200)
+        self.assertEqual(self.req("GET", "/api/state", Host=f"localhost:{self.port}"), 200)
+        self.assertEqual(self.req("GET", "/api/state", Host=f"evil.example:{self.port}"), 403)
+        body = '{"text": "跨站写入"}'.encode()
+        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "text/plain"}), 415)
+        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "application/json", "Origin": "http://evil.example"}), 403)
+        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "application/json", "Origin": "null"}), 403)
+        self.assertEqual(self.req("DELETE", "/api/anchors/x", Origin="http://evil.example"), 403)
+        self.assertEqual(self.req("POST", "/api/thoughts", body, **{"Content-Type": "application/json", "Origin": own}), 200)
+        self.assertEqual(sum(t["text"] == "跨站写入" for t in store.list_thoughts()), 1)
+
+
 class scratch_home:
     """A fresh P2B_HOME for tests that need an empty (or hand-made) database."""
     def __enter__(self):

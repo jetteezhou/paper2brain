@@ -541,7 +541,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "文件不存在"})
         self._send(200, path.read_bytes(), mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
+    def _refuse(self, method):
+        """Any web page the user has open can send requests to 127.0.0.1. Host must name this server (DNS rebinding);
+        writes must come from our own page (Origin) as JSON, which a cross-site form or no-cors fetch cannot send.
+        Clients that send no Origin at all (curl) are not browsers and are let through."""
+        host, port = self.headers.get("Host", ""), self.server.server_address[1]
+        if host not in {f"{h}:{port}" for h in ("127.0.0.1", "localhost", self.server.server_address[0])}:
+            return 403, "Host 不对：只接受 127.0.0.1 或 localhost 上的访问"
+        if method == "GET":
+            return None
+        origin = self.headers.get("Origin")
+        if origin is not None and origin != f"http://{host}":
+            return 403, "跨站请求被拒绝"
+        if method == "POST" and self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+            return 415, "请求体必须是 application/json"
+        return None
+
     def _dispatch(self, method):
+        refused = self._refuse(method)
+        if refused:
+            return self._json(refused[0], {"error": refused[1]})
         url = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(url.path)
         if method == "GET" and not path.startswith("/api/"):
