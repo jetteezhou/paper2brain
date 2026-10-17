@@ -359,5 +359,51 @@ class Store(unittest.TestCase):
         self.assertIn("V-JEPA", tree["WAM"])
 
 
+class scratch_home:
+    """A fresh P2B_HOME for tests that need an empty (or hand-made) database."""
+    def __enter__(self):
+        self.old = os.environ["P2B_HOME"]
+        os.environ["P2B_HOME"] = tempfile.mkdtemp(prefix="p2b-scratch-")
+        return Path(os.environ["P2B_HOME"])
+
+    def __exit__(self, *exc):
+        os.environ["P2B_HOME"] = self.old
+
+
+class Migrations(unittest.TestCase):
+    def test_legacy_database_is_upgraded_in_place_after_a_backup(self):
+        import sqlite3
+        with scratch_home() as home:
+            legacy = sqlite3.connect(home / "p2b.sqlite")
+            legacy.execute("CREATE TABLE thoughts (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, text TEXT NOT NULL, "
+                           "by TEXT NOT NULL, capture_id TEXT REFERENCES captures(id) ON DELETE CASCADE, paper_id TEXT)")
+            legacy.executescript(store.SCHEMA + "CREATE TABLE ideas (id TEXT);")
+            legacy.execute("INSERT INTO captures (id, created_at, raw, source) VALUES ('c1', '2026-10-01', 'https://x', 'web')")
+            legacy.execute("INSERT INTO thoughts VALUES ('t1', '2026-10-01', '旧想法', 'user', 'c1', NULL)")
+            legacy.execute("INSERT INTO topics VALUES ('VLA', 'VLA', NULL, 0)")
+            legacy.commit()
+            legacy.close()
+
+            self.assertEqual(store.get_capture("c1")["thoughts"][0]["text"], "旧想法")
+            c = sqlite3.connect(home / "p2b.sqlite")
+            self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], len(store.MIGRATIONS))
+            names = {r[0] for r in c.execute("SELECT name FROM sqlite_master")}
+            self.assertTrue({"messages_thread", "events_target"} <= names and "ideas" not in names)
+            self.assertEqual([r[0] for r in c.execute("SELECT path FROM topics")], ["VLA"])  # user's tree untouched
+            before = list((home / "backups").glob("p2b-before-*.sqlite"))
+            self.assertEqual(len(before), 1)
+            self.assertEqual(sqlite3.connect(before[0]).execute("SELECT text FROM thoughts").fetchone()[0], "旧想法")
+
+    def test_daily_backup_once_a_day_keeps_seven(self):
+        with scratch_home() as home:
+            store.counts()
+            folder = home / "backups"
+            for d in range(1, 10):
+                store.backup(f"p2b-202601{d:02d}.sqlite")
+            self.assertIsNotNone(store.backup())
+            self.assertIsNone(store.backup())
+            self.assertEqual(len(list(folder.glob("p2b-[0-9]*.sqlite"))), store.BACKUPS_KEPT)
+
+
 if __name__ == "__main__":
     unittest.main()

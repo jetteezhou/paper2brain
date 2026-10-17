@@ -583,7 +583,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _poll_inbox():
     while True:
-        for job in (inbox.drain, cursor_api.distill_pending, cursor_api.deepread_pending, structure.backfill):
+        for job in (store.backup, inbox.drain, cursor_api.distill_pending, cursor_api.deepread_pending, structure.backfill):
             try:
                 job()
             except Exception:

@@ -62,9 +62,6 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   target TEXT, detail TEXT);
-DROP TABLE IF EXISTS idea_links;
-DROP TABLE IF EXISTS idea_topics;
-DROP TABLE IF EXISTS ideas;
 CREATE TABLE IF NOT EXISTS research (
   id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, title TEXT NOT NULL, summary TEXT,
   body TEXT, stage TEXT NOT NULL DEFAULT 'forming', established_at TEXT, proposal TEXT, by TEXT NOT NULL,
@@ -104,6 +101,44 @@ CREATE INDEX IF NOT EXISTS captures_triage ON captures(triage, created_at);
 CREATE INDEX IF NOT EXISTS cp_paper ON capture_papers(paper_id);
 CREATE INDEX IF NOT EXISTS runs_ref ON runs(ref, created_at);
 """
+
+
+def _statements(script):
+    return [s for s in script.split(";") if s.strip()]
+
+
+def _v1_baseline(c):
+    """The schema as it was before versioning. Databases created by earlier code already have most of it."""
+    for stmt in _statements(SCHEMA):
+        c.execute(stmt)
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(thoughts)")}
+    for col in ("gist", "gist_by"):
+        if col not in cols:
+            c.execute(f"ALTER TABLE thoughts ADD COLUMN {col} TEXT")
+    for t in ("idea_links", "idea_topics", "ideas"):  # replaced by research; were empty when dropped
+        c.execute(f"DROP TABLE IF EXISTS {t}")
+    if not c.execute("SELECT 1 FROM topics LIMIT 1").fetchone():
+        for i, (parent, children) in enumerate(TOPIC_TREE):
+            c.execute("INSERT INTO topics VALUES (?,?,?,?)", (parent, parent, None, i))
+            for j, child in enumerate(children):
+                c.execute("INSERT INTO topics VALUES (?,?,?,?)", (f"{parent}/{child}", child, parent, j))
+
+
+def _v2_indexes(c):
+    for stmt in _statements("""
+        CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, created_at);
+        CREATE INDEX IF NOT EXISTS threads_scope ON threads(scope, created_at);
+        CREATE INDEX IF NOT EXISTS thoughts_capture ON thoughts(capture_id);
+        CREATE INDEX IF NOT EXISTS thoughts_paper ON thoughts(paper_id);
+        CREATE INDEX IF NOT EXISTS notes_paper ON notes(paper_id);
+        CREATE INDEX IF NOT EXISTS paper_topics_topic ON paper_topics(topic);
+        CREATE INDEX IF NOT EXISTS events_target ON events(target, action)"""):
+        c.execute(stmt)
+
+
+# Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
+# transaction, after a backup of the database as it was.
+MIGRATIONS = [_v1_baseline, _v2_indexes]
 
 
 def home():
@@ -150,6 +185,49 @@ def _connect():
 
 
 _initialized = set()
+BACKUPS_KEPT = 7
+
+
+def backup(name=None):
+    """A consistent copy of the database under backups/. Without a name: today's daily copy (once a day, the newest
+    BACKUPS_KEPT kept). Returns the new file, or None when today's copy already exists."""
+    folder = home() / "backups"
+    folder.mkdir(exist_ok=True)
+    path = folder / (name or f"p2b-{datetime.now():%Y%m%d}.sqlite")
+    if path.exists():
+        return None
+    tmp = path.with_suffix(".tmp")
+    src, dst = _connect(), sqlite3.connect(tmp)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    tmp.replace(path)
+    if not name:
+        for old in sorted(folder.glob("p2b-[0-9]*.sqlite"))[:-BACKUPS_KEPT]:
+            old.unlink()
+    return path
+
+
+def _migrate(conn):
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= len(MIGRATIONS):
+        return
+    if conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
+        backup(f"p2b-before-v{len(MIGRATIONS)}-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
+    conn.isolation_level = None
+    conn.execute("BEGIN IMMEDIATE")  # the server and an agent's ./p2b may start at the same moment
+    try:
+        done = conn.execute("PRAGMA user_version").fetchone()[0]
+        for n, step in enumerate(MIGRATIONS[done:], done + 1):
+            step(conn)
+            conn.execute(f"PRAGMA user_version={n}")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = ""
 
 
 @contextmanager
@@ -158,17 +236,7 @@ def tx():
     try:
         key = str(home())
         if key not in _initialized:
-            conn.executescript(SCHEMA)
-            cols = {r["name"] for r in conn.execute("PRAGMA table_info(thoughts)")}
-            for col in ("gist", "gist_by"):
-                if col not in cols:
-                    conn.execute(f"ALTER TABLE thoughts ADD COLUMN {col} TEXT")
-            if not conn.execute("SELECT 1 FROM topics LIMIT 1").fetchone():
-                for i, (parent, children) in enumerate(TOPIC_TREE):
-                    conn.execute("INSERT INTO topics VALUES (?,?,?,?)", (parent, parent, None, i))
-                    for j, child in enumerate(children):
-                        conn.execute("INSERT INTO topics VALUES (?,?,?,?)", (f"{parent}/{child}", child, parent, j))
-            conn.commit()
+            _migrate(conn)
             _initialized.add(key)
         with conn:
             yield conn
@@ -682,7 +750,7 @@ def thread_for(scope=None, thread_id=None):
             c.execute("INSERT INTO threads VALUES (?,?,?,?,?)", tuple(t.values()))
         t["messages"] = _rows(c.execute(
             "SELECT m.*, r.status AS run_status, r.text AS run_text, r.tools AS run_tools, r.error AS run_error "
-            "FROM messages m LEFT JOIN runs r ON r.id=m.run_id WHERE m.thread_id=? ORDER BY m.created_at", (t["id"],),
+            "FROM messages m LEFT JOIN runs r ON r.id=m.run_id WHERE m.thread_id=? ORDER BY m.created_at, m.rowid", (t["id"],),
         ))
         used = _research_for(c, "message", [m["id"] for m in t["messages"]])
     for m in t["messages"]:
@@ -1164,7 +1232,7 @@ def anchors_for(pid):
         return _rows(c.execute(
             "SELECT a.*, t.id AS thread_id, (SELECT count(*) FROM messages m WHERE m.thread_id=t.id) AS message_count, "
             "(SELECT coalesce(nullif(m.text, ''), r.text) FROM messages m LEFT JOIN runs r ON r.id=m.run_id "
-            " WHERE m.thread_id=t.id ORDER BY m.created_at DESC LIMIT 1) AS last_text "
+            " WHERE m.thread_id=t.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS last_text "
             "FROM anchors a LEFT JOIN threads t ON t.scope='anchor:' || a.id WHERE a.paper_id=? "
             "GROUP BY a.id ORDER BY a.created_at", (pid,),
         ))
