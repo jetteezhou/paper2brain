@@ -76,6 +76,20 @@ a:hover { text-decoration: underline; }
 .nav-item.proposals { color: var(--violet); font-size: 12.5px; padding-left: 32px; }
 .caret { width: 14px; display: inline-grid; place-items: center; color: var(--faint); transition: transform .15s; }
 .caret.open { transform: rotate(90deg); }
+.heat { margin: 8px 12px 0; }
+.heat-grid { display: grid; grid-template-rows: repeat(7, 9px); grid-auto-flow: column; grid-auto-columns: 9px; gap: 2px; margin-bottom: 4px; }
+.heat.wide .heat-grid { grid-template-rows: repeat(7, 11px); grid-auto-columns: 11px; gap: 3px; }
+.heat-grid button { border: 0; padding: 0; border-radius: 2px; background: var(--line); cursor: pointer; }
+.heat-grid button:hover, .heat-grid button.on { outline: 1.5px solid var(--text); outline-offset: 0; }
+.act-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 13.5px; }
+.act-row:hover { background: var(--bg); }
+.act-row.static { cursor: default; }
+.act-row time { color: var(--faint); font: 12px var(--mono); flex: none; }
+.act-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.heat-grid .l1 { background: color-mix(in srgb, var(--accent) 30%, var(--side)); }
+.heat-grid .l2 { background: color-mix(in srgb, var(--accent) 55%, var(--side)); }
+.heat-grid .l3 { background: color-mix(in srgb, var(--accent) 80%, var(--side)); }
+.heat-grid .l4 { background: var(--accent); }
 .agent-status { margin: 8px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; display: flex; gap: 8px; align-items: center; }
 .agent-status:hover { background: rgba(0,0,0,.04); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }

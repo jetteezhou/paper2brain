@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import rules
@@ -609,6 +609,51 @@ def counts():
             f"SELECT count(*) FROM papers p WHERE {LISTED} AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id)"
         ).fetchone()[0]
     return out
+
+
+# Your own actions: (at, kind, ref, text, extra). A paper read counts once per paper per day.
+_ACTIVITY = (
+    "SELECT created_at at, 'capture' kind, id ref, COALESCE(title, raw) text, NULL extra FROM captures UNION ALL "
+    "SELECT created_at, 'message', thread_id, text, (SELECT scope FROM threads t WHERE t.id=thread_id) FROM messages WHERE role='user' UNION ALL "
+    "SELECT created_at, 'anchor', paper_id, quote, (SELECT title FROM papers p WHERE p.id=paper_id) FROM anchors WHERE by='user' UNION ALL "
+    "SELECT created_at, 'note', paper_id, text, (SELECT title FROM papers p WHERE p.id=paper_id) FROM notes WHERE by='user' UNION ALL "
+    "SELECT at, 'triage', target, json_extract(detail, '$.triage'), (SELECT COALESCE(title, raw) FROM captures c WHERE c.id=target) "
+    "FROM events WHERE actor='user' AND action='capture.triage' UNION ALL "
+    "SELECT min(at), 'read', target, NULL, (SELECT title FROM papers p WHERE p.id=target) "
+    "FROM events WHERE actor='user' AND action='paper.read' GROUP BY target, date(at, 'localtime')"
+)
+
+
+def activity(days=371):
+    """Actions per local day over the last year, the current streak (today may still be empty) and the longest one."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    with tx() as c:
+        counts = dict(c.execute(
+            f"SELECT date(at, 'localtime') d, count(*) FROM ({_ACTIVITY}) WHERE at >= ? GROUP BY d", (since,)).fetchall())
+    day = date.today()
+    if day.isoformat() not in counts:
+        day -= timedelta(days=1)
+    streak = 0
+    while day.isoformat() in counts:
+        streak, day = streak + 1, day - timedelta(days=1)
+    best = run = 0
+    prev = None
+    for k in sorted(counts):
+        d = date.fromisoformat(k)
+        run = run + 1 if prev and d - prev == timedelta(days=1) else 1
+        best, prev = max(best, run), d
+    return {"days": counts, "streak": streak, "best": best}
+
+
+def activity_day(day):
+    """What you did on one local day (YYYY-MM-DD), oldest first."""
+    with tx() as c:
+        return [dict(r) for r in c.execute(f"SELECT * FROM ({_ACTIVITY}) WHERE date(at, 'localtime')=? ORDER BY at", (day,))]
+
+
+def mark_read(pid):
+    with tx() as c:
+        _event(c, "user", "paper.read", pid)
 
 
 # ---------- papers ----------

@@ -5,7 +5,7 @@ import { signal } from '@preact/signals';
 import { html, get, post, del, short, ago, readBase64, idLabel, threadName, Icon } from './lib.js';
 import {
   route, baseRoute, go, appState, loadState, refresh, toast, toastSig, fail, modalSig, openModal, closeModal,
-  selected, openThread, openCapture, openReader, openPaper, openResearch,
+  selected, openThread, openCapture, openReader, openPaper, openResearch, useLive,
 } from './state.js';
 import { CapturesView, PapersView, SearchView } from './papers.js';
 import { ResearchView, openComposer, researchPicker } from './research.js';
@@ -56,6 +56,69 @@ function TopicTree() {
   ${s.topic_proposals.length ? html`<div class="nav-item proposals" onClick=${proposalsModal}><span>agent 提议了 ${s.topic_proposals.length} 个新主题</span></div>` : null}`;
 }
 
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const dayLabel = (k) => { const [, m, d] = k.split('-'); return `${+m}月${+d}日`; };
+
+/** Levels 1–4 split your active days into quartiles, so the shades fit however busy you usually are. */
+function heatLevels(counts) {
+  const v = Object.values(counts).sort((x, y) => x - y);
+  const q = [0.25, 0.5, 0.75].map((p) => v[Math.floor(p * (v.length - 1))] ?? 0);
+  return (n) => (!n ? 0 : 1 + q.filter((t) => n > t).length);
+}
+
+/** GitHub-style daily activity: one column per week (Monday on top), today in the last column. */
+function HeatGrid({ weeks, on, onPick }) {
+  const a = appState.value.activity.days, level = heatLevels(a);
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  const end = d.getTime();
+  d.setDate(d.getDate() - (weeks - 1) * 7 - ((d.getDay() + 6) % 7));
+  const days = [];
+  for (; d.getTime() <= end; d.setDate(d.getDate() + 1)) days.push(ymd(d));
+  return html`<div class="heat-grid">${days.map((k) => html`<button class=${`l${level(a[k])}${k === on ? ' on' : ''}`}
+    title=${`${dayLabel(k)} · ${a[k] ? `${a[k]} 次` : '没有活动'}`} aria-label=${`${dayLabel(k)} ${a[k] || 0} 次`} onClick=${() => onPick(k)} />`)}</div>`;
+}
+
+const SIDE_WEEKS = 18;
+function Heatmap() {
+  const s = appState.value?.activity;
+  if (!s) return null;
+  const since = new Date(Date.now() - SIDE_WEEKS * 7 * 864e5);
+  const total = Object.entries(s.days).reduce((t, [k, n]) => t + (k >= ymd(since) ? n : 0), 0);
+  return html`<div class="heat"><${HeatGrid} weeks=${SIDE_WEEKS} onPick=${activityModal} />
+    <div class="hint">最近 ${SIDE_WEEKS} 周 ${total} 次${s.streak ? ` · 连续 ${s.streak} 天` : ''} · <a href="#" onClick=${(e) => { e.preventDefault(); activityModal(); }}>全年</a></div></div>`;
+}
+
+const TRIAGE_LABEL = { deep: '稍后深读', archived: '存档', ignored: '忽略', inbox: '移回收件箱' };
+/** One action of the day: what it was, and where clicking takes you. */
+function activityRow(x) {
+  const jump = (fn) => () => { closeModal(); fn(); };
+  const row = {
+    capture: ['收下', x.text, jump(() => openCapture(x.ref))],
+    message: ['讨论', x.text, jump(() => openThread(x.extra, x.ref))],
+    anchor: ['划词', `“${x.text}”${x.extra ? ` · ${x.extra}` : ''}`, jump(() => openReader(x.ref, { tab: 'anchors' }))],
+    note: ['笔记', x.text, x.ref ? jump(() => openPaper(x.ref)) : null],
+    triage: [TRIAGE_LABEL[x.text] || '分拣', x.extra, jump(() => openCapture(x.ref))],
+    read: ['阅读', x.extra || x.ref, jump(() => openReader(x.ref))],
+  }[x.kind];
+  return html`<div class=${`act-row ${row[2] ? '' : 'static'}`} onClick=${row[2]}><time>${new Date(x.at).toTimeString().slice(0, 5)}</time>
+    <span class="chip">${row[0]}</span><span class="act-text">${short(row[1] || '', 90)}</span></div>`;
+}
+
+function Activity({ day: first }) {
+  const [day, setDay] = useState(first || ymd(new Date()));
+  const [items] = useLive(`/api/activity/${day}`, { poll: false });
+  const s = appState.value.activity;
+  const total = Object.values(s.days).reduce((t, n) => t + n, 0);
+  return html`<h3>活动</h3>
+    <p class="hint" style="margin-top:0">过去一年 ${total} 次 · 活跃 ${Object.keys(s.days).length} 天 · 当前连续 ${s.streak} 天 · 最长连续 ${s.best} 天</p>
+    <div class="heat wide"><${HeatGrid} weeks=${53} on=${day} onPick=${setDay} /></div>
+    <div class="block-title" style="margin-top:16px">${dayLabel(day)} · ${items ? `${items.length} 次` : ''}<span class="line"></span></div>
+    ${!items ? html`<span class="spin"></span>` : items.length ? items.map(activityRow) : html`<p class="hint">这天没有活动。</p>`}
+    <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>关闭</button></div>`;
+}
+const activityModal = (day) => openModal(html`<${Activity} key=${day || 'today'} day=${day} />`, true);
+
 function Sidebar() {
   const a = appState.value?.agent;
   return html`<aside id="side">
@@ -67,6 +130,7 @@ function Sidebar() {
       <${TopicTree} />
       <${NavItem} view="unsorted" label="未归类" n=${appState.value?.counts?.unsorted} />
     </nav>
+    <${Heatmap} />
     <div class="agent-status" onClick=${setupModal}>${a?.enabled
       ? html`<span class="dot ok"></span><span>Agent 已连接 · ${a.machine}</span>`
       : html`<span class="dot"></span><span>Agent 未连接 · 只做规则预处理<br /><a>如何连接</a></span>`}</div>

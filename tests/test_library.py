@@ -91,6 +91,31 @@ class Store(unittest.TestCase):
         self.assertIsNotNone(store.same_capture(" https://example.com/a "))
         self.assertIsNone(store.same_capture("https://example.com/other"))
 
+    def test_activity_counts_only_your_actions_today(self):
+        from datetime import date
+
+        today = date.today().isoformat()
+        before = store.activity()["days"].get(today, 0)
+        self.assertGreater(before, 0)  # the capture from setUp
+        tid = store.thread_for("library")["id"]
+        store.add_message(tid, "user", "问一句")
+        store.add_message(tid, "assistant", "答一句")
+        store.mark_read("arxiv:2410.24164")
+        store.mark_read("arxiv:2410.24164")  # reading the same paper again the same day counts once
+        self.assertEqual(store.activity()["days"][today], before + 2)
+        kinds = [x["kind"] for x in store.activity_day(today)]
+        self.assertEqual((kinds.count("read"), kinds[-2:]), (1, ["message", "read"]))
+
+    def test_current_and_longest_streak(self):
+        from datetime import datetime, timedelta, timezone
+
+        with store.tx() as c:
+            for ago_days in (1, 2, 3, 30, 31, 32, 33, 34):
+                at = (datetime.now(timezone.utc) - timedelta(days=ago_days)).isoformat(timespec="seconds")
+                c.execute("INSERT INTO events (at, actor, action, target) VALUES (?, 'user', 'capture.triage', 'x')", (at,))
+        a = store.activity()
+        self.assertEqual((a["streak"], a["best"]), (4, 5))  # today (setUp's capture) plus the three days before
+
     def test_empty_capture_rejected(self):
         with self.assertRaises(rules.Rejected):
             store.add_capture(store.new_id(), "  ", "test")

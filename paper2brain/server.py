@@ -39,7 +39,8 @@ class Reply:
 @route("GET", "/api/state")
 def state(q, body):
     agent = {**cursor_api.status(), "home": str(store.home()), "repo_dir": str(WEB.parent)}
-    return {"counts": store.counts(), "topics": store.topic_tree(), "topic_proposals": store.topic_proposals(), "agent": agent}
+    return {"counts": store.counts(), "topics": store.topic_tree(), "topic_proposals": store.topic_proposals(), "agent": agent,
+            "activity": store.activity()}
 
 
 @route("POST", "/api/topics")
@@ -56,6 +57,11 @@ def topic_edit(q, body):
 def topic_decide(q, body):
     store.decide_topic(body.get("path"), body.get("accept") is True)
     return {"ok": True}
+
+
+@route("GET", r"/api/activity/(\d{4}-\d{2}-\d{2})")
+def activity_day(q, body, day):
+    return store.activity_day(day)
 
 
 @route("GET", "/api/search")
@@ -218,6 +224,12 @@ def paper_pdf(q, body, pid):
     if not p["pdf_path"]:
         raise rules.Rejected("还没有 PDF")
     return Reply(p["pdf_path"], "application/pdf")
+
+
+@route("POST", "/api/papers/([^/]+)/read")
+def paper_read(q, body, pid):
+    store.mark_read(_paper(pid)["id"])
+    return {"ok": True}
 
 
 @route("GET", "/api/papers/([^/]+)/pages")

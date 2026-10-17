@@ -242,6 +242,7 @@ export function Reader() {
   const [p] = useLive(pid ? `/api/papers/${enc(pid)}` : null);
   const [view, setView] = useState({});
   const prevReport = useRef(null);
+  useEffect(() => { if (pid) post(`/api/papers/${enc(pid)}/read`).catch(() => {}); }, [pid]);
   // the intent from whoever opened the reader (or asked again while it is open): tab, page, section, anchor, thread
   useEffect(() => {
     const it = readerIntent.value;
