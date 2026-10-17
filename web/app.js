@@ -390,6 +390,8 @@ function paperItem(p) {
     <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${esc(p.title)}</div>
     <div class="item-meta" style="margin:3px 0 0">${esc(authors(p.authors))}</div>
     ${p.tldr ? `<div class="item-tldr">${esc(p.tldr)}</div>` : ''}
+    ${p.hits ? `<div class="item-meta" style="margin-top:4px">命中：${p.hits.map((x) => `<span class="chip">${esc(x)}${x === '原文' && p.hit_page ? ` p.${p.hit_page}` : ''}</span>`).join('')}</div>` : ''}
+    ${p.hit_text && !p.hits.some((x) => x !== '原文' && x !== '编号') ? `<div class="item-tldr">“${esc(p.hit_text)}”</div>` : ''}
     <div class="item-tags">${p.topics.map((t) => `<span class="chip topic">${esc(t)}</span>`).join('')}${p.deep ? '<span class="chip amber">待深读</span>' : ''}</div>
     ${jumpsHtml(p, p.jumps)}
   </div>`;
@@ -398,14 +400,19 @@ function paperItem(p) {
 function searchList() {
   const r = S.search;
   if (!r) return listHead('搜索', '');
-  const total = r.papers.length + r.captures.length + r.thoughts.length + r.notes.length;
-  let h = listHead(`“${S.arg}”`, `${total} 条结果`);
-  if (!total) return h + '<div class="empty"><b>库里没找到</b>换个关键词试试：论文英文标题、方法名、公众号名或你想法里的词。</div>';
+  const total = r.papers.length + r.captures.length + r.thoughts.length + r.notes.length + r.messages.length + r.research.length;
+  let h = listHead(`“${S.arg}”`, `${total} 条结果`, '<span class="hint">每个词都要命中</span>');
+  const askAgent = agentOn() ? `<button class="btn sm ${total ? 'ghost' : 'primary'}" data-action="search-agent" data-q="${esc(S.arg)}">让 agent 在库里找</button>` : '';
+  if (!total) return h + `<div class="empty"><b>库里没找到</b>换几个词试试：英文标题里的词、方法名、作者、公众号名，或你想法里的说法。<div style="margin-top:12px">${askAgent}</div></div>`;
   if (r.papers.length) h += '<div class="group-label">论文</div>' + r.papers.map((p) => paperItem({ ...p, topics: [] })).join('');
-  if (r.captures.length) h += '<div class="group-label">解读与捕获</div>' + r.captures.map((c) => captureItem({ ...c, papers: [], status: '' })).join('');
-  if (r.thoughts.length) h += '<div class="group-label">想法</div>' + r.thoughts.map((t) => `<div class="item" data-action="select" data-kind="thought" data-id="${t.id}"><div class="item-thought" style="white-space:normal">${esc(t.text)}</div><div class="item-meta" style="margin-top:4px"><time>${ago(t.created_at)}</time></div></div>`).join('');
-  if (r.notes.length) h += '<div class="group-label">笔记</div>' + r.notes.map((n) => `<div class="item" ${n.paper_id ? `data-action="select" data-kind="paper" data-id="${esc(n.paper_id)}"` : ''}><div class="item-tldr" style="-webkit-line-clamp:4">${esc(n.text)}</div><div class="item-meta" style="margin-top:4px"><time>${ago(n.created_at)}</time></div></div>`).join('');
-  return h;
+  if (r.research.length) h += '<div class="group-label">研究</div>' + r.research.map((x) => `<div class="item" data-action="open-research" data-id="${x.id}"><div class="item-meta">${stageChip(x.stage)}<time>${ago(x.updated_at)}</time></div><div class="item-title">${esc(x.title)}</div>${x.summary ? `<div class="item-tldr">${esc(x.summary)}</div>` : ''}</div>`).join('');
+  if (r.thoughts.length || r.notes.length) {
+    h += '<div class="group-label">想法</div>' + r.thoughts.map((t) => `<div class="item" data-action="select" data-kind="thought" data-id="${t.id}"><div class="item-title">${esc(t.gist || t.text)}</div>${t.gist ? `<div class="item-thought">${esc(t.text)}</div>` : ''}<div class="item-meta" style="margin-top:4px"><span>${t.by === 'agent' ? 'agent 记录' : '你的想法'}</span><time>${ago(t.created_at)}</time></div></div>`).join('')
+      + r.notes.map((n) => `<div class="item" ${n.paper_id ? `data-action="select" data-kind="paper" data-id="${esc(n.paper_id)}"` : ''}><div class="item-tldr" style="-webkit-line-clamp:4">${esc(n.text)}</div><div class="item-meta" style="margin-top:4px"><span>agent 记录</span><time>${ago(n.created_at)}</time></div></div>`).join('');
+  }
+  if (r.messages.length) h += '<div class="group-label">讨论</div>' + r.messages.map((m) => `<div class="item" data-action="open-message" data-scope="${esc(m.scope)}" data-thread="${m.thread_id}" data-mid="${m.id}"><div class="item-meta"><span>${m.role === 'user' ? '你问' : 'agent 答'} · ${esc(scopeLabel(m.scope))}</span><time>${ago(m.created_at)}</time></div><div class="item-tldr">${esc(plain(m.text))}</div></div>`).join('');
+  if (r.captures.length) h += '<div class="group-label">收下的内容</div>' + r.captures.map((c) => captureItem({ ...c, papers: [], status: '' })).join('');
+  return h + (askAgent ? `<div class="empty" style="padding:20px">没找到想要的？${askAgent}</div>` : '');
 }
 
 // ---------- detail ----------
@@ -1921,6 +1928,14 @@ const actions = {
     submitFind(text);
   },
   'open-find': (el) => openThreadAt(`find:${el.dataset.id}`),
+  'open-message': (el) => openThreadAt(el.dataset.scope, el.dataset.thread, el.dataset.mid),
+  'search-agent': async (el) => {
+    const t = await post('/api/threads', { scope: 'library' }).catch(fail);
+    if (!t) return;
+    const text = `我记得库里有篇论文，记得的线索是：${el.dataset.q}。帮我在库里找找：换几种说法用 ./p2b search 搜（英文术语、方法名、作者），再看快读卡或原文确认，列出最可能的几篇并说明为什么。`;
+    try { await post('/api/chat', { scope: 'library', text, thread_id: t.id }); } catch (e) { fail(e); return; }
+    openThreadAt('library', t.id);
+  },
   'sel-join': () => {
     const { kind, ids } = S.selecting;
     S.selecting = null; renderBody();

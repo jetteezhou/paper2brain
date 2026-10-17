@@ -580,6 +580,34 @@ class Receiving(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in box.iterdir()), ["done"])
 
 
+class Search(unittest.TestCase):
+    def test_words_in_any_order_across_authors_gists_discussions_and_full_text(self):
+        with scratch_home():
+            cid = store.new_id()
+            store.add_capture(cid, "https://arxiv.org/abs/2410.24164", "web")
+            store.upsert_paper("arxiv:2410.24164", "π0: A Vision-Language-Action Flow Model", ["Kevin Black", "Chelsea Finn"])
+            store.link(cid, "arxiv:2410.24164", "rule")
+            store.set_fulltext("arxiv:2410.24164", "/tmp/x.pdf", PAGES)
+            store.upsert_paper("arxiv:2501.00002", "库外论文", ["Chelsea Finn"])  # not listed: no capture, no research
+            tid = store.add_thought("和 DP 比一下", "user")
+            store.set_gist(tid, "flow matching 动作头和 diffusion policy 的区别", "agent")
+            th = store.thread_for("library")
+            store.add_message(th["id"], "user", "库里谁做过灵巧手？")
+
+            def ids(q, group):
+                return [x["id"] for x in store.search(q)[group]]
+
+            self.assertEqual(ids("flow 50 Hz", "papers"), ["arxiv:2410.24164"])
+            self.assertEqual(ids("Finn chelsea", "papers"), ["arxiv:2410.24164"])
+            hit = store.search("laundry")["papers"][0]
+            self.assertEqual((hit["hits"], hit["hit_page"]), (["原文"], 2))
+            self.assertIn("laundry folding", hit["hit_text"])
+            self.assertEqual(ids("diffusion 动作头", "thoughts"), [tid])
+            self.assertEqual(store.search("灵巧手")["messages"][0]["scope"], "library")
+            self.assertEqual(ids("flow 不存在的词", "papers"), [])
+            self.assertEqual(ids("100%", "papers"), [])
+
+
 class Migrations(unittest.TestCase):
     def test_legacy_database_is_upgraded_in_place_after_a_backup(self):
         import sqlite3

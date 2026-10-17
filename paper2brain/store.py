@@ -161,9 +161,18 @@ def _v4_free_bare_thoughts(c):
         c.execute(f"DELETE FROM captures WHERE id IN ({_qs(bare)})", bare)
 
 
+def _v5_searchable_fulltext(c):
+    """Full text in the database so search can reach it; filled from each paper's pages.json."""
+    c.execute("CREATE TABLE IF NOT EXISTS paper_text (paper_id TEXT PRIMARY KEY REFERENCES papers(id), text TEXT NOT NULL)")
+    for pid in _ids(c, "SELECT id FROM papers WHERE page_count > 0", ()):
+        path = paper_dir(pid, create=False) / "pages.json"
+        if path.exists():
+            c.execute("INSERT OR REPLACE INTO paper_text VALUES (?,?)", (pid, "\n".join(json.loads(path.read_text()))))
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
-MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts]
+MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext]
 
 
 def home():
@@ -423,7 +432,8 @@ def delete_capture(capture_id):
         if threads:
             c.execute(f"DELETE FROM messages WHERE thread_id IN ({_qs(threads)})", threads)
         for table, col, ids in (("notes", "id", gone["note"]), ("thoughts", "id", gone["thought"]), ("threads", "id", threads),
-                                ("anchors", "paper_id", pids), ("paper_topics", "paper_id", pids), ("capture_papers", "paper_id", pids)):
+                                ("anchors", "paper_id", pids), ("paper_topics", "paper_id", pids), ("capture_papers", "paper_id", pids),
+                                ("paper_text", "paper_id", pids)):
             if ids:
                 c.execute(f"DELETE FROM {table} WHERE {col} IN ({_qs(ids)})", ids)
         c.execute("DELETE FROM captures WHERE id=?", (capture_id,))
@@ -587,6 +597,7 @@ def set_fulltext(pid, pdf_path, pages):
     (paper_dir(pid) / "structure.json").unlink(missing_ok=True)  # figures and outline come from the PDF
     with tx() as c:
         c.execute("UPDATE papers SET pdf_path=?, page_count=? WHERE id=?", (str(pdf_path), len(pages), pid))
+        c.execute("INSERT OR REPLACE INTO paper_text VALUES (?,?)", (pid, "\n".join(pages)))
 
 
 def pages(pid):
@@ -861,7 +872,7 @@ def thread_for(scope=None, thread_id=None):
             if not t:
                 raise rules.Rejected("这段讨论不存在了")
         else:
-            t = _row(c.execute("SELECT * FROM threads WHERE scope=? ORDER BY created_at DESC LIMIT 1", (scope,)).fetchone())
+            t = _row(c.execute("SELECT * FROM threads WHERE scope=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (scope,)).fetchone())
         if not t:
             t = {"id": new_id(), "created_at": now(), "scope": scope, "title": None, "agent_id": None}
             c.execute("INSERT INTO threads VALUES (?,?,?,?,?)", tuple(t.values()))
@@ -1424,24 +1435,63 @@ def forget_agent(agent_id):
 
 # ---------- search ----------
 
+PAPER_FIELDS = ("p.title", "p.id", "p.authors", "p.abstract", "p.card", "p.report", "pt.text")
+
+
+def _every_word(terms, fields):
+    """WHERE clause: each word appears in at least one of the fields (case-insensitive for Latin letters)."""
+    esc = [t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for t in terms]
+    clause = " AND ".join("(" + " OR ".join(f"{f} LIKE ? ESCAPE '\\'" for f in fields) + ")" for _ in terms)
+    return clause, [f"%{t}%" for t in esc for _ in fields]
+
+
+def _snippet(text, terms, n=90):
+    low = (text or "").lower()
+    at = min((i for i in (low.find(t.lower()) for t in terms) if i >= 0), default=0)
+    s = re.sub(r"\s+", " ", (text or "")[max(0, at - 30): at + n]).strip()
+    return ("…" if at > 30 else "") + s
+
+
 def search(q, limit=30):
-    like = f"%{q.strip()}%"
+    """"我记得有篇……": the words may come from anywhere, in any order. Every word must match; papers match on title,
+    authors, abstract, card, report or full text, and say where (hits)."""
+    terms = q.split()[:8]
+    empty = {"papers": [], "captures": [], "thoughts": [], "notes": [], "messages": [], "research": []}
+    if not terms:
+        return empty
     with tx() as c:
+        where, args = _every_word(terms, PAPER_FIELDS)
         papers = _rows(c.execute(
-            f"SELECT p.id, p.title, p.card FROM papers p WHERE {LISTED} "
-            "AND (p.id LIKE ? OR p.title LIKE ? OR p.abstract LIKE ? OR p.card LIKE ? OR p.report LIKE ?) LIMIT ?",
-            (like, like, like, like, like, limit),
-        ))
+            f"SELECT p.id, p.title, p.authors, p.abstract, p.card, p.report, pt.text AS fulltext FROM papers p "
+            f"LEFT JOIN paper_text pt ON pt.paper_id=p.id WHERE {LISTED} AND {where} LIMIT ?", (*args, limit)))
+        where, args = _every_word(terms, ["raw", "title", "snapshot_text", "author"])
         captures = _rows(c.execute(
-            "SELECT id, created_at, title, author, channel, substr(raw,1,200) AS raw FROM captures "
-            "WHERE raw LIKE ? OR title LIKE ? OR snapshot_text LIKE ? OR author LIKE ? ORDER BY created_at DESC LIMIT ?",
-            (like, like, like, like, limit),
-        ))
-        thoughts = _rows(c.execute(
-            "SELECT * FROM thoughts WHERE text LIKE ? ORDER BY created_at DESC LIMIT ?", (like, limit)
-        ))
-        notes = _rows(c.execute("SELECT * FROM notes WHERE text LIKE ? ORDER BY created_at DESC LIMIT ?", (like, limit)))
+            f"SELECT id, created_at, title, author, channel, source, substr(raw,1,200) AS raw FROM captures WHERE {where} "
+            f"ORDER BY created_at DESC LIMIT ?", (*args, limit)))
+        where, args = _every_word(terms, ["text", "gist"])
+        thoughts = _rows(c.execute(f"SELECT * FROM thoughts WHERE {where} ORDER BY created_at DESC LIMIT ?", (*args, limit)))
+        where, args = _every_word(terms, ["text"])
+        notes = _rows(c.execute(f"SELECT * FROM notes WHERE {where} ORDER BY created_at DESC LIMIT ?", (*args, limit)))
+        where, args = _every_word(terms, ["coalesce(nullif(m.text, ''), r.text, '')"])
+        messages = _rows(c.execute(
+            f"SELECT m.id, m.role, m.created_at, m.thread_id, t.scope, coalesce(nullif(m.text, ''), r.text) AS text "
+            f"FROM messages m JOIN threads t ON t.id=m.thread_id LEFT JOIN runs r ON r.id=m.run_id WHERE {where} "
+            f"ORDER BY m.created_at DESC LIMIT ?", (*args, limit)))
+        where, args = _every_word(terms, ["title", "summary", "body"])
+        research = _rows(c.execute(f"SELECT id, title, summary, stage, updated_at FROM research WHERE {where} "
+                                   f"ORDER BY updated_at DESC LIMIT ?", (*args, limit)))
     for p in papers:
-        card = p.pop("card")
+        card, report = p.pop("card"), p.pop("report")
+        fields = {"标题": p["title"], "编号": p["id"], "作者": " ".join(p["authors"] or []), "摘要": p.pop("abstract"),
+                  "快读卡": card and json.dumps(card, ensure_ascii=False), "深读报告": report and json.dumps(report, ensure_ascii=False),
+                  "原文": p.pop("fulltext")}
+        p["hits"] = [k for k, v in fields.items() if v and any(t.lower() in v.lower() for t in terms)]
+        if "原文" in p["hits"]:
+            texts = pages(p["id"])
+            n = next((i for i, text in enumerate(texts, 1) if any(t.lower() in text.lower() for t in terms)), None)
+            p["hit_page"], p["hit_text"] = n, n and _snippet(texts[n - 1], terms)
         p["tldr"] = card and card.get("tldr")
-    return {"papers": papers, "captures": captures, "thoughts": thoughts, "notes": notes}
+    for m in messages:
+        m["text"] = _snippet(m["text"], terms, 140)
+    return {**empty, "papers": papers, "captures": captures, "thoughts": thoughts, "notes": notes, "messages": messages,
+            "research": research}
