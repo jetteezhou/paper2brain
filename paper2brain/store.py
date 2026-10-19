@@ -17,7 +17,7 @@ TOPIC_TREE = [
     ("WAM", ["世界模型", "表征研究", "WAN base", "V-JEPA"]),
 ]
 TRIAGE = ("inbox", "deep", "archived", "ignored")
-JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch", "for_papers"}
+JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch", "for_papers", "tasks", "groups", "comparison", "charts", "figures", "cells", "design"}
 # WAITING: queued here until there is room to start it; the others are Cursor's own statuses of a live run.
 UNFINISHED = ("WAITING", "CREATING", "RUNNING", "QUEUED")
 _UNFINISHED_SQL = "('WAITING','CREATING','RUNNING','QUEUED')"
@@ -217,10 +217,52 @@ def _v9_material_roles(c):
     c.execute("ALTER TABLE research_links ADD COLUMN role TEXT")
 
 
+def _v10_overleaf(c):
+    """overleaf: id of the Overleaf project the research's paper is written in (checked out under overleaf/<id>)."""
+    c.execute("ALTER TABLE writing ADD COLUMN overleaf TEXT")
+
+
+def _v11_plans(c):
+    """A research's plan: an ordered list of tasks (rules.validate_plan); the agent's version waits as a proposal."""
+    c.execute("CREATE TABLE IF NOT EXISTS plans (research_id TEXT PRIMARY KEY REFERENCES research(id) ON DELETE CASCADE, "
+              "tasks TEXT NOT NULL DEFAULT '[]', proposal TEXT, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT, edited_by TEXT)")
+
+
+def _v12_related_work(c):
+    """A research's related work: lines of work (rules.validate_related); the agent's version waits as a proposal."""
+    c.execute("CREATE TABLE IF NOT EXISTS related_work (research_id TEXT PRIMARY KEY REFERENCES research(id) ON DELETE CASCADE, "
+              "groups TEXT NOT NULL DEFAULT '[]', proposal TEXT, revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT, edited_by TEXT)")
+
+
+def _v13_related_comparison(c):
+    """The related work's side-by-side table (rules.validate_comparison)."""
+    c.execute("ALTER TABLE related_work ADD COLUMN comparison TEXT")
+
+
+def _v14_experiment_charts(c):
+    """An experiment's charts: Chart.js configs whose numbers all come from the raw result (rules.validate_experiment)."""
+    c.execute("ALTER TABLE experiments ADD COLUMN charts TEXT")
+
+
+def _v15_expected_figures(c):
+    """A research's expected figures (rules.validate_figures; the agent's version waits as a proposal) and the
+    experiment results filling their cells (rules.validate_cells)."""
+    c.execute("CREATE TABLE IF NOT EXISTS exp_figures (research_id TEXT PRIMARY KEY REFERENCES research(id) ON DELETE CASCADE, "
+              "figures TEXT NOT NULL DEFAULT '[]', cells TEXT NOT NULL DEFAULT '[]', proposal TEXT, "
+              "revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT, edited_by TEXT)")
+
+
+def _v16_experiment_design(c):
+    """design: the Experimental Setup the expected figures share (rules.validate_setup)."""
+    c.execute("ALTER TABLE exp_figures ADD COLUMN design TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
-              _v7_discussion_tree, _v8_fork_point, _v9_material_roles]
+              _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
+              _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
+              _v16_experiment_design]
 
 
 def home():
@@ -1040,7 +1082,10 @@ def thread_for(scope=None, thread_id=None):
         t["scope_papers"] = _rows(c.execute(f"SELECT id, title FROM papers WHERE id IN ({_qs(ref.split('|'))})", ref.split("|"))) if kind == "papers" \
             else _rows(c.execute("SELECT p.id, p.title FROM capture_papers cp JOIN papers p ON p.id=cp.paper_id "
                                  "WHERE cp.capture_id=? AND cp.state='confirmed' ORDER BY cp.at", (ref,))) if kind in ("find", "capture") else []
-        t["proposal"] = kind == "research" and bool((c.execute("SELECT proposal FROM research WHERE id=?", (ref,)).fetchone() or [None])[0])
+        table = {"research": "research WHERE id=?", "writing": "writing WHERE research_id=?",
+                 "related": "related_work WHERE research_id=?", "plan": "plans WHERE research_id=?",
+                 "experiment": "exp_figures WHERE research_id=?"}.get(kind)
+        t["proposal"] = bool(table and (c.execute(f"SELECT proposal FROM {table}", (ref,)).fetchone() or [None])[0])
     forks = {}
     for ch in t["children"]:
         if ch["fork_message_id"]:
@@ -1141,7 +1186,7 @@ def _scope_title(c, scope):
     if kind == "anchor":
         r = c.execute("SELECT a.quote, p.title FROM anchors a JOIN papers p ON p.id=a.paper_id WHERE a.id=?", (ref,)).fetchone()
         return r and f"{r['title']} ·「{r['quote'][:40]}」"
-    if kind == "research":
+    if kind in ("research", "writing", "related", "plan", "code", "experiment"):
         return one("SELECT title FROM research WHERE id=?")
     if kind == "find":
         return one("SELECT raw FROM captures WHERE id=?")
@@ -1559,6 +1604,24 @@ def put_code_map(rid, repo_id, paper_id, commit, rows, by):
         _event(c, by, "codemap.put", rid, repo=repo_id, paper=paper_id)
 
 
+def diagram_dir(rid, name):
+    """Where a method diagram lives (paper2brain/diagram.py renders into it); name is the agent's slug."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", name or "") or not re.fullmatch(r"[\w-]+", rid or ""):
+        raise rules.Rejected("图的名字用小写英文、数字和连字符，例如 framework")
+    return home() / "diagrams" / rid / name
+
+
+def diagrams(rid):
+    """The research's method diagrams, newest first."""
+    root = home() / "diagrams" / rid
+    metas = [json.loads(p.read_text()) for p in root.glob("*/meta.json")] if root.is_dir() else []
+    return sorted(metas, key=lambda m: m["at"], reverse=True)
+
+
+def delete_diagram(rid, name):
+    shutil.rmtree(diagram_dir(rid, name), ignore_errors=True)
+
+
 def add_experiment(rid, raw, by, title=None):
     if not (raw or "").strip() and not (title or "").strip():
         raise rules.Rejected("实验记录至少要有原始结果或标题")
@@ -1574,14 +1637,15 @@ def add_experiment(rid, raw, by, title=None):
 
 
 def update_experiment(eid, by, base_rev=None, **fields):
-    """title / target / setup / results / conclusion / conclusion_text / status. The agent structures a record until
-    the user edits it; from then on the user's version stands (a fresh revision does not get the agent past that)."""
+    """title / target / setup / results / charts / conclusion / conclusion_text / status. The agent structures a record
+    until the user edits it; from then on the user's version stands (a fresh revision does not get the agent past that)."""
     if "status" in fields and fields["status"] not in EXPERIMENT_STATUS:
         raise rules.Rejected(f"未知状态：{fields['status']}")
     if fields.get("conclusion") not in (None, *CONCLUSIONS):
         raise rules.Rejected(f"结论只能是 {CONCLUSIONS}")
-    if "results" in fields:
-        fields["results"] = json.dumps(fields["results"] or [], ensure_ascii=False)
+    for k in ("results", "charts"):
+        if k in fields:
+            fields[k] = json.dumps(fields[k] or [], ensure_ascii=False)
     with tx() as c:
         cur = c.execute("SELECT revision, edited_by FROM experiments WHERE id=?", (eid,)).fetchone()
         if not cur:
@@ -1612,7 +1676,13 @@ def get_writing(rid):
     with tx() as c:
         w = _row(c.execute("SELECT * FROM writing WHERE research_id=?", (rid,)).fetchone())
     return w or {"research_id": rid, "abstract": None, "introduction": None, "proposal": None, "revision": 0,
-                 "updated_at": None, "edited_by": None}
+                 "updated_at": None, "edited_by": None, "overleaf": None}
+
+
+def set_overleaf(rid, project):
+    with tx() as c:
+        c.execute("INSERT OR IGNORE INTO writing (research_id, revision) VALUES (?, 0)", (rid,))
+        c.execute("UPDATE writing SET overleaf=? WHERE research_id=?", (project, rid))
 
 
 def update_writing(rid, base_rev=None, by="user", **sections):
@@ -1652,6 +1722,143 @@ def discard_writing(rid):
         c.execute("UPDATE writing SET proposal=NULL WHERE research_id=?", (rid,))
 
 
+def get_plan(rid):
+    with tx() as c:
+        p = _row(c.execute("SELECT * FROM plans WHERE research_id=?", (rid,)).fetchone())
+    return p or {"research_id": rid, "tasks": [], "proposal": None, "revision": 0, "updated_at": None, "edited_by": None}
+
+
+def update_plan(rid, tasks, by, base_rev=None):
+    """tasks: already checked by rules.validate_plan."""
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM plans WHERE research_id=?", (rid,)).fetchone()
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        c.execute("INSERT OR IGNORE INTO plans (research_id) VALUES (?)", (rid,))
+        c.execute("UPDATE plans SET tasks=?, updated_at=?, edited_by=?, revision=revision+1 WHERE research_id=?",
+                  (json.dumps(tasks, ensure_ascii=False), now(), by, rid))
+        return (cur["revision"] if cur else 0) + 1
+
+
+def propose_plan(rid, tasks, note, by, base_rev=None):
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM plans WHERE research_id=?", (rid,)).fetchone()
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        c.execute("INSERT OR IGNORE INTO plans (research_id) VALUES (?)", (rid,))
+        c.execute("UPDATE plans SET proposal=? WHERE research_id=?",
+                  (json.dumps({"tasks": tasks, "note": note, "by": by, "at": now()}, ensure_ascii=False), rid))
+
+
+def accept_plan(rid, base_rev=None):
+    p = get_plan(rid)["proposal"]
+    if not p:
+        raise rules.Rejected("没有待确认的计划修改稿")
+    update_plan(rid, p["tasks"], "agent", base_rev)
+    discard_plan(rid)
+
+
+def discard_plan(rid):
+    with tx() as c:
+        c.execute("UPDATE plans SET proposal=NULL WHERE research_id=?", (rid,))
+
+
+def get_figures(rid):
+    with tx() as c:
+        f = _row(c.execute("SELECT * FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
+    return f or {"research_id": rid, "design": None, "figures": [], "cells": [], "proposal": None, "revision": 0, "updated_at": None, "edited_by": None}
+
+
+def update_figures(rid, figures, by, base_rev=None, design=None):
+    """figures: already checked by rules.validate_figures; design (rules.validate_setup) None keeps the old setup.
+    Cells of rows, series or figures that are gone are dropped."""
+    keep = {(f["id"], r, s) for f in figures for r in f["rows"] for s in f["series"]}
+    with tx() as c:
+        cur = _row(c.execute("SELECT revision, cells FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        cells = [x for x in (cur["cells"] if cur else []) if (x["figure"], x["row"], x["series"]) in keep]
+        c.execute("INSERT OR IGNORE INTO exp_figures (research_id) VALUES (?)", (rid,))
+        c.execute("UPDATE exp_figures SET figures=?, cells=?, design=COALESCE(?, design), updated_at=?, edited_by=?, revision=revision+1 "
+                  "WHERE research_id=?", (json.dumps(figures, ensure_ascii=False), json.dumps(cells, ensure_ascii=False),
+                                          json.dumps(design, ensure_ascii=False) if design else None, now(), by, rid))
+        return (cur["revision"] if cur else 0) + 1
+
+
+def propose_figures(rid, figures, note, by, base_rev=None, design=None):
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM exp_figures WHERE research_id=?", (rid,)).fetchone()
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        c.execute("INSERT OR IGNORE INTO exp_figures (research_id) VALUES (?)", (rid,))
+        c.execute("UPDATE exp_figures SET proposal=? WHERE research_id=?",
+                  (json.dumps({"design": design, "figures": figures, "note": note, "by": by, "at": now()}, ensure_ascii=False), rid))
+
+
+def accept_figures(rid, base_rev=None):
+    p = get_figures(rid)["proposal"]
+    if not p:
+        raise rules.Rejected("没有待确认的实验设计修改稿")
+    update_figures(rid, p["figures"], "agent", base_rev, p.get("design"))
+    discard_figures(rid)
+
+
+def discard_figures(rid):
+    with tx() as c:
+        c.execute("UPDATE exp_figures SET proposal=NULL WHERE research_id=?", (rid,))
+
+
+def fill_cells(rid, cells):
+    """cells: already checked by rules.validate_cells; each replaces whatever filled that cell (experiment None clears it)."""
+    with tx() as c:
+        cur = _row(c.execute("SELECT cells FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
+        if not cur:
+            raise rules.Rejected("这个研究还没有实验设计")
+        key = lambda x: (x["figure"], x["row"], x["series"])  # noqa: E731
+        new = {key(x): x for x in cur["cells"]} | {key(x): x for x in cells}
+        c.execute("UPDATE exp_figures SET cells=? WHERE research_id=?",
+                  (json.dumps([x for x in new.values() if x["experiment"]], ensure_ascii=False), rid))
+
+
+def get_related(rid):
+    with tx() as c:
+        r = _row(c.execute("SELECT * FROM related_work WHERE research_id=?", (rid,)).fetchone())
+    return r or {"research_id": rid, "groups": [], "comparison": None, "proposal": None, "revision": 0, "updated_at": None, "edited_by": None}
+
+
+def update_related(rid, groups, by, base_rev=None, comparison=None):
+    """groups: already checked by rules.validate_related; comparison (rules.validate_comparison) None keeps the old table."""
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM related_work WHERE research_id=?", (rid,)).fetchone()
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        c.execute("INSERT OR IGNORE INTO related_work (research_id) VALUES (?)", (rid,))
+        c.execute("UPDATE related_work SET groups=?, comparison=COALESCE(?, comparison), updated_at=?, edited_by=?, revision=revision+1 "
+                  "WHERE research_id=?", (json.dumps(groups, ensure_ascii=False),
+                                          json.dumps(comparison, ensure_ascii=False) if comparison else None, now(), by, rid))
+        return (cur["revision"] if cur else 0) + 1
+
+
+def propose_related(rid, groups, note, by, base_rev=None, comparison=None):
+    with tx() as c:
+        cur = c.execute("SELECT revision FROM related_work WHERE research_id=?", (rid,)).fetchone()
+        rules.check_revision(cur["revision"] if cur else 0, base_rev)
+        c.execute("INSERT OR IGNORE INTO related_work (research_id) VALUES (?)", (rid,))
+        c.execute("UPDATE related_work SET proposal=? WHERE research_id=?",
+                  (json.dumps({"groups": groups, "comparison": comparison, "note": note, "by": by, "at": now()}, ensure_ascii=False), rid))
+
+
+def accept_related(rid, base_rev=None):
+    """The papers of the accepted lines of work become materials of the research."""
+    p = get_related(rid)["proposal"]
+    if not p:
+        raise rules.Rejected("没有待确认的相关工作修改稿")
+    update_related(rid, p["groups"], "agent", base_rev, p.get("comparison"))
+    discard_related(rid)
+    for pid in dict.fromkeys(pid for g in p["groups"] for pid in g["papers"]):
+        link_research(rid, "paper", pid, "agent")
+
+
+def discard_related(rid):
+    with tx() as c:
+        c.execute("UPDATE related_work SET proposal=NULL WHERE research_id=?", (rid,))
+
+
 def add_doc(rid, filename, mime, data, text, by):
     """A file the user brought when starting a research: their own draft, notes, a whiteboard photo."""
     did = new_id()
@@ -1685,7 +1892,8 @@ def research_extras(rid):
                 runs.setdefault(r["ref"], []).append(r)
     for e in exps:
         e["runs"] = runs.get(e["id"], [])
-    return {"repos": repos, "code_maps": maps, "experiments": exps, "writing": get_writing(rid)}
+    return {"repos": repos, "code_maps": maps, "experiments": exps, "writing": get_writing(rid), "plan": get_plan(rid),
+            "related": get_related(rid), "figures": get_figures(rid), "diagrams": diagrams(rid)}
 
 
 # ---------- anchored discussions (selected text in a card, report or PDF) ----------

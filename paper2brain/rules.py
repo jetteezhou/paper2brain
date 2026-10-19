@@ -1,6 +1,8 @@
 """Pure write rules. No I/O: callers pass in the current state, these decide whether a write may land."""
 import re
 import unicodedata
+import uuid
+from datetime import date
 
 
 class Rejected(ValueError):
@@ -204,6 +206,45 @@ def _numbers(text):
     return {float(n) for n in _NUM.findall((text or "").replace(",", ""))}
 
 
+CHART_TYPES = ("bar", "line", "scatter", "bubble", "pie", "doughnut", "radar", "polarArea")
+
+
+def _experiment_charts(charts, seen, errors):
+    """Chart.js configs {title, type, data: {labels, datasets: [{label, data}]}, options}. Plotted values and numeric
+    labels (x positions) must appear in the raw result; options pass through (JSON carries no callbacks)."""
+    if not isinstance(charts or [], list):
+        errors.append("charts 必须是数组 [{title, type, data, options}]")
+        return []
+    out = []
+    for i, ch in enumerate(charts or [], 1):
+        data = ch.get("data") if isinstance(ch, dict) else None
+        if not isinstance(data, dict) or ch.get("type") not in CHART_TYPES:
+            errors.append(f"charts 第 {i} 张需要 type（{' / '.join(CHART_TYPES)}）和 data")
+            continue
+        labels, sets = data.get("labels") or [], data.get("datasets")
+        if not isinstance(labels, list) or not isinstance(sets, list) or not sets \
+                or not all(isinstance(d, dict) and isinstance(d.get("data"), list) for d in sets):
+            errors.append(f"charts 第 {i} 张的 data 需要 labels 数组和非空 datasets [{{label, data: [...]}}]")
+            continue
+        nums, bad = [str(x) for x in labels if _NUM.fullmatch(str(x).strip())], False
+        for d in sets:
+            for p in d["data"]:
+                pts = p.values() if isinstance(p, dict) else [p]
+                if any(v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))) for v in pts):
+                    bad = True
+                nums += [str(v) for v in pts if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if bad:
+            errors.append(f"charts 第 {i} 张的数据点只能是数字、null 或 {{x, y}}")
+        missing = sorted({float(n) for n in nums} - seen)
+        if missing:
+            errors.append(f"charts 第 {i} 张（{ch.get('title') or ch['type']}）的数字 {missing} 在原始结果里找不到")
+        if not isinstance(ch.get("options") or {}, dict):
+            errors.append(f"charts 第 {i} 张的 options 必须是对象")
+        out.append({"title": str(ch.get("title") or "").strip() or None, "type": ch["type"],
+                    "data": {"labels": labels, "datasets": sets}, "options": ch.get("options") or {}})
+    return out
+
+
 def validate_experiment(draft, raw, context=""):
     """The agent's structured version of a pasted result. Every number in the results must appear in the raw input,
     so a figure can never be invented on the way from the log to the results table. The conclusion may also cite
@@ -233,6 +274,7 @@ def validate_experiment(draft, raw, context=""):
         if missing:
             errors.append(f"results 第 {i} 条（{r['name']}）的数字 {missing} 在原始结果里找不到")
         out["results"].append({"name": str(r["name"]).strip(), "value": str(r["value"]).strip(), "note": (r.get("note") or "").strip() or None})
+    out["charts"] = _experiment_charts(draft.get("charts"), seen, errors)
     allowed = seen | _numbers(context) | {n for r in out["results"] for n in _numbers(r["value"])}
     extra = [n for n in _numbers(out["conclusion_text"]) if n not in allowed]
     if extra:
@@ -292,6 +334,278 @@ def validate_writing_draft(draft, known_papers):
     if draft.get("note"):
         out["note"] = str(draft["note"]).strip()
     return out
+
+
+PLAN_STATUS = ("todo", "doing", "done")
+
+
+def validate_plan(tasks):
+    """A research plan, the user's or the agent's: an ordered list of tasks. A task keeps its id, so a draft can be
+    compared with the plan task by task; new tasks get one here."""
+    if not isinstance(tasks, list) or len(tasks) > 80:
+        raise Rejected("计划必须是任务列表（最多 80 条）")
+    out, errors, seen = [], [], set()
+    for i, t in enumerate(tasks, 1):
+        title = str((t or {}).get("title") or "").strip() if isinstance(t, dict) else ""
+        if not title:
+            errors.append(f"第 {i} 条缺少 title")
+            continue
+        status, due = t.get("status") or "todo", t.get("due") or None
+        if status not in PLAN_STATUS:
+            errors.append(f"第 {i} 条 status 只能是 {' / '.join(PLAN_STATUS)}")
+        if due is not None:
+            try:
+                date.fromisoformat(due)
+            except (TypeError, ValueError):
+                errors.append(f"第 {i} 条 due 要写成 YYYY-MM-DD")
+        tid = str(t.get("id") or "") or uuid.uuid4().hex[:8]
+        if tid in seen:
+            errors.append(f"第 {i} 条 id 重复：{tid}")
+        seen.add(tid)
+        out.append({"id": tid, "title": title[:200], "status": status, "due": due, "note": str(t.get("note") or "").strip() or None})
+    if errors:
+        raise Rejected("计划未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+FIGURE_KINDS = ("table", "bar", "line", "radar")
+# The parts of a paper's Experiments section, in the order they appear.
+FIGURE_SECTIONS = ("main", "ablation", "analysis", "appendix")
+
+
+def _named(items, what, errors, extra=(), most=8, least=1):
+    """[{name, ...}] with unique non-empty names; extra: the other keys kept (stripped strings). A note is a line in
+    the paper's setup, not an essay."""
+    out = []
+    for it in items if isinstance(items, list) else []:
+        name = str((it or {}).get("name") or "").strip()[:60] if isinstance(it, dict) else ""
+        if name:
+            out.append({"name": name, **{k: str(it.get(k) or "").strip() or None for k in extra}})
+    names = [x["name"] for x in out]
+    if not least <= len(out) <= most or len(set(names)) < len(names):
+        errors.append(f"setup.{what} 要有 {least}-{most} 项，name 不能重复")
+    long = [x["name"] for x in out if len(x.get("note") or "") > 150]
+    if long:
+        errors.append(f"setup.{what} 的 note 每条不超过 150 字（论文里的一句话），过长：{long}")
+    return out
+
+
+def _calls_itself(name, text):
+    """Whether a paper's own words (title, opening pages) use this name for the method; "π0 (5Hz)" counts as π0."""
+    core = re.sub(r"\s*\(.*?\)\s*", " ", name).strip().lower()
+    squash = lambda s: re.sub(r"[\s\-_]+", "", s.lower())  # noqa: E731
+    return bool(core) and squash(core) in squash(text or "")
+
+
+def validate_setup(setup, known_papers=(), paper_words=None):
+    """The Experimental Setup a paper opens its experiments with, declared once so every figure uses the same
+    names: research questions, benchmarks, baselines (published methods, each a library paper), controls (our own
+    variants and simple heuristics), metrics (with which direction is better), our method's name."""
+    s = setup if isinstance(setup, dict) else {}
+    errors = []
+    questions = [str(q).strip() for q in s.get("questions") or [] if str(q).strip()] if isinstance(s.get("questions"), list) else []
+    if not 1 <= len(questions) <= 5 or any(len(q) > 200 for q in questions):
+        errors.append("setup.questions 要有 1-5 个研究问题（论文里的 Q1、Q2……），每个不超过 200 字")
+    method = str(s.get("method") or "").strip()[:40]
+    if not method:
+        errors.append("setup.method 写我们的方法在表里的名字")
+    out = {"questions": questions, "method": method, "benchmarks": _named(s.get("benchmarks"), "benchmarks", errors, ("note",), 6),
+           "baselines": _named(s.get("baselines"), "baselines", errors, ("paper", "note"), 6, 2),
+           "controls": _named(s.get("controls"), "controls", errors, ("note",), 6, 0),
+           "metrics": _named(s.get("metrics"), "metrics", errors, ("unit", "better"), 6),
+           "implementation": str(s.get("implementation") or "").strip() or None}
+    bad = [m["name"] for m in out["metrics"] if m["better"] not in ("higher", "lower")]
+    if bad:
+        errors.append(f"setup.metrics 的 better 只能是 higher / lower：{bad}")
+    unknown = [b["name"] for b in out["baselines"] if (parse_pid(b["paper"] or "") or b["paper"]) not in known_papers]
+    if unknown:
+        errors.append(f"setup.baselines 必须是已发表的方法，paper 写库里的论文 id：{unknown}"
+                      "（自己方法的变体、固定周期这类简单对照放 controls；论文不在库里先 ./p2b fetch）")
+    for b in out["baselines"]:
+        b["paper"] = parse_pid(b["paper"] or "") or b["paper"]
+    if paper_words and not unknown:
+        renamed = [f"{b['name']}（{b['paper']}）" for b in out["baselines"] if not _calls_itself(b["name"], paper_words(b["paper"]))]
+        if renamed:
+            errors.append(f"setup.baselines 要用论文自己的方法名，这些名字在论文标题和开头几页里找不到：{renamed}"
+                          "（借了论文思路的自己的变体放 controls）")
+    names = [method] + [x["name"] for k in ("baselines", "controls") for x in out[k]]
+    if len(set(names)) < len(names):
+        errors.append("method、baselines、controls 的名字不能重复")
+    if len(out["implementation"] or "") > 800:
+        errors.append("setup.implementation 不超过 800 字：只写论文 Implementation Details 段落的要点，评测协议写进各基准的 note")
+    if errors:
+        raise Rejected("实验设置未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+def validate_figures(figures, context="", setup=None):
+    """The figures and tables the paper is expected to show, planned before the experiments run: a grid of rows ×
+    series whose cells experiments fill later (validate_cells). Each sits in a part of the Experiments section,
+    answers one of the setup's questions and uses its names. No measured numbers here; a target line may only
+    use a number from the research's elements (the success line in the validation plan)."""
+    if not setup:
+        raise Rejected("先定实验设置（setup）：研究问题、基准、对比方法、指标")
+    if not isinstance(figures, list) or len(figures) > 12:
+        raise Rejected("预期图表必须是列表（最多 12 张）")
+    out, errors, seen = [], [], set()
+    allowed = _numbers(context)
+    methods = [b["name"] for k in ("baselines", "controls") for b in setup.get(k) or []] + [setup["method"]]
+    metrics = [m["name"] for m in setup["metrics"]]
+    for i, f in enumerate(figures, 1):
+        f = f if isinstance(f, dict) else {}
+        title = str(f.get("title") or "").strip()
+        if not title:
+            errors.append(f"第 {i} 张缺少 title")
+            continue
+        if f.get("kind") not in FIGURE_KINDS:
+            errors.append(f"「{title}」kind 只能是 {' / '.join(FIGURE_KINDS)}")
+        if f.get("section") not in FIGURE_SECTIONS:
+            errors.append(f"「{title}」section 只能是 {' / '.join(FIGURE_SECTIONS)}")
+        if f.get("question") not in range(1, len(setup["questions"]) + 1):
+            errors.append(f"「{title}」question 写它回答 setup.questions 里的第几个（1-{len(setup['questions'])}）")
+        if not str(f.get("caption") or "").strip():
+            errors.append(f"「{title}」缺少 caption（论文里的图注 / 表注）")
+        rows, series = ([str(v).strip()[:60] for v in f.get(k) or []] if isinstance(f.get(k), list) else [] for k in ("rows", "series"))
+        if not 1 <= len(rows) <= 40 or not all(rows) or len(set(rows)) < len(rows):
+            errors.append(f"「{title}」rows 要有 1-40 个不重复的非空名字")
+        if not 1 <= len(series) <= 12 or not all(series) or len(set(series)) < len(series):
+            errors.append(f"「{title}」series 要有 1-12 个不重复的非空名字")
+        metric = f.get("metric") or None
+        if metric is None and not (series and all(s in metrics for s in series)):
+            errors.append(f"「{title}」metric 写 setup.metrics 里的一个（只有 series 全是指标时可以省略）")
+        elif metric is not None and metric not in metrics:
+            errors.append(f"「{title}」metric「{metric}」不在 setup.metrics 里")
+        if f.get("section") in ("main", "ablation"):
+            dims = [d for d in (rows, series) if setup["method"] in d]
+            if not dims:
+                errors.append(f"「{title}」{'主结果' if f['section'] == 'main' else '消融'}要包含我们的方法「{setup['method']}」")
+            elif f["section"] == "main":
+                unknown = [v for v in dims[0] if v not in methods]
+                if unknown:
+                    errors.append(f"「{title}」主结果里的方法 {unknown} 不在 setup.baselines / controls 里")
+                elif not any(b["name"] in dims[0] for b in setup["baselines"]):
+                    errors.append(f"「{title}」主结果要和已发表的 baseline 比，不能只有自己的变体和对照")
+        target = f.get("target") or None
+        if target is not None:
+            v = target.get("value") if isinstance(target, dict) else None
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                errors.append(f"「{title}」target 写成 {{value: 数字, label: 说明}}")
+            elif float(v) not in allowed:
+                errors.append(f"「{title}」target 的 {v} 在研究三要素里找不到（成功线要先写进验证方案）")
+            else:
+                target = {"value": v, "label": str(target.get("label") or "").strip()[:40] or None}
+        fid = str(f.get("id") or "") or uuid.uuid4().hex[:8]
+        if fid in seen:
+            errors.append(f"第 {i} 张 id 重复：{fid}")
+        seen.add(fid)
+        out.append({"id": fid, "title": title[:80], "kind": f.get("kind"), "section": f.get("section"), "question": f.get("question"),
+                    "caption": str(f.get("caption") or "").strip(), "claim": str(f.get("claim") or "").strip() or None, "metric": metric,
+                    "rows": rows, "series": series, "x_title": str(f.get("x_title") or "").strip() or None,
+                    "y_title": str(f.get("y_title") or "").strip() or None, "target": target})
+    if errors:
+        raise Rejected("预期图表未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+def check_coverage(setup, figures):
+    """What the whole Experiments section owes the reader, checked on the agent's drafts: every research question
+    is answered by a figure, every baseline appears in the main results."""
+    errors = [f"研究问题 Q{i} 没有图表回答：补一张，或删掉这个问题" for i in range(1, len(setup["questions"]) + 1)
+              if i not in {f["question"] for f in figures}]
+    main = {v for f in figures if f["section"] == "main" for v in f["rows"] + f["series"]}
+    missing = [b["name"] for b in setup["baselines"] if b["name"] not in main]
+    if missing:
+        errors.append(f"baseline {missing} 没进主结果：论文的主表要和全部 baseline 比，比不了的从 baselines 里删掉并在回复里说明原因")
+    if errors:
+        raise Rejected("实验设计未通过校验：\n- " + "\n- ".join(errors))
+
+
+def validate_cells(cells, figures, experiments):
+    """Which experiment result fills which cell of an expected figure: a pointer, never a number, so the value
+    always comes from that experiment's checked results. experiment null clears the cell."""
+    if not isinstance(cells, list):
+        raise Rejected("cells 必须是数组 [{figure, row, series, experiment, result}]")
+    figs, exps = {f["id"]: f for f in figures}, {e["id"]: e for e in experiments}
+    out, errors = [], []
+    for i, c in enumerate(cells, 1):
+        c = c if isinstance(c, dict) else {}
+        f, eid = figs.get(c.get("figure")), c.get("experiment")
+        if not f:
+            errors.append(f"第 {i} 格：没有 id 为 {c.get('figure')} 的预期图表")
+            continue
+        if c.get("row") not in f["rows"] or c.get("series") not in f["series"]:
+            errors.append(f"第 {i} 格：「{f['title']}」没有 row={c.get('row')} / series={c.get('series')}")
+            continue
+        if eid is not None:
+            e = exps.get(eid)
+            if not e:
+                errors.append(f"第 {i} 格：这个研究里没有实验 {eid}")
+                continue
+            if c.get("result") not in [r["name"] for r in e.get("results") or []]:
+                errors.append(f"第 {i} 格：实验 {eid} 的 results 里没有「{c.get('result')}」（先整理那条实验）")
+                continue
+        out.append({"figure": f["id"], "row": c["row"], "series": c["series"], "experiment": eid, "result": eid and c["result"]})
+    if errors:
+        raise Rejected("图表格子未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+def validate_related(groups, known_papers):
+    """Related work as lines of work: each names library papers, a paragraph for the paper's Related Work section,
+    and one sentence on how this research differs. A group keeps its id across drafts, as plan tasks do."""
+    if not isinstance(groups, list) or len(groups) > 12:
+        raise Rejected("相关工作必须是方向列表（最多 12 条）")
+    out, errors, seen = [], [], set()
+    for i, g in enumerate(groups, 1):
+        g = g if isinstance(g, dict) else {}
+        name, text = str(g.get("name") or "").strip(), str(g.get("text") or "").strip()
+        if not name:
+            errors.append(f"第 {i} 条缺少 name")
+            continue
+        papers = list(dict.fromkeys(parse_pid(str(p)) or str(p) for p in g.get("papers") or [])) if isinstance(g.get("papers"), list) else []
+        if not papers:
+            errors.append(f"「{name}」至少要列一篇论文（papers）")
+        missing = sorted({p for p in papers + [parse_pid(m) for m in _PAPER_CITE.findall(text)] if p and p not in known_papers})
+        if missing:
+            errors.append(f"「{name}」用到了库里没有的论文：{missing}（先用 ./p2b fetch 入库，或去掉）")
+        gid = str(g.get("id") or "") or uuid.uuid4().hex[:8]
+        if gid in seen:
+            errors.append(f"第 {i} 条 id 重复：{gid}")
+        seen.add(gid)
+        out.append({"id": gid, "name": name[:80], "papers": papers, "text": text or None, "diff": str(g.get("diff") or "").strip() or None})
+    if errors:
+        raise Rejected("相关工作未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+def validate_comparison(table, groups):
+    """The side-by-side table of the closest works and ours: columns are dimensions, each row a paper from the
+    groups (or "ours", exactly once) with one short cell per column. None means the table is left as it is."""
+    if table is None:
+        return None
+    t = table if isinstance(table, dict) else {}
+    cols = [str(c).strip()[:40] for c in t.get("columns") or []] if isinstance(t.get("columns"), list) else []
+    rows = t.get("rows") if isinstance(t.get("rows"), list) else []
+    if not 2 <= len(cols) <= 8 or not all(cols):
+        raise Rejected("对比表 columns 要有 2-8 个非空维度")
+    if not 2 <= len(rows) <= 16:
+        raise Rejected("对比表 rows 要有 2-16 行（最接近的工作 + 一行 ours）")
+    in_groups = {p for g in groups for p in g["papers"]}
+    out, errors = [], []
+    for i, r in enumerate(rows, 1):
+        r = r if isinstance(r, dict) else {}
+        paper = "ours" if r.get("paper") == "ours" else parse_pid(str(r.get("paper") or "")) or str(r.get("paper") or "")
+        cells = [str(c).strip()[:120] for c in r.get("cells") or []] if isinstance(r.get("cells"), list) else []
+        if paper != "ours" and paper not in in_groups:
+            errors.append(f"第 {i} 行的论文 {paper or '（空）'} 不在任何方向的 papers 里")
+        if len(cells) != len(cols):
+            errors.append(f"第 {i} 行有 {len(cells)} 格，应和 columns 一样是 {len(cols)} 格")
+        out.append({"paper": paper, "name": str(r.get("name") or "").strip()[:40] or None, "cells": cells})
+    if [r["paper"] for r in out].count("ours") != 1:
+        errors.append('要有且只有一行 "paper": "ours"')
+    if errors:
+        raise Rejected("对比表未通过校验：\n- " + "\n- ".join(errors))
+    return {"columns": cols, "rows": out}
 
 
 def check_link(existing, by):

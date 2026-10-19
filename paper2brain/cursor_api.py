@@ -551,11 +551,55 @@ def scope_text(scope):
         )
     if kind == "research":
         x = store.get_research(ref)
+        paper = (f"这个研究关联了 Overleaf 项目（`./p2b overleaf show {ref}` 给出本地目录）；用户要改论文时，按 librarian/writing.md "
+                 f"的“改 Overleaf 论文”一节直接改本地文件，不要 commit 或 push。") if x and x["writing"]["overleaf"] else ""
         return (
-            f"研究《{x['title'] if x else ''}》（{ref}）。先运行 `./p2b research show {ref}` 看三要素和素材，再读相关论文；"
-            f"和用户一起把研究问题、研究方法、验证方案推敲清楚。用户要求调整时，按 librarian/research.md 用 propose 提交修改稿，"
-            f"由用户确认；不要声称研究已确立。问到实现细节时读关联的代码仓库（librarian/code.md，只读）；"
-            f"讨论摘要或引言时按 librarian/writing.md 提交写作修改稿。"
+            f"研究《{x['title'] if x else ''}》（{ref}）。再读 librarian/research.md，你是这个研究的合作研究者，按其中“研究讨论”一节做："
+            f"先运行 `./p2b research show {ref}` 看三要素、素材、计划、实验和写作的现状；每一轮都让研究更清楚、更可做或更接近结果；"
+            f"共识要落到研究页上时，三要素、计划、写作都只提交修改稿，由用户确认，不要声称研究已确立。"
+            f"今天是 {datetime.now():%Y-%m-%d}。{paper}"
+        )
+    if kind == "writing":
+        x = store.get_research(ref)
+        paper = (f"论文在 Overleaf 写（`./p2b overleaf show {ref}` 给出本地目录），要改正文时按 librarian/writing.md 的“改 Overleaf 论文”一节"
+                 f"直接改本地文件，不要 commit 或 push。") if x and x["writing"]["overleaf"] else ""
+        return (
+            f"研究《{x['title'] if x else ''}》（{ref}）的**写作讨论**：这里只迭代论文怎么写。再读 librarian/writing.md，"
+            f"先运行 `./p2b writing show {ref}` 和 `./p2b research show {ref}` 看草稿、三要素和实验记录；摘要与引言用 `./p2b writing propose` "
+            f"提交修改稿，Related Work 用 `./p2b related propose`（见 librarian/related.md）。{paper}"
+            f"不要提交三要素或计划的修改稿；写作中发现三要素有问题，指出来，请用户到研究的概览讨论里调整。"
+        )
+    if kind == "related":
+        x = store.get_research(ref)
+        return (
+            f"研究《{x['title'] if x else ''}》（{ref}）的**相关工作讨论**：这里只维护相关工作（研究方向分组、每条的 Related Work 段落和我们的区别，以及和最接近工作的对比表）。"
+            f"再读 librarian/related.md，先运行 `./p2b related show {ref}` 和 `./p2b research show {ref}` 看现有方向、三要素和素材；"
+            f"缺的论文先补找入库，改动（包括对比表，写进 `comparison` 字段）用 `./p2b related propose` 提交修改稿，"
+            f"不要只把表或段落贴在回复里。不要提交三要素、计划或写作的修改稿；"
+            f"发现新颖性有风险或三要素要调整，指出来，请用户到研究的概览讨论里调整。"
+        )
+    if kind == "plan":
+        x = store.get_research(ref)
+        return (
+            f"研究《{x['title'] if x else ''}》（{ref}）的**计划讨论**：这里只排任务、看进度、对截止。再读 librarian/plan.md，"
+            f"先运行 `./p2b plan show {ref}` 和 `./p2b research show {ref}` 看现有任务、三要素、实验和写作进度；改动用 `./p2b plan propose` "
+            f"提交修改稿。今天是 {datetime.now():%Y-%m-%d}。不要提交三要素、写作或相关工作的修改稿；发现三要素要调整，指出来，请用户到研究的概览讨论里调整。"
+        )
+    if kind == "code":
+        x = store.get_research(ref)
+        return (
+            f"研究《{x['title'] if x else ''}》（{ref}）的**代码讨论**：这里只围绕关联的代码仓库——复现细节、方法从哪里接进去、论文和代码的出入。"
+            f"再读 librarian/code.md（尤其“讨论时读代码”一节），先运行 `./p2b research show {ref}` 看仓库和已有的方法—代码对照，"
+            f"用 `./p2b repo <仓库 id>` 拿本地路径后只读地看代码；回答引用文件路径和行号。仓库只读，绝不修改、提交或推送。"
+            f"不要提交三要素、计划或写作的修改稿。"
+        )
+    if kind == "experiment":
+        x = store.get_research(ref)
+        return (
+            f"研究《{x['title'] if x else ''}》（{ref}）的**实验讨论**：这里只围绕实验——设计预期图表和下一个实验、解读结果、判断它支持还是反驳三要素。"
+            f"再读 librarian/experiment.md，先运行 `./p2b research show {ref}` 看三要素、预期图表（`figures`）和已有实验记录；用户贴来新结果时按其中步骤用 "
+            f"`./p2b experiment add` 记下、整理并填进预期图表的格子；要增删改预期图表时用 `./p2b figures-plan propose` 提交修改稿。"
+            f"数字只能出自原始结果。不要提交三要素、计划或写作的修改稿；结论动摇了三要素，指出来，请用户到研究的概览讨论里调整。"
         )
     return "整个论文库。用 `./p2b search` 和 `./p2b papers` 检索。"
 
@@ -563,6 +607,8 @@ def scope_text(scope):
 # Follow-ups sent from the web start with this, so the agent can tell them from what the user types in the Cursor app
 # (those it logs back with ./p2b discuss log; see librarian/README.md).
 WEB_MARK = "（网页讨论）"
+# Long-lived agents read the spec once; each follow-up points back at its current version so new fields reach them.
+LAND_SPECS = ("research", "writing", "related", "plan", "experiment")
 
 
 def discuss(scope, text, thread_id=None, start=False, images=()):
@@ -577,7 +623,9 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
             store.set_thread_agent(thread["id"], agent)
             thread["agent_id"] = agent
     if thread["agent_id"] and any(m["run_id"] for m in thread["messages"]):
-        prompt, name = WEB_MARK + text, None
+        spec = next((k for k in LAND_SPECS if scope.startswith(k + ":")), None)
+        prompt, name = WEB_MARK + text + (f"\n\n（要落到研究页上的改动，先重读 librarian/{spec}.md 的当前版本，"
+                                          f"按其中格式用 propose 提交修改稿，不要只贴在回复里。）" if spec else ""), None
     else:
         opening = "这是研究的开端：按 librarian/research.md 的“开启研究”一节处理。\n" if start else ""
         up = thread["parent"]
@@ -706,37 +754,98 @@ def card_pending():
 def structure_experiment(eid):
     e = store.get_experiment(eid)
     text = (
-        f"先读 librarian/README.md 和 librarian/experiment.md，整理实验 {eid}（属于研究 {e['research_id']}），"
-        f"用 ./p2b experiment put {eid} --base-rev {e['revision']} 提交，直到校验通过。"
+        f"先读 librarian/README.md 和 librarian/experiment.md，整理实验 {eid}（属于研究 {e['research_id']}）：对照验证方案的成功线下结论，"
+        f"用 ./p2b experiment put {eid} --base-rev {e['revision']} 提交，直到校验通过；"
+        f"研究有预期图表时，再按“填预期图表”一节用 ./p2b figures-plan fill {e['research_id']} 把这条实验的结果填进对应格子。"
     )
     return start_async("experiment", eid, text, name=f"整理实验：{(e['title'] or e['raw'])[:40]}")
+
+
+def draft_figures(rid, instruction=None):
+    f, x = store.get_figures(rid), store.get_research(rid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/experiment.md，按“实验设计”一节为研究 {rid}《{x['title']}》"
+        f"{'更新' if f['figures'] else '设计'}实验，按论文 Experiments 一节组织：先定实验设置（研究问题、基准、对比方法、指标），"
+        f"再设计主结果、消融、分析各要放的图表，每张回答一个研究问题、配好论文图注。"
+        f"主结果必须和已发表的方法比（相关工作对比表里最接近的工作和领域最强的方法），自己方法的变体只算内部对照，"
+        f"用 ./p2b figures-plan propose {rid} --base-rev {f['revision']} 提交，直到校验通过。"
+        + (f"\n用户的要求：{instruction}" if instruction else "")
+    )
+    return start_async("figures", rid, text, name=f"预期图表：{x['title'][:50]}")
+
+
+def fill_figures(rid):
+    x = store.get_research(rid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/experiment.md，按“填预期图表”一节，把研究 {rid}《{x['title']}》已有实验记录的结果"
+        f"填进预期图表的格子：./p2b figures-plan fill {rid}，直到校验通过。只填有对应结果的格子，没有的留空。"
+    )
+    return start_async("figures", rid, text, name=f"填预期图表：{x['title'][:50]}")
 
 
 def code_map(rid, repo_id, pid):
     repo, paper = store.get_repo(repo_id), store.get_paper(pid)
     text = (
         f"先读 librarian/README.md 和 librarian/code.md，为研究 {rid} 做论文 {pid}《{paper['title']}》"
-        f"和代码仓库 {repo['name']}（仓库 id {repo_id}，本地路径 {repo['path']}）的方法—代码对照，"
-        f"用 ./p2b codemap put 提交，直到校验通过。仓库只读，不要修改任何文件。"
+        f"和代码仓库 {repo['name']}（仓库 id {repo_id}，本地路径 {repo['path']}）的方法—代码对照："
+        f"复现关键细节一个不漏、按影响排序，并标出研究方法的切入点。用 ./p2b codemap put 提交，直到校验通过。仓库只读，不要修改任何文件。"
     )
     return start_async("codemap", rid, text, name=f"方法—代码对照：{repo['name']}")
+
+
+def draw_diagram(rid, instruction=None, name=None, kind="method"):
+    x, what = store.get_research(rid), {"method": "方法框架图", "motivation": "动机图"}[kind]
+    text = (
+        f"先读 librarian/README.md 和 librarian/diagram.md，为研究 {rid}《{x['title']}》"
+        + (f"修改{what} {name}（./p2b diagram list {rid} 里有它的源文件，改完用同一个 --name 渲染覆盖）" if name
+           else f"画论文的{what}（--kind {kind}）")
+        + "，要达到大厂技术报告的插图水准："
+        + ("先从研究问题、核心洞见和相关工作弄清要讲的对比" if kind == "motivation" else "先从研究方法、代码对照和关联仓库弄清结构")
+        + "，写 HTML/SVG，用 ./p2b diagram render 渲染，再打开渲染出的 PNG 按检查清单逐条看、改、重新渲染，直到挑不出毛病。"
+        "仓库只读，不要修改任何文件。"
+        + (f"\n用户的要求：{instruction}" if instruction else "")
+    )
+    return start_async("diagram" if kind == "method" else "motivation", rid, text, name=f"{'改' if name else '画'}{what}：{x['title'][:50]}")
 
 
 def draft_writing(rid, instruction=None):
     w, x = store.get_writing(rid), store.get_research(rid)
     text = (
-        f"先读 librarian/README.md 和 librarian/writing.md，为研究 {rid}《{x['title']}》起草或修改摘要和引言，"
+        f"先读 librarian/README.md 和 librarian/writing.md，按“摘要与引言草稿”一节为研究 {rid}《{x['title']}》"
+        f"{'修改' if w['abstract'] or w['introduction'] else '起草'}摘要和引言（数字只来自实验记录），"
         f"用 ./p2b writing propose {rid} --base-rev {w['revision']} 提交，直到校验通过。"
         + (f"\n用户的要求：{instruction}" if instruction else "")
     )
     return start_async("writing", rid, text, name=f"写作：{x['title'][:50]}")
 
 
+def draft_related(rid):
+    r, x = store.get_related(rid), store.get_research(rid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/related.md，为研究 {rid}《{x['title']}》{'更新' if r['groups'] else '梳理'}相关工作"
+        f"（分成几条研究方向，每条说清这条线做到哪、局限在哪、我们差在哪，并附一张最接近的工作和我们的对比表），"
+        f"用 ./p2b related propose {rid} --base-rev {r['revision']} 提交，直到校验通过。"
+    )
+    return start_async("related", rid, text, name=f"相关工作：{x['title'][:50]}")
+
+
+def draft_plan(rid, instruction=None):
+    p, x = store.get_plan(rid), store.get_research(rid)
+    text = (
+        f"先读 librarian/README.md 和 librarian/plan.md，为研究 {rid}《{x['title']}》{'按实验记录更新进度、必要时重排' if p['tasks'] else '制定'}计划"
+        f"（先验证最大的风险，每条任务做没做完一眼看得出），"
+        f"用 ./p2b plan propose {rid} --base-rev {p['revision']} 提交，直到校验通过。今天是 {datetime.now():%Y-%m-%d}。"
+        + (f"\n用户的要求：{instruction}" if instruction else "")
+    )
+    return start_async("plan", rid, text, name=f"计划：{x['title'][:50]}")
+
+
 def draft_research(rid):
     x = store.get_research(rid)
     text = (
-        f"先读 librarian/README.md 和 librarian/research.md，为研究 {rid}《{x['title']}》起草三要素修改稿，"
-        f"用 ./p2b research propose {rid} --base-rev {x['revision']} 提交，直到校验通过。修改稿由用户确认后才生效。"
+        f"先读 librarian/README.md 和 librarian/research.md，按“起草三要素”一节为研究 {rid}《{x['title']}》起草三要素修改稿："
+        f"对照“好的研究长什么样”逐条写，素材没覆盖的写“待确认”。用 ./p2b research propose {rid} --base-rev {x['revision']} 提交，"
+        f"直到校验通过。修改稿由用户确认后才生效。"
     )
     return start_async("draft", rid, text, name=f"起草研究：{x['title'][:60]}")
 

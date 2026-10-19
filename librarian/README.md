@@ -49,8 +49,13 @@ paper2brain 发给你的任务都以"先读 librarian/""你是 paper2brain"或"�
 ./p2b research propose <研究 id> --file /tmp/research.json --base-rev N   # 修改稿，用户确认后才生效
 ./p2b repo <仓库 id>                    # 只读代码仓库：本地路径、commit、最近提交（见 librarian/code.md）
 ./p2b codemap put --research <id> --repo <id> --paper <id> --file /tmp/map.json
+./p2b diagram render|list <研究 id> ...  # 论文插图（--kind motivation 动机图 / method 方法框架图）：HTML/SVG 渲染成论文用的 PDF 和预览 PNG，见 librarian/diagram.md
 ./p2b experiment show|put <实验 id> ...  # 见 librarian/experiment.md
+./p2b figures-plan show|propose|fill <研究 id> ... # 实验设计（实验设置 + 论文图表）：propose 走修改稿，fill 用实验结果填格子，见 librarian/experiment.md
 ./p2b writing show|propose <研究 id> ... # 摘要与引言草稿，见 librarian/writing.md
+./p2b plan show|propose <研究 id> ...    # 研究计划与进度，见 librarian/plan.md
+./p2b related show|propose <研究 id> ... # 相关工作（研究方向 + Related Work 段落），见 librarian/related.md
+./p2b overleaf show|pull <研究 id>       # 研究关联的 Overleaf 论文源文件，见 librarian/writing.md
 ./p2b papers [--topic "VLA"] [--unsorted]
 ./p2b search "关键词"
 ```

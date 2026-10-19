@@ -11,7 +11,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import cursor_api, export, inbox, pipeline, repos, rules, store, structure
+from . import cursor_api, export, inbox, overleaf, pipeline, repos, rules, store, structure
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 mimetypes.add_type("text/javascript", ".mjs")  # ES modules (PDF.js) must not be served as octet-stream
@@ -338,7 +338,10 @@ def _research(rid):
 
 @route("GET", "/api/research/([^/]+)")
 def research_get(q, body, rid):
-    return _research(rid)
+    x = _research(rid)
+    if x["writing"]["overleaf"]:
+        x["overleaf_changed"] = overleaf.changed(x["writing"]["overleaf"])
+    return x
 
 
 @route("POST", "/api/research/(?!start$)([^/]+)")
@@ -479,6 +482,32 @@ def research_codemap(q, body, rid):
     return {"run_id": cursor_api.code_map(rid, body["repo_id"], body["paper_id"])}
 
 
+@route("POST", "/api/research/([^/]+)/diagrams")
+def research_diagram_draw(q, body, rid):
+    _research(rid)
+    name, kind = body.get("name") or None, body.get("kind") or "method"
+    if kind not in ("method", "motivation"):
+        raise rules.Rejected("图的类型是 method 或 motivation")
+    if name and not store.diagram_dir(rid, name).is_dir():
+        raise rules.Rejected("这张图不存在或已删除")
+    return {"run_id": cursor_api.draw_diagram(rid, (body.get("instruction") or "").strip() or None, name, kind)}
+
+
+# The HTML source goes out as plain text: the agent wrote it, it must not run as a page of this app.
+DIAGRAM_MIME = {"figure.png": "image/png", "figure.pdf": "application/pdf", "figure.html": "text/plain; charset=utf-8"}
+
+
+@route("GET", r"/api/research/([^/]+)/diagrams/([^/]+)/(figure\.(?:png|pdf|html))")
+def research_diagram_file(q, body, rid, name, f):
+    return Reply(store.diagram_dir(_research(rid)["id"], name) / f, DIAGRAM_MIME[f])
+
+
+@route("DELETE", "/api/research/([^/]+)/diagrams/([^/]+)")
+def research_diagram_delete(q, body, rid, name):
+    store.delete_diagram(_research(rid)["id"], name)
+    return {"ok": True}
+
+
 @route("POST", "/api/research/([^/]+)/experiments")
 def experiment_add(q, body, rid):
     eid = store.add_experiment(rid, body.get("raw"), "user", body.get("title"))
@@ -524,6 +553,111 @@ def writing_proposal(q, body, rid):
 @route("POST", "/api/research/([^/]+)/writing/draft")
 def writing_draft(q, body, rid):
     return {"run_id": cursor_api.draft_writing(rid, (body.get("instruction") or "").strip() or None)}
+
+
+@route("POST", "/api/research/([^/]+)/plan")
+def plan_update(q, body, rid):
+    store.update_plan(rid, rules.validate_plan(body.get("tasks")), "user", body.get("base_rev"))
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/plan/proposal")
+def plan_proposal(q, body, rid):
+    if body.get("action") == "discard":
+        store.discard_plan(rid)
+    else:
+        store.accept_plan(rid, body.get("base_rev"))
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/plan/draft")
+def plan_draft(q, body, rid):
+    return {"run_id": cursor_api.draft_plan(rid, (body.get("instruction") or "").strip() or None)}
+
+
+def _context(rid):
+    return "\n".join(filter(None, ((store.get_research(rid) or {}).get("body") or {}).values()))
+
+
+@route("POST", "/api/research/([^/]+)/figures")
+def figures_update(q, body, rid):
+    store.update_figures(rid, rules.validate_figures(body.get("figures"), _context(rid), store.get_figures(rid)["design"]),
+                         "user", body.get("base_rev"))
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/figures/proposal")
+def figures_proposal(q, body, rid):
+    if body.get("action") == "discard":
+        store.discard_figures(rid)
+        return {"ok": True}
+    store.accept_figures(rid, body.get("base_rev"))
+    x = store.get_research(rid)
+    if cursor_api.status()["enabled"] and any(e["results"] for e in x["experiments"]):
+        return {"ok": True, "run_id": cursor_api.fill_figures(rid)}
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/figures/draft")
+def figures_draft(q, body, rid):
+    return {"run_id": cursor_api.draft_figures(rid, (body.get("instruction") or "").strip() or None)}
+
+
+@route("POST", "/api/research/([^/]+)/related")
+def related_update(q, body, rid):
+    store.update_related(rid, rules.validate_related(body.get("groups"), store.paper_ids()), "user", body.get("base_rev"))
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/related/proposal")
+def related_proposal(q, body, rid):
+    if body.get("action") == "discard":
+        store.discard_related(rid)
+    else:
+        store.accept_related(rid, body.get("base_rev"))
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/related/draft")
+def related_draft(q, body, rid):
+    return {"run_id": cursor_api.draft_related(rid)}
+
+
+def _overleaf(rid):
+    pid = store.get_writing(rid)["overleaf"]
+    if not pid:
+        raise rules.Rejected("这个研究还没关联 Overleaf 项目")
+    return pid
+
+
+@route("POST", "/api/research/([^/]+)/overleaf")
+def overleaf_link(q, body, rid):
+    pid = overleaf.project_id(body.get("url"))
+    overleaf.clone(pid)
+    store.set_overleaf(rid, pid)
+    return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/overleaf/unlink")
+def overleaf_unlink(q, body, rid):
+    store.set_overleaf(rid, None)  # the local checkout stays, unpushed edits included
+    return {"ok": True}
+
+
+@route("GET", "/api/research/([^/]+)/overleaf")
+def overleaf_changes(q, body, rid):
+    pid = _overleaf(rid)
+    return {"project": pid, **overleaf.changes(pid)}
+
+
+@route("POST", "/api/research/([^/]+)/overleaf/(pull|push|discard)")
+def overleaf_action(q, body, rid, action):
+    pid = _overleaf(rid)
+    if action == "push":
+        overleaf.push(pid, (body.get("message") or "").strip())
+    else:
+        getattr(overleaf, action)(pid)
+    return {"ok": True}
 
 
 @route("GET", "/api/agent/models")

@@ -335,6 +335,72 @@ class Store(unittest.TestCase):
         ok = rules.validate_experiment({"title": "t", "conclusion_text": "超过 0.9 的成功线"}, raw, "验证方案：成功率 ≥ 0.9")
         self.assertEqual(ok["conclusion_text"], "超过 0.9 的成功线")
 
+    def test_experiment_chart_numbers_must_come_from_raw(self):
+        raw = "step 1000 loss 0.52\nstep 2000 loss 0.31"
+        chart = {"title": "loss", "type": "line", "data": {"labels": [1000, 2000], "datasets": [{"label": "loss", "data": [0.52, 0.31]}]},
+                 "options": {"scales": {"y": {"type": "logarithmic"}}}}
+        ok = rules.validate_experiment({"title": "t", "charts": [chart]}, raw)
+        rid = store.add_research("chart", "user")
+        eid = store.add_experiment(rid, raw, "user")
+        store.update_experiment(eid, "agent", 1, **ok)
+        self.assertEqual(store.get_experiment(eid)["charts"][0]["data"]["datasets"][0]["data"], [0.52, 0.31])
+        for bad, msg in (({"data": {"labels": [1000, 3000], "datasets": [{"data": [0.52, 0.31]}]}}, r"\[3000\.0\]"),
+                         ({"data": {"datasets": [{"data": [0.5]}]}}, r"\[0\.5\]"),
+                         ({"data": {"datasets": [{"data": [{"x": 1000, "y": 0.29}]}]}}, r"\[0\.29\]"),
+                         ({"data": {"datasets": [{"data": ["0.52"]}]}}, "只能是数字"), ({"type": "sankey"}, "需要 type")):
+            with self.assertRaisesRegex(rules.Rejected, msg):
+                rules.validate_experiment({"title": "t", "charts": [{**chart, **bad}]}, raw)
+
+    def test_expected_figures_filled_by_experiment_results(self):
+        ctx = "验证方案：成功率 ≥ 0.85"
+        known = {"arxiv:2410.24164", "arxiv:2607.26789"}
+        setup = {"questions": ["Does it work?"], "method": "ours", "benchmarks": [{"name": "Spatial"}, {"name": "Object"}],
+                 "baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA", "paper": "2607.26789"}],
+                 "controls": [{"name": "fixed-rate"}], "metrics": [{"name": "SR", "better": "higher"}]}
+        for bad, msg in (({"method": ""}, "setup.method"), ({"controls": [{"name": "ours"}]}, "不能重复"),
+                         ({"baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "periodic"}]}, "已发表的方法"),
+                         ({"baselines": setup["baselines"][:1]}, "2-6"), ({"benchmarks": [{"name": "S", "note": "长" * 151}]}, "150 字"),
+                         ({"metrics": [{"name": "SR", "better": "up"}]}, "higher / lower"), ({"questions": []}, "questions")):
+            with self.assertRaisesRegex(rules.Rejected, msg):
+                rules.validate_setup({**setup, **bad}, known)
+        design = rules.validate_setup(setup, known)
+        self.assertEqual(design["baselines"][1]["paper"], "arxiv:2607.26789")
+        words = {"arxiv:2410.24164": "π0: A Vision-Language-Action Flow Model", "arxiv:2607.26789": "CheckVLA: Execution-Time Verification"}.get
+        rules.validate_setup({**setup, "baselines": [{"name": "π0 (5Hz)", "paper": "arxiv:2410.24164"}, setup["baselines"][1]]}, known, words)
+        with self.assertRaisesRegex(rules.Rejected, "Independent AC Predictor"):
+            rules.validate_setup({**setup, "baselines": [setup["baselines"][0], {"name": "Independent AC Predictor", "paper": "2607.26789"}]}, known, words)
+        fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
+               "rows": ["Spatial", "Object"], "series": ["ours", "pi0", "CheckVLA", "fixed-rate"], "target": {"value": 0.85}}
+        figs = rules.validate_figures([fig], ctx, design)
+        rules.check_coverage(design, figs)
+        with self.assertRaisesRegex(rules.Rejected, r"\['CheckVLA'\] 没进主结果"):
+            rules.check_coverage(design, rules.validate_figures([{**fig, "series": ["ours", "pi0"]}], ctx, design))
+        for bad, msg in (({"target": {"value": 0.9}}, "三要素里找不到"), ({"rows": ["a", "a"]}, "不重复"), ({"kind": "pie"}, "kind"),
+                         ({"series": ["ours", "OpenVLA"]}, "不在 setup.baselines"), ({"series": ["ours", "fixed-rate"]}, "已发表的 baseline"),
+                         ({"metric": "acc"}, "不在 setup.metrics"), ({"question": 2}, "question"), ({"caption": ""}, "caption"),
+                         ({"section": "results"}, "section")):
+            with self.assertRaisesRegex(rules.Rejected, msg):
+                rules.validate_figures([{**fig, **bad}], ctx, design)
+        with self.assertRaisesRegex(rules.Rejected, "先定实验设置"):
+            rules.validate_figures([fig], ctx)
+        rid = store.add_research("figs", "user")
+        store.propose_figures(rid, figs, None, "agent", 0, design)
+        store.accept_figures(rid, 0)
+        self.assertEqual(store.get_figures(rid)["design"]["method"], "ours")
+        fid = store.get_figures(rid)["figures"][0]["id"]
+        eid = store.add_experiment(rid, "spatial 0.92", "user")
+        store.update_experiment(eid, "agent", 1, results=[{"name": "Spatial 成功率", "value": "0.92"}])
+        exps = store.get_research(rid)["experiments"]
+        cell = {"figure": fid, "row": "Spatial", "series": "ours", "experiment": eid, "result": "Spatial 成功率"}
+        for bad, msg in (({"result": "Object"}, "results 里没有"), ({"experiment": "nope"}, "没有实验"), ({"series": "x"}, "没有 row")):
+            with self.assertRaisesRegex(rules.Rejected, msg):
+                rules.validate_cells([{**cell, **bad}], store.get_figures(rid)["figures"], exps)
+        store.fill_cells(rid, rules.validate_cells([cell, {**cell, "row": "Object"}], store.get_figures(rid)["figures"], exps))
+        store.fill_cells(rid, [{**cell, "row": "Object", "experiment": None, "result": None}])
+        self.assertEqual([c["row"] for c in store.get_figures(rid)["cells"]], ["Spatial"])
+        store.update_figures(rid, [{**store.get_figures(rid)["figures"][0], "rows": ["Object"]}], "user", 1)
+        self.assertEqual(store.get_figures(rid)["cells"], [])
+
     def test_agent_cannot_overwrite_user_edited_experiment(self):
         rid = store.add_research("exp", "user")
         eid = store.add_experiment(rid, "success=0.9", "user")
@@ -367,6 +433,24 @@ class Store(unittest.TestCase):
         w = store.get_writing(rid)
         self.assertEqual((w["abstract"], w["introduction"], w["proposal"]), ("我写的摘要", "引言 [arxiv:2410.24164 p.3]", None))
 
+    def test_writing_discussion_is_its_own_thread(self):
+        rid = store.add_research("分开讨论", "user")
+        research, writing = store.thread_for(f"research:{rid}"), store.thread_for(f"writing:{rid}")
+        self.assertNotEqual(research["id"], writing["id"])
+        self.assertEqual((writing["scope_title"], writing["proposal"]), ("分开讨论", False))
+        store.propose_writing(rid, {"abstract": "a"}, "agent")
+        self.assertEqual((store.thread_for(f"writing:{rid}")["proposal"], store.thread_for(f"research:{rid}")["proposal"]), (True, False))
+        related = store.thread_for(f"related:{rid}")
+        self.assertNotIn(related["id"], (research["id"], writing["id"]))
+        self.assertEqual((related["scope_title"], related["proposal"]), ("分开讨论", False))
+        store.propose_related(rid, [], None, "agent")
+        self.assertTrue(store.thread_for(f"related:{rid}")["proposal"])
+        parts = [store.thread_for(f"{k}:{rid}") for k in ("plan", "code", "experiment")]
+        self.assertEqual(len({t["id"] for t in parts} | {research["id"], writing["id"], related["id"]}), 6)
+        self.assertEqual([(t["scope_title"], t["proposal"]) for t in parts], [("分开讨论", False)] * 3)
+        store.propose_plan(rid, [], None, "agent")
+        self.assertTrue(store.thread_for(f"plan:{rid}")["proposal"])
+
     def test_repo_clone_is_read_only(self):
         import subprocess
         from paper2brain import repos
@@ -384,6 +468,117 @@ class Store(unittest.TestCase):
         self.assertIsNone(repos.reader(dst, sha)("missing.py"))
         push = subprocess.run(["git", "-C", str(dst), "remote", "get-url", "--push", "origin"], capture_output=True, text=True).stdout
         self.assertIn("DISABLED", push)
+
+    def test_plan_changes_from_the_agent_wait_for_the_user(self):
+        for bad in (None, [{"title": ""}], [{"title": "a", "status": "later"}], [{"title": "a", "due": "11月"}],
+                    [{"id": "x", "title": "a"}, {"id": "x", "title": "b"}]):
+            with self.assertRaises(rules.Rejected):
+                rules.validate_plan(bad)
+        rid = store.add_research("排计划", "user")
+        mine = rules.validate_plan([{"title": "复现 baseline", "due": "2026-11-01"}, {"title": "写引言"}])
+        self.assertEqual(store.update_plan(rid, mine, "user", 0), 1)
+        a, b = store.get_plan(rid)["tasks"]
+        self.assertEqual((a["status"], a["due"], b["due"]), ("todo", "2026-11-01", None))
+
+        draft = rules.validate_plan([{**a, "status": "done"}, {"title": "最小验证实验", "due": "2026-11-15"}])
+        store.propose_plan(rid, draft, "复现做完了，加上验证实验", "agent", 1)
+        self.assertEqual(len(store.get_plan(rid)["tasks"]), 2)  # nothing changes until accepted
+        with self.assertRaises(rules.Rejected):
+            store.update_plan(rid, mine, "user", 0)  # stale revision
+        store.accept_plan(rid, 1)
+        p = store.get_plan(rid)
+        self.assertEqual([(t["title"], t["status"]) for t in p["tasks"]], [("复现 baseline", "done"), ("最小验证实验", "todo")])
+        self.assertEqual((p["revision"], p["proposal"], p["edited_by"]), (2, None, "agent"))
+        self.assertEqual(store.get_research(rid)["plan"]["revision"], 2)
+
+    def test_related_work_waits_for_the_user_and_becomes_materials(self):
+        from paper2brain import export
+        store.upsert_paper("arxiv:2410.24164", "π0: A Vision-Language-Action Flow Model", ["Kevin Black"], None, "2024-10-31")
+        known = store.paper_ids()
+        for bad in (None, [{"name": "", "papers": ["arxiv:2410.24164"]}], [{"name": "a", "papers": []}],
+                    [{"name": "a", "papers": ["arxiv:2410.24164"], "text": "see [arxiv:9999.99999]"}],
+                    [{"id": "x", "name": "a", "papers": ["2410.24164"]}, {"id": "x", "name": "b", "papers": ["2410.24164"]}]):
+            with self.assertRaises(rules.Rejected):
+                rules.validate_related(bad, known)
+        rid = store.add_research("相关工作", "user")
+        groups = rules.validate_related([{"name": "Flow policies", "papers": ["2410.24164"], "text": "Flow matching [arxiv:2410.24164].",
+                                          "diff": "它们要逐任务微调"}], known)
+        self.assertEqual(groups[0]["papers"], ["arxiv:2410.24164"])
+        row = lambda p, *c: {"paper": p, "cells": list(c)}
+        for bad in ({"columns": ["微调"], "rows": [row("2410.24164", "✓"), row("ours", "✗")]},  # one column
+                    {"columns": ["微调", "真机"], "rows": [row("2410.24164", "✓"), row("ours", "✗", "✓")]},  # short row
+                    {"columns": ["微调", "真机"], "rows": [row("2410.24164", "✓", "✓"), row("2410.24164", "✗", "✓")]},  # no ours
+                    {"columns": ["微调", "真机"], "rows": [row("9999.99999", "✓", "✓"), row("ours", "✗", "✓")]}):  # not in groups
+            with self.assertRaises(rules.Rejected):
+                rules.validate_comparison(bad, groups)
+        table = rules.validate_comparison({"columns": ["微调", "真机"], "rows": [row("2410.24164", "✓", "✗"), row("ours", "✗", "✓")]}, groups)
+        self.assertEqual((table["rows"][0]["paper"], table["rows"][0]["name"]), ("arxiv:2410.24164", None))
+        store.propose_related(rid, groups, "第一版", "agent", 0, table)
+        self.assertEqual((store.get_related(rid)["groups"], store.get_research(rid)["links"]), ([], []))  # nothing until accepted
+        store.accept_related(rid, 0)
+        x = store.get_research(rid)
+        self.assertEqual(x["related"]["comparison"], table)
+        self.assertEqual((x["related"]["revision"], x["related"]["proposal"], x["related"]["groups"][0]["name"]), (1, None, "Flow policies"))
+        self.assertEqual([l["ref"] for l in x["links"]], ["arxiv:2410.24164"])
+        with self.assertRaises(rules.Rejected):
+            store.update_related(rid, [], "user", 0)  # stale revision
+        store.update_related(rid, x["related"]["groups"], "user", 1)
+        self.assertEqual(store.get_related(rid)["comparison"], table)  # the user's group edits keep the table
+        latex = export.research_export(rid)["latex"]
+        self.assertIn("\\section{Related Work}\n\\paragraph{Flow policies}\nFlow matching~\\cite{black2024vision}.", latex)
+
+    def test_overleaf_edits_stay_local_until_pushed(self):
+        import subprocess
+        from paper2brain import overleaf
+        git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True, capture_output=True, text=True).stdout  # noqa: E731
+        pid = "0123456789abcdef01234567"
+        self.assertEqual(overleaf.project_id(f"https://www.overleaf.com/project/{pid}"), pid)
+        self.assertEqual(overleaf.project_id("https://github.com/jetteezhou/HY-Embodied-Apexio"), "github:jetteezhou/HY-Embodied-Apexio")
+        self.assertEqual(overleaf.project_id("git@github.com:a/b.git"), "github:a/b")
+        self.assertEqual(overleaf.local_dir("github:a/b"), store.home() / "overleaf" / "github" / "a" / "b")
+        with self.assertRaises(rules.Rejected):
+            overleaf.project_id("https://www.overleaf.com/read/abc")
+        tmp = Path(tempfile.mkdtemp())
+        git("init", "-q", "--bare", "-b", "master", str(tmp / "remote.git"))
+        git("clone", "-q", str(tmp / "remote.git"), str(tmp / "theirs"))
+        (tmp / "theirs" / "main.tex").write_text("Hello\n")
+        git("-C", str(tmp / "theirs"), "add", ".")
+        git("-C", str(tmp / "theirs"), "commit", "-qm", "init")
+        git("-C", str(tmp / "theirs"), "push", "-q", "origin", "HEAD")
+        path = overleaf.clone(pid, str(tmp / "remote.git"))
+        rid = store.add_research("写论文", "user")
+        store.set_overleaf(rid, pid)
+        self.assertEqual(store.get_writing(rid)["overleaf"], pid)
+
+        (path / "main.tex").write_text("Hello, world\n")
+        self.assertEqual(overleaf.changed(pid), 1)
+        self.assertIn("+Hello, world", overleaf.changes(pid)["diff"])
+        with self.assertRaises(rules.Rejected):
+            overleaf.pull(pid)
+        overleaf.discard(pid)
+        self.assertEqual((path / "main.tex").read_text(), "Hello\n")
+
+        # someone edits elsewhere in Overleaf meanwhile; the push rebases on top of it
+        (tmp / "theirs" / "refs.bib").write_text("@misc{a}\n")
+        git("-C", str(tmp / "theirs"), "add", ".")
+        git("-C", str(tmp / "theirs"), "commit", "-qm", "bib")
+        git("-C", str(tmp / "theirs"), "push", "-q", "origin", "HEAD")
+        (path / "main.tex").write_text("Hello, world\n")
+        overleaf.push(pid, "agent edit")
+        self.assertEqual(overleaf.changed(pid), 0)
+        self.assertEqual(git("-C", str(tmp / "remote.git"), "show", "HEAD:main.tex"), "Hello, world\n")
+        self.assertEqual(git("-C", str(tmp / "remote.git"), "log", "--format=%s"), "agent edit\nbib\ninit\n")
+
+        # a conflicting edit in Overleaf: the push fails and the local edit survives uncommitted
+        git("-C", str(tmp / "theirs"), "pull", "-q", "--rebase")
+        (tmp / "theirs" / "main.tex").write_text("Bonjour\n")
+        git("-C", str(tmp / "theirs"), "commit", "-qam", "fr")
+        git("-C", str(tmp / "theirs"), "push", "-q", "origin", "HEAD")
+        (path / "main.tex").write_text("Hallo\n")
+        with self.assertRaises(rules.Rejected):
+            overleaf.push(pid, "conflict")
+        self.assertEqual((path / "main.tex").read_text(), "Hallo\n")
+        self.assertEqual(overleaf.changed(pid), 1)
 
     def test_latex_export_turns_citations_into_cite(self):
         from paper2brain import export
@@ -607,6 +802,51 @@ class Server(unittest.TestCase):
         self.assertEqual(self.req("DELETE", "/api/anchors/x", Origin="http://evil.example"), 403)
         self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "application/json", "Origin": own}), 200)
         self.assertEqual(sum(t["first"] == "跨站写入" for t in store.recent_threads()), 1)
+
+
+class Diagrams(unittest.TestCase):
+    def test_names_cannot_leave_the_diagram_folder(self):
+        rid = store.add_research("方法图", "user")
+        for bad in ("../x", "a/b", "", "Framework", ".."):
+            with self.assertRaises(rules.Rejected):
+                store.diagram_dir(rid, bad)
+        with self.assertRaises(rules.Rejected):
+            store.diagram_dir("../etc", "framework")
+
+    def test_render_exports_vector_pdf_and_flags_overflow(self):
+        import importlib.util
+        if not importlib.util.find_spec("playwright"):
+            self.skipTest("没装 playwright")
+        import pymupdf
+        from paper2brain import diagram
+        rid = store.add_research("方法图", "user")
+        src = Path(tempfile.mkdtemp()) / "f.html"
+        src.write_text('<div id="figure" style="width:600px;font-size:20px"><div style="width:60px;overflow:hidden;white-space:nowrap">'
+                       'Residual Flow Expert</div>\\(a_t\\)</div>')
+        try:
+            out = diagram.render(rid, "framework", src, caption="Overview.")
+        except rules.Rejected as e:
+            self.skipTest(str(e))
+        self.assertEqual(out["width"], 600)
+        self.assertTrue(any("溢出" in w for w in out["warnings"]))
+        self.assertFalse(any("字号" in w for w in out["warnings"]), "KaTeX subscripts are not checked")
+        with pymupdf.open(out["pdf"]) as d:
+            self.assertEqual((len(d), len(d[0].get_images())), (1, 0))
+        self.assertEqual([d["caption"] for d in store.diagrams(rid)], ["Overview."])
+        self.assertEqual(out["kind"], "method")
+        diagram.render(rid, "framework", src, kind="motivation")
+        self.assertEqual([(d["kind"], d["caption"]) for d in store.diagrams(rid)], [("motivation", "Overview.")], "a re-render keeps what it does not set")
+        with self.assertRaises(rules.Rejected):
+            diagram.render(rid, "framework", src, kind="teaser")
+        src.write_text('<div id="figure" style="width:600px;height:120px;position:relative;font-size:20px">'
+                       '<span style="position:absolute;left:0;top:10px">Goal conditioning</span><span style="position:absolute;left:40px;top:14px">Execute</span>'
+                       '<span style="position:absolute;left:0;top:70px">Target-step pairing</span>'
+                       '<svg style="position:absolute;inset:0" width="600" height="120"><path d="M0,82 H600" stroke="#000" fill="none"/></svg></div>')
+        warnings = diagram.render(rid, "framework", src)["warnings"]
+        self.assertTrue(any("重叠" in w and "Execute" in w for w in warnings), warnings)
+        self.assertTrue(any(w.startswith("连线穿过文字：「Target-step") for w in warnings), warnings)
+        store.delete_diagram(rid, "framework")
+        self.assertEqual(store.diagrams(rid), [])
 
 
 class scratch_home:

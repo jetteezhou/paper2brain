@@ -70,7 +70,8 @@ def to_latex(md, keys):
 
 def research_export(rid):
     w = store.get_writing(rid)
-    text = "\n".join(filter(None, [w["abstract"], w["introduction"]]))
+    related = [g for g in store.get_related(rid)["groups"] if g["text"]]
+    text = "\n".join(filter(None, [w["abstract"], w["introduction"], *(g["text"] for g in related)]))
     cited = []
     for m in re.finditer(r"\[((?:arxiv|doi|openreview|pdf):[^\s\]]+?)(?:\s*p\.?\s*\d+)?\]", text, re.I):
         pid = rules.parse_pid(m.group(1))
@@ -90,4 +91,6 @@ def research_export(rid):
         parts.append("\\begin{abstract}\n" + to_latex(w["abstract"], keys) + "\n\\end{abstract}")
     if w["introduction"]:
         parts.append("\\section{Introduction}\n" + to_latex(w["introduction"], keys))
+    if related:
+        parts.append("\\section{Related Work}\n" + "\n\n".join(f"\\paragraph{{{_inline(g['name'])}}}\n{to_latex(g['text'], keys)}" for g in related))
     return {"latex": "\n\n".join(parts), "bib": "\n\n".join(bibtex(p, keys[p["id"]]) for p in papers)}

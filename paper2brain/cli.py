@@ -6,7 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
-from . import pipeline, repos, rules, sources, store, structure
+from . import diagram, overleaf, pipeline, repos, rules, sources, store, structure
 
 
 def to_pid(s):
@@ -118,6 +118,10 @@ def run(args):
         rows = rules.validate_code_map(_read_json(args.file), store.pages(pid), repos.reader(repo["path"], commit))
         store.put_code_map(args.research, repo["id"], pid, commit, rows, "agent")
         return {"accepted": True, "commit": commit, "rows": len(rows)}
+    if cmd == "diagram":
+        if args.action == "list":
+            return [{**d, "html": str(store.diagram_dir(args.id, d["name"]) / "figure.html")} for d in store.diagrams(args.id)]
+        return diagram.render(args.id, args.name, args.file, args.title, args.caption, args.kind)
     if cmd == "experiment":
         if args.action == "add":
             return {"id": store.add_experiment(args.research, args.raw, "agent", args.title)}
@@ -137,6 +141,46 @@ def run(args):
         draft = rules.validate_writing_draft(_read_json(args.file), store.paper_ids())
         store.propose_writing(args.id, draft, "agent", args.base_rev)
         return {"proposed": True, "note": "写作修改稿已交给用户确认；采用前不会改动草稿"}
+    if cmd == "plan":
+        if args.action == "show":
+            return store.get_plan(args.id)
+        draft = _read_json(args.file)
+        tasks = rules.validate_plan(draft.get("tasks") if isinstance(draft, dict) else None)
+        store.propose_plan(args.id, tasks, str(draft.get("note") or "").strip() or None, "agent", args.base_rev)
+        return {"proposed": True, "note": "计划修改稿已交给用户确认；采用前不会改动计划"}
+    if cmd == "figures-plan":
+        if args.action == "show":
+            return store.get_figures(args.id)
+        draft, x = _read_json(args.file), store.get_research(args.id) or {}
+        if args.action == "fill":
+            cells = rules.validate_cells(draft.get("cells") if isinstance(draft, dict) else None,
+                                         store.get_figures(args.id)["figures"], x.get("experiments") or [])
+            store.fill_cells(args.id, cells)
+            return {"filled": len(cells)}
+        draft = draft if isinstance(draft, dict) else {}
+        named = {r["paper"]: r["name"] for r in ((x.get("related") or {}).get("comparison") or {}).get("rows") or []}
+        words = lambda pid: " ".join([(store.get_paper(pid, with_anchors=False) or {}).get("title") or "", named.get(pid, ""),
+                                      *store.pages(pid)[:2]])  # noqa: E731
+        design = rules.validate_setup(draft.get("setup"), store.paper_ids(), words)
+        figures = rules.validate_figures(draft.get("figures"), "\n".join(filter(None, (x.get("body") or {}).values())), design)
+        rules.check_coverage(design, figures)
+        store.propose_figures(args.id, figures, str(draft.get("note") or "").strip() or None, "agent", args.base_rev, design)
+        return {"proposed": True, "note": "实验设计修改稿已交给用户确认；采用后再用 fill 把实验结果填进格子"}
+    if cmd == "related":
+        if args.action == "show":
+            return store.get_related(args.id)
+        draft = _read_json(args.file)
+        groups = rules.validate_related(draft.get("groups") if isinstance(draft, dict) else None, store.paper_ids())
+        comparison = rules.validate_comparison(draft.get("comparison"), groups)
+        store.propose_related(args.id, groups, str(draft.get("note") or "").strip() or None, "agent", args.base_rev, comparison)
+        return {"proposed": True, "note": "相关工作修改稿已交给用户确认；采用后其中的论文会加入研究素材"}
+    if cmd == "overleaf":
+        pid = store.get_writing(args.id)["overleaf"]
+        if not pid:
+            raise rules.Rejected("这个研究没有关联 Overleaf 项目")
+        if args.action == "pull":
+            overleaf.pull(pid)
+        return {"path": str(overleaf.local_dir(pid)), "unpushed_files": overleaf.changes(pid)["files"]}
     if cmd == "research":
         if args.action == "list":
             return store.list_research("" if args.unsorted else (args.topic[0] if args.topic else None))
@@ -277,6 +321,14 @@ def parser():
     s.add_argument("--repo", required=True)
     s.add_argument("--paper", required=True)
     s.add_argument("--file", required=True)
+    s = sub.add_parser("diagram", help="论文插图（方法框架图、动机图）：render 把 HTML/SVG 渲染成论文用的 PDF 和预览 PNG；list 看已有的图（见 librarian/diagram.md）")
+    s.add_argument("action", choices=["render", "list"])
+    s.add_argument("id", help="研究 id")
+    s.add_argument("--kind", choices=["method", "motivation"], help="method 方法框架图（默认），motivation 动机图；改已有的图时不用写")
+    s.add_argument("--name", help="图的名字（小写英文和连字符），同名覆盖")
+    s.add_argument("--file", help="HTML 文件")
+    s.add_argument("--title", help="简短的中文名，例如“整体框架图”")
+    s.add_argument("--caption", help="论文图注（英文）")
     s = sub.add_parser("experiment", help="实验记录：add / show / put 提交整理结果（数字须出自原始结果）")
     s.add_argument("action", choices=["add", "show", "put"])
     s.add_argument("id", nargs="?")
@@ -290,6 +342,24 @@ def parser():
     s.add_argument("id", help="研究 id")
     s.add_argument("--file")
     s.add_argument("--base-rev", type=int)
+    s = sub.add_parser("plan", help="研究的计划：show 任务和进度 / propose 提交计划修改稿待用户确认")
+    s.add_argument("action", choices=["show", "propose"])
+    s.add_argument("id", help="研究 id")
+    s.add_argument("--file")
+    s.add_argument("--base-rev", type=int)
+    s = sub.add_parser("figures-plan", help="研究的预期图表：show / propose 提交结构修改稿待用户确认 / fill 用实验结果填格子")
+    s.add_argument("action", choices=["show", "propose", "fill"])
+    s.add_argument("id", help="研究 id")
+    s.add_argument("--file")
+    s.add_argument("--base-rev", type=int)
+    s = sub.add_parser("related", help="研究的相关工作：show 现有方向 / propose 提交修改稿待用户确认")
+    s.add_argument("action", choices=["show", "propose"])
+    s.add_argument("id", help="研究 id")
+    s.add_argument("--file")
+    s.add_argument("--base-rev", type=int)
+    s = sub.add_parser("overleaf", help="研究关联的 Overleaf 项目：show 本地目录和未推送的改动 / pull 拉取最新（有未推送改动时拒绝）")
+    s.add_argument("action", choices=["show", "pull"])
+    s.add_argument("id", help="研究 id")
 
     s = sub.add_parser("research", help="研究：list / add 新建（构思中）/ show / link 关联素材 / propose 提交修改稿待用户确认")
     s.add_argument("action", choices=["list", "add", "show", "link", "propose"])
