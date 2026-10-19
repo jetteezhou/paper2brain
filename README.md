@@ -15,8 +15,17 @@
 
 ## 快速开始
 
+一键安装（可重复运行）：装 Python 依赖、建数据目录，在 macOS 上把服务装成开机自启的后台服务；带参数时顺便装好并切到对应的 agent 后端：
+
+```sh
+ops/setup.sh tcodex     # 或 ops/setup.sh cursor；不带参数则保持 config.json 里现有的后端
+```
+
+手动安装：
+
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m playwright install chromium   # 画方法图用的无头浏览器
 ./p2b serve            # 打开 http://127.0.0.1:8765
 ```
 
@@ -36,8 +45,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
    {"cursor_api_key": "key_...", "machine": "p2b-mac"}
    ```
 
-   可选字段：`"model"` 指定模型；`"auto_agent": false` 关闭收下后的自动整理；`"max_agents"`（默认 2）同时运行的 agent 上限，多出的排队（iCloud 收件箱一次补处理多条时也一样）；`"run_timeout_min"`（默认 60）超过这么久还没结束的运行会被停止，后面的队列照常往下走。
+   可选字段：`"model"` 指定默认模型（各模块的模型在网页左下角"Agent 已连接"里分别选，存在 `"models"` 里，可带上下文长度、推理强度等参数）；`"auto_agent": false` 关闭收下后的自动整理；`"max_agents"`（默认 5）同时运行的 agent 上限，多出的排队（iCloud 收件箱一次补处理多条时也一样）；`"run_timeout_min"`（默认 60）超过这么久还没结束的运行会被停止，后面的队列照常往下走；`"overleaf_token"` Overleaf 的 Git token（账户设置 → Git Integration，需要 Overleaf 的 Git 集成），研究关联 Overleaf 项目后 agent 就能在讨论里改论文，改动在"写作"页确认后才推送。
 4. 重启 `./p2b serve`。左下角显示"Agent 已连接"。
+
+**改用 TCodex（腾讯内网）**：装好 `tcodex` 并登录一次（`tcodex login`，或设置 `TCODEX_AUTH_TOKEN`），两个后端可以同时用：在网页左下角"Agent"设置里给每个模块单独选模型，Cursor 和 TCodex 的模型（标"TCodex ·"）都在同一个列表里，例如研究用 TCodex 的 GPT、其他用 Cursor 的模型；选"默认"的模块用 `config.json` 的 `"backend"`（默认 `cursor`）。已经开始的讨论一直留在它开始时的后端上。只用 TCodex 时不需要上面的 Cursor worker 和 API key。agent 以 `tcodex exec` 在本仓库目录里运行（不开沙箱，和 Cursor worker 一样能联网、写数据目录）。服务重启会中断正在运行的 TCodex 任务。
 
 **调优 agent**：修改 `librarian/capture.md`、`discuss.md`（回答、整理讨论树、起标题）、`deepread.md`，然后在捕获详情里点"重新整理"。每次运行的提示词、调用了哪些工具、最终回复，都能在"处理记录"里看到。
 

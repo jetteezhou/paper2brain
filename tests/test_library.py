@@ -8,7 +8,8 @@ os.environ["P2B_HOME"] = tempfile.mkdtemp(prefix="p2b-test-")
 
 from paper2brain import rules, store  # noqa: E402
 
-AGENT_CFG = {"machine": "m", "repo": "r", "model": None, "api_key": "k", "max_agents": 2, "run_timeout_min": 60}
+AGENT_CFG = {"machine": "m", "repo": "r", "model": None, "models": {}, "api_key": "k", "max_agents": 2, "run_timeout_min": 60,
+             "backend": "cursor", "auto_agent": True}
 PAGES = [
     "Intro. We propose a flow matching action expert.",
     "Results. Our model controls robots at frequencies of up to 50 Hz for dexterous tasks such as laundry folding.",
@@ -449,6 +450,35 @@ class Store(unittest.TestCase):
             cursor_api.deepread_pending()
             self.assertEqual(started, [pid])
 
+    def test_listed_papers_without_card_get_one_once(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api
+
+        pid = "arxiv:2501.00001"
+        store.upsert_paper(pid, "no card yet")
+        store.set_fulltext(pid, "/tmp/none.pdf", PAGES)
+        self.assertNotIn(pid, store.card_queue())  # not in the library yet
+        store.link(self.cid, pid, "user")
+        store.add_run("cap", "", "capture", self.cid, "", "RUNNING")
+        self.assertNotIn(pid, store.card_queue())  # its capture agent writes the card
+        store.update_run("cap", status="FINISHED")
+        self.assertEqual(store.card_queue()[0], pid)
+        started = []
+
+        def fake_write_card(p):
+            started.append(p)
+            store.add_run(f"c{len(started)}", "", "card", p, "", "CREATING")
+
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "write_card", side_effect=fake_write_card):
+            cursor_api.card_pending()
+            cursor_api.card_pending()
+            self.assertEqual(started, [pid])
+            store.update_run("c1", status="ERROR")
+            cursor_api.card_pending()
+            self.assertEqual(started, [pid])
+
     def test_figures_are_cropped_from_captions_and_picked_by_number(self):
         import pymupdf
 
@@ -626,6 +656,34 @@ class Agents(AgentHarness):
         d = self.api.start_async("chat", "t1", "问 2", agent_id="bc-same")
         self.assertEqual((self.status(c), self.status(d)), ("CREATING", "WAITING"))
 
+    def test_each_module_creates_agents_on_its_own_model(self):
+        import json
+        from unittest import mock
+        self.cfg["model"] = "composer-2.5"
+        self.cfg["models"] = {"research": {"id": "claude-opus-5-5", "params": [{"id": "context", "value": "1m"}]}}
+        rid = store.add_research("长讨论", "user")
+        with mock.patch.object(self.api, "pump"):
+            r = self.api.discuss(f"research:{rid}", "问题成立吗？")
+            p = self.api.start_async("card", "p1", "写卡")
+            f = self.api.start_async("chat", "t1", "接着问", agent_id="bc-old")
+            d = self.api.start_async("motivation", rid, "画动机图")
+        launch = lambda run: store.get_run(run)["launch"]["model"]  # noqa: E731
+        self.assertEqual(launch(r), self.cfg["models"]["research"])
+        self.assertEqual(launch(d), self.cfg["models"]["research"], "drawing keeps the research model until set on its own")
+        self.assertEqual(launch(p), {"id": "composer-2.5"})
+        self.assertIsNone(launch(f))  # a follow-up keeps the model its agent was created with
+        with mock.patch.object(self.api, "_json", return_value={"run": {"id": "x"}}) as call:
+            self.api._send("bc-1", "hi", new=True, model=launch(r))
+        self.assertEqual(call.call_args.args[2]["model"], self.cfg["models"]["research"])
+
+        (store.home() / "config.json").write_text(json.dumps({"cursor_api_key": "k"}))
+        self.api.set_model("deepread", {"id": "gpt-5.6-sol", "params": [{"id": "context", "value": "1m"}]})
+        self.api.set_model("research", None)
+        saved = json.loads((store.home() / "config.json").read_text())
+        self.assertEqual(saved, {"cursor_api_key": "k", "models": {"deepread": {"id": "gpt-5.6-sol", "params": [{"id": "context", "value": "1m"}]}}})
+        with self.assertRaises(rules.Rejected):
+            self.api.set_model("nope", None)
+
     def test_new_agent_is_bound_at_once_and_forgotten_if_never_created(self):
         from unittest import mock
         t = store.thread_for("library")
@@ -636,6 +694,41 @@ class Agents(AgentHarness):
             self.api._launch(store.get_run(pid))
         self.assertEqual(self.status(pid), "ERROR")
         self.assertIsNone(store.thread_for(thread_id=t["id"])["agent_id"])
+
+    def test_tcodex_backend_runs_locally_and_resumes_its_session(self):
+        from unittest import mock
+        bin_dir = Path(tempfile.mkdtemp())
+        (bin_dir / "tcodex").write_text(
+            '#!/bin/sh\necho "$@" >> "$(dirname "$0")/args"\n'
+            'echo \'{"type":"thread.started","thread_id":"s-1"}\'\necho "not json"\n'
+            'echo \'{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"./p2b papers"}}\'\n'
+            'echo \'{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"答案"}}\'\n')
+        (bin_dir / "tcodex").chmod(0o755)
+        self.cfg["backend"] = "tcodex"
+        t = store.thread_for("library")
+        with mock.patch.object(self.api, "_PATH", f"{bin_dir}:/usr/bin:/bin"):
+            self.assertTrue(self.api.status()["enabled"])
+            with mock.patch.object(self.api, "pump"):
+                self.api._launch(store.get_run(self.api.start_async("chat", t["id"], "你好")))
+                run = store.last_run("chat")
+                self.assertEqual((run["status"], run["text"], run["tools"]), ("FINISHED", "答案", [{"name": "command_execution", "status": "done", "args": "./p2b papers"}]))
+                aid = store.thread_for(thread_id=t["id"])["agent_id"]
+                self.api._launch(store.get_run(self.api.start_async("chat", t["id"], "接着说", agent_id=aid)))
+                self.assertEqual(store.last_run("chat")["status"], "FINISHED")
+        args = (bin_dir / "args").read_text().splitlines()
+        self.assertTrue(args[0].endswith("你好") and "resume" not in args[0])
+        self.assertTrue(args[1].endswith("resume s-1 接着说"))
+        # both backends at once: research on TCodex, the rest on Cursor; an agent stays on the backend it started on
+        self.cfg["backend"] = "cursor"
+        self.cfg["models"] = {"research": {"id": "gpt-6-sol", "backend": "tcodex"}}
+        with mock.patch.object(self.api, "_PATH", f"{bin_dir}:/usr/bin:/bin"), mock.patch.object(self.api, "pump"):
+            self.assertEqual(self.api.status()["backends"], {"cursor": True, "tcodex": True})
+            agent = lambda run: store.get_run(run)["agent_id"]  # noqa: E731
+            self.assertTrue(agent(self.api.start_async("draft", "r1", "起草")).startswith("codex-"))
+            self.assertTrue(agent(self.api.start_async("card", "p1", "写卡")).startswith("bc-"))
+            self.assertEqual(agent(self.api.start_async("chat", t["id"], "接着说", agent_id=aid)), aid)
+        with mock.patch.object(self.api, "_PATH", "/nowhere"), self.assertRaises(self.api.AgentError):
+            self.api.start_async("draft", "r2", "起草")  # TCodex not installed: refused, not sent to Cursor
 
     def test_stuck_runs_expire(self):
         from unittest import mock

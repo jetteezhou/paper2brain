@@ -4,6 +4,10 @@ import base64
 import json
 import os
 import re
+import shutil
+import signal
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -11,7 +15,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from . import store
+from . import rules, store
 
 API = "https://api.cursor.com/v1"
 TERMINAL = {"FINISHED", "ERROR", "CANCELLED", "EXPIRED"}
@@ -25,20 +29,109 @@ def config():
         "machine": os.environ.get("P2B_MACHINE") or cfg.get("machine"),
         "repo": cfg.get("repo") or "https://github.com/jetteezhou/paper2brain",
         "model": cfg.get("model"),
+        "models": cfg.get("models") or {},
         "auto_agent": cfg.get("auto_agent", True),
-        "max_agents": int(cfg.get("max_agents", 2)),
+        "max_agents": int(cfg.get("max_agents", 5)),
         "run_timeout_min": int(cfg.get("run_timeout_min", 60)),
+        "backend": cfg.get("backend") or "cursor",
     }
 
 
-def status():
+# Both backends can run at once: each module's model names its backend, and an agent stays on the backend it was
+# created on (its id says which), so a follow-up never crosses over.
+BACKENDS = ("cursor", "tcodex")
+
+
+def _config_write(**fields):
+    path = store.home() / "config.json"
+    cfg = json.loads(path.read_text()) if path.exists() else {}
+    cfg.update(fields)
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+    return cfg
+
+
+def set_backend(backend):
+    """The backend for modules left on "default"."""
+    if backend not in BACKENDS:
+        raise rules.Rejected(f"没有这个后端：{backend}")
+    _config_write(backend=backend)
+
+
+def _missing(backend):
+    if backend == "tcodex":
+        return [] if _tcodex_bin() else ["tcodex 命令"]
     cfg = config()
-    missing = [k for k, v in (("CURSOR_API_KEY", cfg["api_key"]), ("P2B_MACHINE", cfg["machine"])) if not v]
-    return {"enabled": not missing, "missing": missing, "machine": cfg["machine"], "auto_agent": cfg["auto_agent"]}
+    return [k for k, v in (("CURSOR_API_KEY", cfg["api_key"]), ("P2B_MACHINE", cfg["machine"])) if not v]
+
+
+def status():
+    cfg, ready = config(), [b for b in BACKENDS if not _missing(b)]
+    names = {"cursor": cfg["machine"], "tcodex": "TCodex"}
+    return {"enabled": bool(ready), "missing": [] if ready else _missing(cfg["backend"]), "machine": " + ".join(names[b] for b in ready),
+            "auto_agent": cfg["auto_agent"], "backend": cfg["backend"], "backends": {b: b in ready for b in BACKENDS}}
+
+
+def _backend_of(model=None, agent_id=None):
+    if agent_id:
+        return "tcodex" if agent_id.startswith("codex-") else "cursor"
+    return (model.get("backend") or "cursor") if model else config()["backend"]
 
 
 class AgentError(RuntimeError):
     pass
+
+
+# The parts of the app that can each run on their own model (config.json "models": {module: {"id", "params"}}).
+MODULES = {
+    "research": "研究：研究页的讨论、起草三要素、计划、相关工作、写作、改论文、代码对照、整理实验",
+    "diagram": "画图：研究页的动机图和方法框架图（没设时用研究的模型）",
+    "discuss": "讨论：论文、主题、论文库、划词、找论文",
+    "capture": "收下：整理收下的内容、写快读卡",
+    "deepread": "深读报告",
+    "distill": "给讨论起标题",
+}
+KIND_MODULE = {"draft": "research", "writing": "research", "plan": "research", "related": "research", "codemap": "research", "experiment": "research",
+               "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill"}
+
+
+def model_for(module):
+    """The module's model ({"id", "params", "backend"}; no backend means Cursor), else the old single Cursor "model"
+    when the default backend is Cursor, else None: the default backend's default model. Drawing was part of research
+    and keeps its model until set on its own."""
+    cfg = config()
+    return cfg["models"].get(module) or (module == "diagram" and cfg["models"].get("research")) or ({"id": cfg["model"]} if cfg["model"] and cfg["backend"] == "cursor" else None)
+
+
+def set_model(module, model):
+    if module not in MODULES:
+        raise rules.Rejected(f"没有这个模块：{module}")
+    if model is not None and not (isinstance(model.get("id"), str) and model.get("backend", "cursor") in BACKENDS
+                                  and all(isinstance(p.get("id"), str) and isinstance(p.get("value"), str) for p in model.get("params") or [])):
+        raise rules.Rejected("模型格式不对")
+    path = store.home() / "config.json"
+    models = (json.loads(path.read_text()) if path.exists() else {}).get("models") or {}
+    if model:
+        models[module] = {"id": model["id"], **({"params": model["params"]} if model.get("params") else {}),
+                          **({"backend": "tcodex"} if model.get("backend") == "tcodex" else {})}
+    else:
+        models.pop(module, None)
+    _config_write(models=models)
+
+
+_models_cache = {}
+
+
+def list_models():
+    """The models of every ready backend, each tagged with its backend, with their parameters (context window,
+    reasoning effort...). Cursor's list is cached 10 minutes."""
+    items = []
+    if not _missing("cursor"):
+        if time.time() - _models_cache.get("at", 0) > 600:
+            _models_cache.update(items=_json("GET", "/models")["items"], at=time.time())
+        items += [{**m, "backend": "cursor"} for m in _models_cache["items"]]
+    if not _missing("tcodex"):
+        items += TCODEX_MODELS
+    return items
 
 
 def _request(method, path, body=None, accept="application/json", timeout=None):
@@ -100,16 +193,19 @@ def _bind(kind, ref, agent_id):
         store.kv_set(DISTILL_AGENT, agent_id)
 
 
-def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None):
+def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, module=None):
     """Queue a run and return its placeholder id at once; the UI shows it as waiting / starting. Follows up on
-    agent_id when given, otherwise creates a new agent on this Mac (about a minute). The new agent's id is chosen
-    here and stored with the placeholder, so a restart mid-create can still find it. prepare(placeholder) runs
-    before anything is sent (e.g. to add the chat messages)."""
-    if not config()["machine"]:
-        raise AgentError("未配置 P2B_MACHINE（本机 worker 的名字）")
+    agent_id when given, otherwise creates a new agent on this Mac (about a minute) on the module's model; a
+    follow-up keeps the model its agent was created with. The new agent's id is chosen here and stored with the
+    placeholder, so a restart mid-create can still find it. prepare(placeholder) runs before anything is sent
+    (e.g. to add the chat messages)."""
     placeholder, new = f"pending-{uuid.uuid4()}", not agent_id
-    agent_id = agent_id or f"bc-{uuid.uuid4()}"
-    store.add_run(placeholder, agent_id, kind, ref, text, "WAITING", launch={"name": name, "new": new})
+    model = model_for(module or KIND_MODULE.get(kind, "discuss")) if new else None
+    backend = _backend_of(model, agent_id)
+    if _missing(backend):
+        raise AgentError(f"{'TCodex' if backend == 'tcodex' else 'Cursor'} 后端未配置：缺 " + "、".join(_missing(backend)))
+    agent_id = agent_id or f"{'codex' if backend == 'tcodex' else 'bc'}-{uuid.uuid4()}"
+    store.add_run(placeholder, agent_id, kind, ref, text, "WAITING", launch={"name": name, "new": new, "model": model})
     if images:
         _images[placeholder] = list(images)
     if prepare:
@@ -138,7 +234,7 @@ def pump():
             _spawn(_launch, r)
 
 
-def _send(agent_id, text, images=(), name=None, new=False):
+def _send(agent_id, text, images=(), name=None, new=False, model=None):
     cfg = config()
     try:
         if not new:
@@ -147,8 +243,8 @@ def _send(agent_id, text, images=(), name=None, new=False):
                 "repos": [{"url": cfg["repo"]}]}
         if name:
             body["name"] = name[:100]
-        if cfg["model"]:
-            body["model"] = {"id": cfg["model"]}
+        if model:
+            body["model"] = {k: v for k, v in model.items() if k != "backend"}
         return _json("POST", "/agents", body, timeout=180)["run"]
     except (TimeoutError, urllib.error.URLError, ConnectionError):
         # creating an agent can outlast the response timeout and still succeed
@@ -161,8 +257,10 @@ def _send(agent_id, text, images=(), name=None, new=False):
 
 def _launch(r):
     placeholder, launch = r["id"], r["launch"] or {}
+    if _backend_of(agent_id=r["agent_id"]) == "tcodex":
+        return _codex_launch(r)
     try:
-        run = _send(r["agent_id"], r["prompt"], _images.pop(placeholder, ()), launch.get("name"), launch.get("new"))
+        run = _send(r["agent_id"], r["prompt"], _images.pop(placeholder, ()), launch.get("name"), launch.get("new"), launch.get("model"))
     except Exception as e:
         store.update_run(placeholder, status="ERROR", error=str(e))
         # ponytail: guesses Cursor's wording for an agent that is gone (archived / expired); the next message then
@@ -278,7 +376,102 @@ def _short(args):
     return None
 
 
+# ---------- TCodex backend: `tcodex exec` (OpenAI Codex CLI) run in this repo instead of a Cursor cloud agent ----------
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_EFFORT = [{"id": "effort", "displayName": "思考强度", "values": [{"value": v} for v in ("low", "medium", "high")]}]
+# ponytail: copied from the TCodex wiki; edit when the platform adds or drops models.
+TCODEX_MODELS = [{"id": m, "displayName": f"TCodex · {m}", "backend": "tcodex", "parameters": _EFFORT} for m in (
+    "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+    "glm-5.3-ioa", "glm-5.2-ioa", "glm-5.3-flash-ioa", "deepseek-v4-pro-ioa", "deepseek-v4.1-flash", "hy4-preview-ioa", "hy3-ioa")]
+_procs = {}
+# launchd starts the server with only the system PATH; tcodex (and the node an npm install needs) usually live here.
+_PATH = os.pathsep.join([os.environ.get("PATH", ""), os.path.expanduser("~/.local/bin"), "/opt/homebrew/bin", "/usr/local/bin"])
+
+
+def _tcodex_bin():
+    return shutil.which("tcodex", path=_PATH)
+
+
+def _codex_launch(r):
+    placeholder, launch = r["id"], r["launch"] or {}
+    images = _images.pop(placeholder, ())
+    run_id = f"tc-{uuid.uuid4()}"
+    try:
+        if (store.get_run(placeholder) or {}).get("status") in ("CANCELLED", "EXPIRED"):
+            return
+        store.replace_run(placeholder, run_id, r["agent_id"], "RUNNING")
+        _codex(r["agent_id"], run_id, r["prompt"], images, launch.get("model"))
+    except Exception as e:
+        store.update_run(run_id, status="ERROR", error=str(e))
+    finally:
+        _procs.pop(run_id, None)
+        pump()
+
+
+def _codex_args(session, text, images, model):
+    # Cursor agents on this machine run unsandboxed too: the librarian needs the network and writes the data dir.
+    args = [_tcodex_bin() or "tcodex", "exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-C", REPO_DIR]
+    if model:
+        args += ["-m", model["id"]]
+        args += [a for p in model.get("params") or [] if p["id"] == "effort" for a in ("-c", f"model_reasoning_effort={p['value']}")]
+    args += [f"--image={path}" for path in images]
+    return args + (["resume", session, text] if session else [text])
+
+
+def _codex(agent_id, run_id, text, images, model):
+    """One Codex turn. Our agent id maps to Codex's session id (kv), so a follow-up resumes the same conversation."""
+    key, started = f"codex:{agent_id}", time.time()
+    out, tools, error = "", {}, None
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for i, (data, mime) in enumerate(images):
+            paths.append(os.path.join(tmp, f"{i}.{mime.split('/')[-1]}"))
+            with open(paths[-1], "wb") as f:
+                f.write(data)
+        with open(os.path.join(tmp, "stderr"), "w+") as err, \
+                subprocess.Popen(_codex_args(store.kv_get(key), text, paths, model), cwd=REPO_DIR, stdin=subprocess.DEVNULL,
+                                 env={**os.environ, "PATH": _PATH}, stdout=subprocess.PIPE, stderr=err, text=True, start_new_session=True) as p:
+            _procs[run_id] = p
+            for line in p.stdout:
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                kind, item = ev.get("type"), ev.get("item") or {}
+                if kind == "thread.started":
+                    store.kv_set(key, ev["thread_id"])
+                elif kind == "turn.failed":
+                    error = (ev.get("error") or {}).get("message")
+                elif kind == "error":
+                    error = ev.get("message")
+                elif item.get("type") == "agent_message":
+                    out = item.get("text") or out
+                elif item.get("type") in ("command_execution", "file_change", "mcp_tool_call", "web_search"):
+                    tools[item["id"]] = {"name": item.get("tool") or item["type"], "status": "done" if kind == "item.completed" else "running",
+                                         "args": _short(item) or _short({"path": ", ".join(c.get("path", "") for c in item.get("changes") or [])})}
+                else:
+                    continue
+                store.update_run(run_id, text=out, tools=list(tools.values()))
+            p.wait()
+            err.seek(0)
+            if p.returncode and not error:
+                error = err.read()[-300:].strip() or f"tcodex 退出码 {p.returncode}"
+    if (store.get_run(run_id) or {}).get("status") not in LIVE:
+        return  # cancelled or expired here
+    if error and not out:
+        store.forget_agent(agent_id)  # a session that failed to start or resume: the next message starts fresh
+        store.kv_set(key, "")
+    store.update_run(run_id, status="ERROR" if error else "FINISHED", error=error, text=out, tools=list(tools.values()),
+                     duration_ms=int((time.time() - started) * 1000))
+
+
 def cancel(agent_id, run_id):
+    if run_id.startswith("tc-"):
+        store.update_run(run_id, status="CANCELLED")
+        if run_id in _procs:
+            os.killpg(_procs[run_id].pid, signal.SIGTERM)
+        return
     _json("POST", f"/agents/{agent_id}/runs/{run_id}/cancel")
 
 
@@ -286,7 +479,9 @@ def resume_watchers():
     """After a restart: keep watching live runs; a run whose request was in flight is found by its agent id or, when
     it never reached Cursor, queued to be sent again (a repeated create is idempotent); waiting runs wait on."""
     for r in store.unfinished_runs():
-        if not r["id"].startswith("pending-"):
+        if r["id"].startswith("tc-"):
+            store.update_run(r["id"], status="ERROR", error="服务重启，TCodex 进程已中断，请重试")
+        elif not r["id"].startswith("pending-"):
             watch(r["agent_id"], r["id"])
         elif r["status"] != "WAITING" and not r["agent_id"]:
             store.update_run(r["id"], status="ERROR", error="服务重启时 agent 还没创建完成，请重试")
@@ -374,7 +569,7 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
     """Continue the scope's latest discussion, or an older one the user jumped back to. start=True opens a new
     research: the agent first reads what the user brought and drafts, instead of just answering."""
     thread = store.thread_for(scope, thread_id)
-    if not thread["agent_id"] and scope.startswith("paper:"):
+    if not thread["agent_id"] and scope.startswith("paper:") and model_for("capture") == model_for("discuss"):
         # the agent that took this paper's capture (from the phone, too) already knows it, and what was asked there
         agent = next((c["agent_id"] for c in reversed(store.get_paper(scope[6:], with_anchors=False)["captures"])
                       if c.get("agent_id")), None)
@@ -402,7 +597,8 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
         store.add_message(thread["id"], "user", text)
         store.add_message(thread["id"], "assistant", "", placeholder)
 
-    return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare)
+    return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare,
+                       module="research" if scope.startswith(("research:", "writing:", "related:", "plan:", "code:", "experiment:")) else "discuss")
 
 
 ROLE_NAMES = {"method": "方法借鉴", "baseline": "baseline", "support": "支持证据", "counter": "反面证据", "reproduce": "待复现"}
@@ -486,6 +682,25 @@ def deepread_pending():
             return None
         store.kv_set(DEEP_TRIED, json.dumps(sorted(tried | {pid})))
         return deep_read(pid)
+
+
+CARD_TRIED = "card_tried"
+
+
+def card_pending():
+    """Every paper in the library gets a quick card: those that reach it without a capture agent writing one (found,
+    added to a research, the capture agent gave up) are written one at a time, each tried automatically only once."""
+    if not status()["enabled"]:
+        return None
+    with _deep_lock:
+        if any(r["kind"] == "card" for r in store.unfinished_runs()):
+            return None
+        tried = set(json.loads(store.kv_get(CARD_TRIED) or "[]"))
+        pid = next((p for p in store.card_queue() if p not in tried), None)
+        if not pid:
+            return None
+        store.kv_set(CARD_TRIED, json.dumps(sorted(tried | {pid})))
+        return write_card(pid)
 
 
 def structure_experiment(eid):

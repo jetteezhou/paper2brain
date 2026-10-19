@@ -201,18 +201,57 @@ function Proposals() {
 }
 const proposalsModal = () => openModal(html`<${Proposals} />`);
 
+/** One model per module: a select for the model, one more per parameter it takes (context window, reasoning effort...). */
+function Models() {
+  const [d, reload, err] = useLive('/api/agent/models', { poll: false });
+  if (err) return html`<p class="hint">读不到模型列表：${err}</p>`;
+  if (!d) return html`<span class="spin"></span>`;
+  // a model is picked by backend and id together: both backends can offer the same id
+  const key = (m) => m && `${m.backend || 'cursor'}:${m.id}`;
+  const byKey = Object.fromEntries(d.models.map((m) => [key(m), m]));
+  const save = async (module, model) => { try { await post('/api/agent/models', { module, model }); toast('已保存，之后新开的讨论和任务用这个模型'); reload(); } catch (e) { fail(e); } };
+  const setParam = (mod, pid, value) => {
+    const params = (mod.model.params || []).filter((p) => p.id !== pid);
+    save(mod.id, { ...mod.model, params: value ? [...params, { id: pid, value }] : params });
+  };
+  const pick = (mod, k) => { const m = byKey[k]; save(mod.id, m ? { id: m.id, backend: m.backend } : null); };
+  return html`<div class="models">${d.modules.map((mod) => {
+    const m = byKey[key(mod.model)], val = (pid) => (mod.model.params || []).find((p) => p.id === pid)?.value || '';
+    return html`<div class="model-row"><div class="model-label">${mod.label}</div><div class="model-picks">
+      <select value=${key(mod.model) || ''} onChange=${(e) => pick(mod, e.target.value)}>
+        <option value="">${d.fallback ? `默认（${d.fallback}）` : appState.value.agent.backend === 'tcodex' ? '默认（TCodex 的默认模型）' : '默认（Cursor 账户的默认模型）'}</option>
+        ${d.models.map((x) => html`<option value=${key(x)}>${x.displayName || x.id}</option>`)}</select>
+      ${(m?.parameters || []).map((p) => html`<select value=${val(p.id)} title=${p.displayName || p.id} onChange=${(e) => setParam(mod, p.id, e.target.value)}>
+        <option value="">${p.displayName || p.id}：默认</option>${p.values.map((v) => html`<option value=${v.value}>${p.displayName || p.id}：${v.displayName || v.value}</option>`)}</select>`)}
+    </div></div>`;
+  })}</div>`;
+}
+
 function Setup() {
-  const a = appState.value.agent;
-  return html`<h3>${a.enabled ? 'Agent 已连接' : '连接 Cursor agent'}</h3>
-  <p class="hint">快读卡、深读报告和讨论由 Cursor agent 在这台 Mac 上完成；没连接时只做规则预处理（识别链接、抓取快照、下载全文）。</p>
-  <ol>
+  const a = appState.value.agent, ok = a.backends || {};
+  const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
+  const mark = (b) => (ok[b] ? '✓ 已连接' : '未连接');
+  return html`<h3>${a.enabled ? 'Agent 已连接' : '连接 agent'}</h3>
+  <p class="hint">快读卡、深读报告和讨论由 agent 在这台 Mac 上完成；没连接时只做规则预处理（识别链接、抓取快照、下载全文）。
+    两个后端可以同时用：每个模块在下面单独选模型（Cursor 或 TCodex 的），已经开始的讨论一直留在它开始时的后端上。</p>
+  <p class="hint">Cursor agent：${mark('cursor')} · TCodex（腾讯内网）：${mark('tcodex')} · 选“默认”的模块用
+    <select value=${a.backend} onChange=${(e) => switchTo(e.target.value)} aria-label="默认后端">
+    <option value="cursor">Cursor</option><option value="tcodex">TCodex</option></select></p>
+  ${ok.tcodex ? null : html`<details open=${a.backend === 'tcodex'}><summary>连接 TCodex</summary><ol>
+    <li>安装 TCodex：<pre>curl -fsSL https://mirrors.tencent.com/repository/generic/tcodex/tcodex/install.sh | sh</pre></li>
+    <li>登录一次：<pre>tcodex login</pre>（或在启动服务的环境里设置 <code>TCODEX_AUTH_TOKEN</code>）</li>
+  </ol></details>`}
+  ${ok.cursor ? null : html`<details open=${a.backend === 'cursor'}><summary>连接 Cursor agent</summary><ol>
     <li>安装 Cursor CLI 并登录（只需一次）：<pre>curl https://cursor.com/install -fsS | bash${'\n'}agent login</pre></li>
     <li>在仓库目录启动本机 worker（保持运行）：<pre>agent worker start --name p2b-mac --worker-dir "${a.repo_dir}"</pre></li>
     <li>在 <a href="https://cursor.com/dashboard/integrations" target="_blank">Cursor Dashboard</a> 创建 API key，写入 <code>${a.home}/config.json</code>：
       <pre>{${'\n'}  "cursor_api_key": "key_...",${'\n'}  "machine": "p2b-mac"${'\n'}}</pre></li>
     <li>重启 <code>./p2b serve</code>。</li>
-  </ol>
+  </ol></details>`}
   ${a.enabled ? html`<p>当前 worker：<b>${a.machine}</b>${a.auto_agent ? '，收下后自动交给 agent 整理。' : '，自动整理已关闭（config.json 中 auto_agent=false）。'}</p>` : html`<p class="hint">当前缺少：${a.missing.join('、')}</p>`}
+  ${a.enabled ? html`<div class="block-title" style="margin-top:14px">模型<span class="line"></span></div>
+    <p class="hint" style="margin-top:0">每个模块可以用不同的模型。研究页的长讨论适合推理和表达强、上下文选 1m 的模型。改了之后，新开的讨论和任务才用新模型；已经在进行的讨论沿用原来的模型，想换就“分出新讨论”（带上下文）或“发起新讨论”（从头开始）。</p>
+    <${Models} key=${a.machine} />` : null}
   <p class="hint">调优 agent：修改仓库里的 <code>librarian/*.md</code>，再在捕获详情里点“重新整理”。</p>
   <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>知道了</button></div>`;
 }

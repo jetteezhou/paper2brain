@@ -602,6 +602,19 @@ def deep_queue():
         )]
 
 
+def card_queue():
+    """Listed papers with full text but no quick card, none being written for them, and no capture of theirs still
+    being resolved or handled by its agent (that agent writes the card), most recently added first."""
+    with tx() as c:
+        return [r[0] for r in c.execute(
+            f"SELECT p.id FROM papers p WHERE {LISTED} AND p.card IS NULL AND p.page_count > 0 "
+            f"AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ref=p.id AND r.kind='card' AND r.status IN {_UNFINISHED_SQL}) "
+            "AND NOT EXISTS (SELECT 1 FROM capture_papers cp JOIN captures c ON c.id=cp.capture_id WHERE cp.paper_id=p.id "
+            f"AND (c.status='resolving' OR EXISTS (SELECT 1 FROM runs r WHERE r.ref=c.id AND r.kind='capture' AND r.status IN {_UNFINISHED_SQL}))) "
+            "ORDER BY p.created_at DESC"
+        )]
+
+
 def counts():
     with tx() as c:
         out = {t: 0 for t in TRIAGE}

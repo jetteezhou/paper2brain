@@ -526,6 +526,24 @@ def writing_draft(q, body, rid):
     return {"run_id": cursor_api.draft_writing(rid, (body.get("instruction") or "").strip() or None)}
 
 
+@route("GET", "/api/agent/models")
+def agent_models(q, body):
+    return {"modules": [{"id": k, "label": v, "model": cursor_api.config()["models"].get(k)} for k, v in cursor_api.MODULES.items()],
+            "fallback": cursor_api.config()["model"], "models": cursor_api.list_models()}
+
+
+@route("POST", "/api/agent/models")
+def agent_model_set(q, body):
+    cursor_api.set_model(body.get("module"), body.get("model"))
+    return {"ok": True}
+
+
+@route("POST", "/api/agent/backend")
+def agent_backend_set(q, body):
+    cursor_api.set_backend(body.get("backend"))
+    return {"ok": True}
+
+
 @route("GET", "/api/research/([^/]+)/export")
 def writing_export(q, body, rid):
     return export.research_export(rid)
@@ -658,7 +676,7 @@ class Handler(BaseHTTPRequestHandler):
 def _poll_inbox():
     while True:
         for job in (store.backup, cursor_api.expire_stale, inbox.drain, cursor_api.distill_pending, cursor_api.deepread_pending,
-                    structure.backfill):
+                    cursor_api.card_pending, structure.backfill):
             try:
                 job()
             except Exception:
