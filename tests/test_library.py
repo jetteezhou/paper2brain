@@ -461,9 +461,14 @@ class Store(unittest.TestCase):
         page.draw_rect(pymupdf.Rect(150, 230, 460, 420), color=(0, 0, 1), fill=(0.8, 0.9, 1))
         page.insert_textbox(pymupdf.Rect(72, 430, 540, 470), "Figure 1: Overview of our architecture, from images to actions.")
         page.insert_textbox(pymupdf.Rect(72, 480, 540, 600), "More body text that discusses the results. " * 12)
+        page = doc.new_page()
+        page.insert_text((72, 40), "2    Flow Policies")  # running header right above the figure
+        page.draw_rect(pymupdf.Rect(150, 70, 460, 250), color=(0, 0, 1), fill=(0.8, 0.9, 1))
+        page.insert_textbox(pymupdf.Rect(72, 260, 540, 300), "Figure 2: Success rate on every task against the number of demonstrations.")
         paper = pipeline.paper_from_pdf(doc.tobytes())
         s = structure.extract(paper["id"])
-        self.assertEqual([(f["n"], f["page"]) for f in s["figures"]], [(1, 1)])
+        self.assertEqual([(f["n"], f["page"]) for f in s["figures"]], [(1, 1), (2, 2)])
+        self.assertLess(s["figures"][1]["h"], (250 - 70 + 20) * 150 / 72)
         self.assertTrue((store.paper_dir(paper["id"]) / "figures" / "1.png").exists())
         self.assertEqual(structure.key_figures(s)[0]["n"], 1)
         card = rules.validate_card({**CARD, "results": [{"text": "x", "quote": "discusses the results", "page": 1}],

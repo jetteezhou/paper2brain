@@ -7,7 +7,7 @@ import pymupdf
 
 from . import store
 
-VERSION = 1
+VERSION = 2
 CAPTION = re.compile(r"^\s*(?:Figure|Fig\.)\s*(\d+)\s*[:.|]", re.I)
 _TABLE = re.compile(r"^\s*Table\s*\d+", re.I)
 _HEADING = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+([A-Z][^\n]{2,80})$")
@@ -52,9 +52,16 @@ def _figures(page):
         if not found:
             continue
         box = pymupdf.Rect(found[0])
-        for r in found[1:] + [pymupdf.Rect(o[:4]) for o in blocks if o is not b and within(pymupdf.Rect(o[:4]))]:
+        for r in found[1:]:
             box |= r
+        # labels join only when they touch the graphics, so a running header above the figure stays out
+        texts = [pymupdf.Rect(o[:4]) for o in blocks if o is not b and within(pymupdf.Rect(o[:4]))]
+        while near := [t for t in texts if t.intersects(box + (-8, -8, 8, 8))]:
+            for t in near:
+                box |= t
+                texts.remove(t)
         box = (box + (-4, -4, 4, 4)) & (area if wide else pymupdf.Rect(x0 - 10, 0, x1 + 10, area.height))
+        box.y1 = min(box.y1, cap.y0)
         if box.width >= 60 and box.height >= 40:
             out.append((int(m.group(1)), re.sub(r"\s+", " ", b[4]).strip(), box))
     return out
