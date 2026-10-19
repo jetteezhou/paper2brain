@@ -14,6 +14,8 @@ CONFIG="${P2B_HOME:-$HOME/paper2brain-data}/config.json"
 for name in server worker; do
   label="com.paper2brain.$name"
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  # bootout returns before the job is gone; bootstrapping too early fails with "5: Input/output error"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || break; sleep 1; done
   sed -e "s#REPO#$REPO#g" -e "s#HOMEDIR#$HOME#g" "$REPO/ops/$label.plist" > "$AGENTS/$label.plist"
   launchctl bootstrap "gui/$(id -u)" "$AGENTS/$label.plist"
 done
