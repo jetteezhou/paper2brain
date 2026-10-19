@@ -4,14 +4,18 @@
 // with tributaries inline where they fork — or the delta, a living canvas of the whole tree (zoom, pan, drag to move).
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, ago, short, plain, threadName, live, Md, firstSentence, enc } from './lib.js';
+import { html, get, post, ago, short, plain, threadName, live, Md, firstSentence, enc, fit, touch, Mark } from './lib.js';
 import {
-  appState, agentOn, useLive, refresh, toast, fail, openThread, openReader, openCapture, openResearch, highlight, go,
+  appState, agentOn, useLive, refresh, toast, fail, openThread, openReader, openCapture, openResearch, highlight, go, quoting,
 } from './state.js';
 import { researchPicker, openComposer, ResearchChip } from './research.js';
 import { PaperChip } from './papers.js';
 
-const SCOPE_KIND = { library: '论文库', topic: '主题', paper: '论文', papers: '多篇论文', find: '找论文', anchor: '划词', capture: '收下', research: '研究' };
+const SCOPE_KIND = { library: '论文库', topic: '主题', paper: '论文', papers: '多篇论文', find: '找论文', anchor: '划词', capture: '收下', research: '研究', writing: '写作', related: '相关工作', plan: '计划', code: '代码', experiment: '实验' };
+const RESEARCH_PART = { writing: '写作', related: '相关工作', plan: '计划', code: '代码', experiment: '实验' };
+const ofResearch = (k) => k === 'research' || k in RESEARCH_PART;
+// a research grows from many sources, never from one paper or one passage of it
+const canCompose = (k) => !ofResearch(k) && k !== 'paper' && k !== 'anchor';
 const SUGGEST = {
   paper: ['用三句话讲清这篇的核心贡献', '和 π0、OpenVLA 相比有什么不同？', '真机实验做了哪些任务、成功率多少？'],
   topic: ['这个方向最近在解决什么问题？', '列出代表性方法和它们的关键区别'],
@@ -19,6 +23,11 @@ const SUGGEST = {
   anchor: ['这段在说什么？用大白话解释一下', '为什么要这样设计？有没有别的做法', '这和我的研究有什么关系？'],
   capture: ['它讲的是哪篇、核心贡献是什么？', '我收下时的想法成立吗？库里有没有证据', '如果值得做，最小的验证方式是什么？'],
   research: ['这个研究的问题成立吗？最强的反对意见是什么？', '和库里最接近的工作相比，方法上的区别在哪？', '帮我把验证方案收敛到一个最小实验'],
+  related: ['和我们最接近的是哪几篇？区别说得清吗', '还漏了哪条重要的研究方向？补找几篇', '把这几条方向的段落改得更像审稿人想看的'],
+  writing: ['按三要素和实验记录起草摘要和引言', '引言的故事链哪一环最弱？帮我改', '贡献列表能在正文里找到证据吗？'],
+  plan: ['下一件最该做的事是什么？', '按现在的进度赶得上截止吗？不够的话砍什么', '最大的风险排在前面了吗？'],
+  code: ['复现这篇最容易踩的坑在哪？对照代码说', '我的方法应该从代码哪里接进去？', '论文和代码有哪些出入？'],
+  experiment: ['验证方案的最小实验具体怎么做？', '现有结果支持还是反驳核心洞见？', '下一个实验该做什么？对比谁、看什么指标'],
   find: ['把这几篇按方法路线分一分，列个对比表', '哪篇最值得先深读？为什么', '还漏了哪些重要工作？再补找几篇'],
   papers: ['它们各自解决什么问题？列个对比表', '方法上的关键分歧在哪？各自的证据是什么', '能不能组合起来？最小的验证实验是什么'],
 };
@@ -27,6 +36,7 @@ const kindOf = (scope) => scope.split(':')[0];
 export function scopeLabel(scope, title) {
   const k = kindOf(scope);
   if (k === 'research') return `研究《${title || '…'}》`;
+  if (k in RESEARCH_PART) return `研究《${title || '…'}》的${RESEARCH_PART[k]}`;
   if (k === 'capture') return '收下的这条';
   if (k === 'anchor') return '选中的这段';
   if (k === 'find') return `找到的论文「${short(title || '…', 24)}」`;
@@ -39,7 +49,7 @@ export function scopeLabel(scope, title) {
 function ScopeOpen({ scope }) {
   const k = kindOf(scope), ref = scope.slice(k.length + 1);
   if (k === 'paper') return html`<button class="btn sm ghost" onClick=${() => openReader(ref)}>打开论文</button>`;
-  if (k === 'research') return html`<button class="btn sm ghost" onClick=${() => openResearch(ref)}>打开研究</button>`;
+  if (ofResearch(k)) return html`<button class="btn sm ghost" onClick=${() => openResearch(ref)}>打开研究</button>`;
   if (k === 'capture' || k === 'find') return html`<button class="btn sm ghost" onClick=${() => openCapture(ref)}>打开收下的内容</button>`;
   return null;
 }
@@ -77,11 +87,36 @@ export function JotForm({ scope, placeholder, onDone }) {
 
 // ---------- the chat: one discussion read as the whole path from the root ----------
 
+/** Keeps the messages pinned to the bottom while you are there (a reply being written, the input growing);
+ * scroll up to read and it stays put until the next message. */
+function useStickToBottom(box, n, id) {
+  const stuck = useRef(true);
+  const pin = () => {
+    const el = box.current;
+    if (!el) return;
+    if (highlight.value) stuck.current = false;
+    else if (stuck.current) el.scrollTop = el.scrollHeight;
+  };
+  useEffect(() => { stuck.current = true; pin(); }, [n, id]);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const onScroll = () => { stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; };
+    const mo = new MutationObserver(pin), ro = new ResizeObserver(pin);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    ro.observe(el);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => { mo.disconnect(); ro.disconnect(); el.removeEventListener('scroll', onScroll); };
+  }, [id]);
+}
+
 function Msg({ m, t, onFork, shelf }) {
   const ref = useRef();
   const flash = highlight.value === m.id;
   useEffect(() => { if (flash) { ref.current?.scrollIntoView({ block: 'center' }); setTimeout(() => (highlight.value = null), 4000); } }, [flash]);
   const text = m.run_text || m.text, running = live(m.run_status), tools = m.run_tools || [];
+  const [stopping, setStopping] = useState(false);
+  const stop = async () => { setStopping(true); try { await post(`/api/runs/${enc(m.run_id)}/cancel`); refresh(); } catch (e) { setStopping(false); fail(e); } };
   const addToResearch = () => {
     const k = kindOf(t.scope), ref2 = t.scope.slice(k.length + 1), s = plain(text);
     researchPicker({ heading: '把这段讨论加入研究', title: firstSentence(s), summary: short(s, 300),
@@ -97,8 +132,10 @@ function Msg({ m, t, onFork, shelf }) {
       <div class="msg-foot right">${acts}</div>${forks}</div>`;
   }
   return html`<div class=${`msg bot${flash ? ' flash' : ''}`} id=${`m-${m.id}`} ref=${ref}>${text ? html`<${Md} text=${text} />` : null}
-    ${running ? html`<div class="typing"><span class="spin"></span>${text ? '还在写…' : tools.length ? '正在查阅论文库…' : m.run_status === 'WAITING' ? '排队中：前面还有 agent 在运行…' : 'Agent 启动中…'}</div>
+    ${running ? html`<div class="typing"><${Mark} spin />${text ? '还在写…' : tools.length ? '正在查阅论文库…' : m.run_status === 'WAITING' ? '排队中：前面还有 agent 在运行…' : 'Agent 启动中…'}
+      ${m.run_id ? html`<button class="btn sm ghost" disabled=${stopping} title="停下这一轮，直接发下一句纠正它" onClick=${stop}>${stopping ? '正在停止…' : '停止'}</button>` : null}</div>
       ${tools.length ? html`<div class="tools">${tools.slice(-3).map((x) => html`<div>${x.status === 'running' ? '…' : '✓'} ${x.name} ${x.args || ''}</div>`)}</div>` : null}` : null}
+    ${m.run_status === 'CANCELLED' ? html`<div class="hint">已停止</div>` : null}
     ${m.run_status === 'ERROR' ? html`<div class="hint" style="color:var(--red)">agent 出错了${m.run_error ? '：' + m.run_error : ''}</div>` : null}
     ${!running && text ? html`<div class="msg-foot">${acts}</div>` : null}${forks}</div>`;
 }
@@ -142,10 +179,11 @@ export function Composer({ t, reload, draft, setDraft, input }) {
     setDraft('');
     try { await post('/api/chat', { scope: t.scope, text, thread_id: t.id, ...(reply ? {} : { reply: false }) }); reload(); refresh(); } catch (e) { setDraft(text); fail(e); }
   };
+  useEffect(() => fit(input.current), [draft]);
   return html`<form class="chat-input" onSubmit=${(e) => { e.preventDefault(); send(on); }}>
     <textarea rows="1" ref=${input} value=${draft} onInput=${(e) => setDraft(e.target.value)}
-      onKeyDown=${(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(on && !e.altKey); } }}
-      placeholder=${on ? '问点什么… 回车发送，⌥回车只记下，Shift+回车换行' : 'Agent 未连接：回车只记下，连上后再接着聊'}></textarea>
+      onKeyDown=${(e) => { if (e.key === 'Enter' && !e.isComposing && (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch))) { e.preventDefault(); send(on && !e.altKey); } }}
+      placeholder=${touch ? (on ? '问点什么…' : 'Agent 未连接：先记下，连上后再接着聊') : on ? '问点什么… 回车发送，⌥回车只记下，Shift+回车换行' : 'Agent 未连接：回车只记下，连上后再接着聊'}></textarea>
     ${on ? html`<button type="button" class="btn ghost" title="只记下，不叫 agent 回答" onClick=${() => send(false)}>记下</button>` : null}
     <button class="btn primary">${on ? '发送' : '记下'}</button></form>`;
 }
@@ -164,14 +202,21 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
   const [draft, setDraft] = useState('');
   const box = useRef(), input = useRef();
   const n = t?.messages.length || 0;
-  useEffect(() => { if (box.current && !highlight.value) box.current.scrollTop = box.current.scrollHeight; }, [n, t?.id]);
+  useStickToBottom(box, n, t?.id);
+  useEffect(() => {
+    const q = quoting.value;
+    if (!q || q.scope !== t?.scope) return;
+    quoting.value = null;
+    setDraft((d) => `${d ? d.trimEnd() + '\n' : ''}「${q.text}」\n`);
+    setTimeout(() => { const el = input.current; el?.focus(); el?.setSelectionRange(el.value.length, el.value.length); });
+  }, [quoting.value, t?.scope]);
   const switchTo = (id) => { setTid(id); onThread?.(id); };
   if (!t) return html`<div class="chat"><div class="chat-empty"><span class="spin"></span></div></div>`;
   const k = kindOf(t.scope);
 
-  const branch = async (fork) => {
+  const branch = async (fork, fresh) => {
     try {
-      const nt = await post('/api/threads', fork ? { scope: t.scope, fork_message_id: fork.id } : { scope: t.scope, parent_id: t.id });
+      const nt = await post('/api/threads', fresh ? { scope: t.scope } : fork ? { scope: t.scope, fork_message_id: fork.id } : { scope: t.scope, parent_id: t.id });
       switchTo(nt.id);
       refresh();
       setTimeout(() => input.current?.focus(), 50);
@@ -181,7 +226,6 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
     const first = t.messages.find((m) => m.role === 'user');
     const ref = t.scope.slice(k.length + 1);
     openComposer({ links: [{ kind: 'thread', ref: t.id, label: t.title || first?.text || scopeLabel(t.scope, t.scope_title) },
-      ...(k === 'paper' ? [{ kind: 'paper', ref, label: t.scope_title || ref }] : []),
       ...t.scope_papers.map((p) => ({ kind: 'paper', ref: p.id, label: p.title }))], topics: k === 'topic' ? [ref] : [] });
   };
   const sib = t.siblings || [], si = sib.findIndex((s) => s.id === t.id);
@@ -190,14 +234,15 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
 
   return html`<div class="chat">
     <div class="chat-head">范围：${scopeLabel(t.scope, t.scope_title)}
-      ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(9)); }}>有修改稿待你确认 →</a>` : null}
-      ${sib.length > 1 ? html`<span class="branch-switch" title="同一处分出的几个分支">
-        <button disabled=${si <= 0} onClick=${() => switchTo(sib[si - 1].id)}>‹</button>分支 ${si + 1}/${sib.length}<button disabled=${si >= sib.length - 1} onClick=${() => switchTo(sib[si + 1].id)}>›</button></span>` : null}
+      ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(k.length + 1)); }}>有修改稿待你确认 →</a>` : null}
+      ${sib.length > 1 ? html`<span class="branch-switch" title=${t.parent_id ? '同一处分出的几个分支' : '这个范围里并列的几段讨论'}>
+        <button disabled=${si <= 0} onClick=${() => switchTo(sib[si - 1].id)}>‹</button>${t.parent_id ? '分支' : '讨论'} ${si + 1}/${sib.length}<button disabled=${si >= sib.length - 1} onClick=${() => switchTo(sib[si + 1].id)}>›</button></span>` : null}
       <span class="grow"></span>
       ${inWorkbench ? html`<${ScopeOpen} scope=${t.scope} />` : null}
       ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
-      ${n && k !== 'research' ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
-      ${n ? html`<button class="btn sm ghost" onClick=${() => branch(null)} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}</div>
+      ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
+      ${n ? html`<button class="btn sm ghost" onClick=${() => branch(null)} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
+      ${n || t.path.length ? html`<button class="btn sm ghost" onClick=${() => branch(null, true)} title="同一范围，不带前面的上下文，从头开始">发起新讨论</button>` : null}</div>
     ${n || t.path.length ? html`<div class="tree-bar">
       ${t.path.length ? html`<div class="crumbs">${t.path.map((s) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(s.id); }}>${short(threadName(s), 24)}</a><span>›</span>`)}</div>` : null}
       <${TitleLine} t=${t} />
@@ -241,7 +286,7 @@ function River({ t, reload }) {
   const [draft, setDraft] = useState('');
   const box = useRef(), input = useRef();
   const n = t.messages.length, k = kindOf(t.scope);
-  useEffect(() => { if (box.current && !highlight.value) box.current.scrollTop = box.current.scrollHeight; }, [n, t.id]);
+  useStickToBottom(box, n, t.id);
   useEffect(() => {  // a backlink may point at an upstream message: it flashes right in the stream
     if (highlight.value) { document.getElementById(`m-${highlight.value}`)?.scrollIntoView({ block: 'center' }); setTimeout(() => (highlight.value = null), 4000); }
   }, [t.id, highlight.value]);
@@ -269,17 +314,16 @@ function River({ t, reload }) {
   const compose = () => {
     const first = t.messages.find((m) => m.role === 'user'), ref = t.scope.slice(k.length + 1);
     openComposer({ links: [{ kind: 'thread', ref: t.id, label: t.title || first?.text || scopeLabel(t.scope, t.scope_title) },
-      ...(k === 'paper' ? [{ kind: 'paper', ref, label: t.scope_title || ref }] : []),
       ...t.scope_papers.map((p) => ({ kind: 'paper', ref: p.id, label: p.title }))], topics: k === 'topic' ? [ref] : [] });
   };
 
   return html`<div class="river">
     <div class="chat-head">范围：${scopeLabel(t.scope, t.scope_title)}
-      ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(9)); }}>有修改稿待你确认 →</a>` : null}
+      ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(k.length + 1)); }}>有修改稿待你确认 →</a>` : null}
       <span class="grow"></span>
       <${ScopeOpen} scope=${t.scope} />
       ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
-      ${n && k !== 'research' ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
+      ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${branch} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}</div>
     ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
     <div class="river-flow" ref=${box}>

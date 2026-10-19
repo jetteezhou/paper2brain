@@ -2,12 +2,12 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
 import {
-  html, get, post, del, enc, ago, short, firstLine, idLabel, channel, authors, live, href, plain, mdHtml, citeHtml, readBase64,
+  html, get, post, del, enc, ago, short, firstLine, idLabel, channel, authors, live, href, plain, mdHtml, citeHtml, readBase64, Mark,
 } from './lib.js';
 import {
   appState, agentOn, selected, useLive, refresh, toast, fail, go, openReader, openThread, openPaper, openResearch, openCapture, openModal, closeModal,
 } from './state.js';
-import { ThreadLines, JotForm, scopeLabel } from './discuss.js';
+import { Chat, ThreadLines, JotForm, scopeLabel } from './discuss.js';
 import { researchPicker, openComposer, ResearchChip, StageChip } from './research.js';
 import { useAnchorMarks, openFigure } from './reader.js';
 
@@ -30,8 +30,8 @@ export const PaperChip = ({ id, title }) => html`<a href="#" class="chip paper-c
 
 // ---------- list + detail layout and selection ----------
 
-export function ListDetail({ list, detail, hasSel }) {
-  return html`<div id="body" class=${hasSel ? 'show-detail' : ''}><section id="list">${list}</section><section id="detail">
+export function ListDetail({ list, detail, hasSel, single }) {
+  return html`<div id="body" class=${`${hasSel ? 'show-detail' : ''} ${single ? 'single' : ''}`}><section id="list">${list}</section><section id="detail">
     ${hasSel && !wide() ? html`<button class="btn sm ghost" onClick=${() => (selected.value = null)}>← 返回列表</button>` : null}${detail}</section></div>`;
 }
 
@@ -59,7 +59,7 @@ const Jump = ({ pid, label, intent, cls = '', title = '' }) =>
 
 function Jumps({ p, j, full }) {
   const state = reportState(p), pid = p.id;
-  const report = state && html`<${Jump} pid=${pid} label=${state === 'done' ? '深读报告 →' : html`<span class="spin"></span>报告生成中`} intent=${{ tab: 'report' }} cls=${state === 'done' ? 'go' : 'run'} />`;
+  const report = state && html`<${Jump} pid=${pid} label=${state === 'done' ? '深读报告 →' : html`<${Mark} spin />报告生成中`} intent=${{ tab: 'report' }} cls=${state === 'done' ? 'go' : 'run'} />`;
   if (!j) return state ? html`<div class="jumps">${report}</div>` : null;
   const parts = [];
   if (state === 'done' && full && j.report.length) {
@@ -135,7 +135,7 @@ export function PdfButton({ capture, paper }) {
 function DeepButton({ p }) {
   const state = reportState(p);
   if (state === 'done') return html`<button class="btn primary" onClick=${() => openReader(p.id, { tab: 'report' })}>看深读报告 →</button>`;
-  if (state === 'running') return html`<button class="btn primary" onClick=${() => openReader(p.id, { tab: 'report' })}><span class="spin"></span>报告生成中，进入深读 →</button>`;
+  if (state === 'running') return html`<button class="btn primary" onClick=${() => openReader(p.id, { tab: 'report' })}><${Mark} spin />报告生成中，进入深读 →</button>`;
   if (agentOn.value && p.page_count) {
     return html`<button class="btn primary" title="打开原文，agent 同时开始写深读报告" onClick=${async (e) => {
       e.target.disabled = true;
@@ -170,7 +170,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
       <div class="relevance"><b>和你的关系</b>　<${Html} s=${inlineMd(card.relevance)} /></div>
       ${takes.length ? html`<div class="takes"><div class="block-title" style="margin:10px 0 4px">解读观点<span class="line"></span></div>${takes}</div>` : null}`;
   } else {
-    const wait = capRun || deepRun ? html`<div class="card-wait"><span class="spin"></span>Agent 正在写快读卡…</div>`
+    const wait = capRun || deepRun ? html`<div class="card-wait"><${Mark} spin />Agent 正在写快读卡…</div>`
       : agentOn.value ? html`<div class="card-wait">还没有快读卡。${p.page_count ? html`<button class="btn sm" onClick=${async (e) => {
         e.target.disabled = true;
         try { await post(`/api/papers/${enc(p.id)}/card`); toast('已交给 agent 写快读卡'); refresh(); } catch (err) { fail(err); e.target.disabled = false; }
@@ -204,7 +204,6 @@ export function PaperCard({ paper: p, capture, inReader }) {
     ${inReader ? null : html`<div class="paper-actions">
       <${DeepButton} p=${p} />
       <button class="btn" onClick=${() => openReader(p.id, { tab: 'chat' })}>讨论这篇</button>
-      <button class="btn" onClick=${() => openComposer({ links: [{ kind: 'paper', ref: p.id, label: p.title }] })}>开始研究</button>
       <button class="btn" title=${deep ? '移回收件箱' : 'agent 会先把深读报告写好，你有空时直接看'} onClick=${toggleDeep}>${deep ? '✓ 已在稍后深读' : '稍后深读'}</button></div>`}
   </article>`;
 }
@@ -224,19 +223,21 @@ function PaperDetail({ pid }) {
   const [p, , err] = useLive(`/api/papers/${enc(pid)}`);
   if (err) return html`<div class="empty"><b>打不开</b>${err}</div>`;
   if (!p) return html`<div class="empty"><span class="spin"></span></div>`;
-  return html`<div class="detail"><${PaperCard} paper=${p} />
+  // the discussion docked beside the card is the reader's discussion tab: same scope, same threads
+  return html`<div class="research-split"><div class="research-main"><div class="detail"><${PaperCard} paper=${p} />
     ${p.captures.length ? html`<div class="block"><div class="block-title">来源 · ${p.captures.length}<span class="line"></span></div>
       ${p.captures.map((c) => html`<div class="item" style="padding:9px 0;border:0" onClick=${() => openCapture(c.id)}>
         <div class="item-meta"><span class="src">${channel(c)}${c.author ? ' · ' + c.author : ''}</span><time>${ago(c.created_at)}</time></div>
         <div>${c.title || short(firstLine(c.raw), 80)}</div></div>`)}</div>` : null}
-    <${PaperNotes} p=${p} /></div>`;
+    <${PaperNotes} p=${p} /></div></div>
+    <aside class="research-dock"><${Chat} key=${p.id} scope=${`paper:${p.id}`} /></aside></div>`;
 }
 
 // ---------- captures ----------
 
 function StatusChip({ c }) {
   if (c.status === 'saved' || c.status === 'resolving') return html`<span class="chip"><span class="spin"></span>正在找原论文</span>`;
-  if (live(c.run_status)) return html`<span class="chip violet"><span class="spin"></span>Agent 整理中</span>`;
+  if (live(c.run_status)) return html`<span class="chip violet"><${Mark} spin />Agent 整理中</span>`;
   if (c.status === 'needs_confirm') return html`<span class="chip amber">待确认论文</span>`;
   if (c.status === 'needs_agent') return html`<span class="chip amber">截图待识别</span>`;
   if (c.status === 'unmapped') return html`<span class="chip">没找到论文</span>`;
@@ -288,7 +289,7 @@ function removalText(plan) {
 }
 
 function RunStatus({ r }) {
-  if (live(r.status)) return html`<span class="chip violet"><span class="spin"></span>${{ WAITING: '排队中', CREATING: '启动中' }[r.status] || '运行中'}</span>`;
+  if (live(r.status)) return html`<span class="chip violet"><${Mark} spin />${{ WAITING: '排队中', CREATING: '启动中' }[r.status] || '运行中'}</span>`;
   const done = { FINISHED: ['完成', 'chip green'], ERROR: ['出错', 'chip red'], CANCELLED: ['已取消', 'chip'], EXPIRED: ['已过期', 'chip'] }[r.status] || [r.status, 'chip'];
   return html`<span class=${done[1]}>${done[0]}</span>`;
 }
@@ -369,7 +370,7 @@ function CaptureDetail({ id, view }) {
   let notice = null;
   if (find) {
     notice = html`<div class="notice info"><h3>你让 agent 找的论文</h3><div class="find-ask">${c.raw}</div>
-      <p class="hint">${running ? html`<span class="spin"></span> agent 正在检索、挑选、入库，挑中的论文会陆续出现在下面…` : papers.length ? `找到 ${papers.length} 篇，都已入库；入选理由写在每篇上方，比较和分析在讨论里。` : 'agent 没有关联到论文，去讨论里看它的说明，或者换个说法再找。'}</p>
+      <p class="hint">${running ? html`<${Mark} spin /> agent 正在检索、挑选、入库，挑中的论文会陆续出现在下面…` : papers.length ? `找到 ${papers.length} 篇，都已入库；入选理由写在每篇上方，比较和分析在讨论里。` : 'agent 没有关联到论文，去讨论里看它的说明，或者换个说法再找。'}</p>
       ${c.research?.length ? html`<p class="hint">从研究 <${ResearchChip} x=${c.research[0]} /> 的论文出发找的。对路的点“对路，加入研究”，下一轮就成了种子；不对路的点“不对路？”，下一轮会避开。</p>` : null}
       <button class="btn primary sm" onClick=${() => openThread(`find:${c.id}`)}>${papers.length > 1 ? `一起讨论这 ${papers.length} 篇 →` : '去讨论 →'}</button>
       ${papers.length > 1 && papers.length <= 5 ? html` <button class="btn sm" onClick=${() => openCompare(papers.map((p) => p.id))}>对比这 ${papers.length} 篇</button>` : null}</div>`;

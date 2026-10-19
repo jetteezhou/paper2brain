@@ -2,7 +2,7 @@
 import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, del, short, ago, readBase64, idLabel, threadName, Icon } from './lib.js';
+import { html, get, post, del, short, ago, readBase64, idLabel, threadName, Icon, fit, Mark, agentBusy } from './lib.js';
 import {
   route, baseRoute, go, appState, loadState, refresh, toast, toastSig, fail, modalSig, openModal, closeModal,
   selected, openThread, openCapture, openReader, openPaper, openResearch, useLive,
@@ -122,7 +122,7 @@ const activityModal = (day) => openModal(html`<${Activity} key=${day || 'today'}
 function Sidebar() {
   const a = appState.value?.agent;
   return html`<aside id="side">
-    <div class="brand"><div class="brand-mark">p2</div>paper2brain</div>
+    <div class="brand" title=${agentBusy.value || (appState.value?.counts?.running || 0) > 0 ? 'Agent 正在工作' : ''}><${Mark} quiet cls="brand-mark" spin=${agentBusy.value || (appState.value?.counts?.running || 0) > 0} />paper2brain</div>
     <${PalTrigger} />
     <nav class="nav">
       <${MainNav} />
@@ -286,6 +286,16 @@ async function jot(text) {
   } catch (e) { cap.value = { ...cap.value, text }; fail(e); }
 }
 
+async function ask(text) {
+  clearCap();
+  try {
+    const t = await post('/api/threads', { scope: 'library' });
+    await post('/api/chat', { scope: 'library', text, thread_id: t.id });
+    openThread('library', t.id);
+    refresh();
+  } catch (e) { cap.value = { ...cap.value, text }; fail(e); }
+}
+
 function startResearch() {
   const { text, thought, files } = cap.value;
   const fs = files.map((f, i) => ({ name: f.name || `截图-${i + 1}.png`, mime: f.mime, data: f.data }));
@@ -340,6 +350,7 @@ function paletteItems(t, link, files, hits) {
       h.threads.slice(0, 3).forEach((x) => add('库里', `t:${x.id}`, '◌', threadName(x), '讨论', () => openThread(x.scope, x.id), true));
       h.research.slice(0, 3).forEach((x) => add('库里', `r:${x.id}`, '☆', x.title, '研究', () => openResearch(x.id), true));
     }
+    if (appState.value?.agent?.enabled) add('用这段话', 'ask', '◌', `和 agent 讨论：${say}`, '整个论文库，比如改主题树、归纳方向', () => ask(t));
     add('用这段话', 'jot', '✎', '记成一个想法', '开一段讨论，不叫 agent 回答', () => jot(t));
     if (!FIND_RE.test(t)) find();
     add('用这段话', 'cap', '＋', '收下这段文字', '按标题找原论文', submitCapture);
@@ -371,7 +382,7 @@ function Palette() {
     ta.current?.focus();
     return () => setTimeout(() => { if (document.activeElement === document.body) back.current?.focus?.(); });
   }, []);
-  useEffect(() => { const el = ta.current; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 180) + 'px'; }, [text]);
+  useEffect(() => fit(ta.current), [text]);
   useEffect(() => {
     if (!t || link) return setHits(null);
     const id = setTimeout(() => get(`/api/search?q=${encodeURIComponent(t)}`).then((r) => setHits({ q: t, r })).catch(() => {}), 160);
@@ -471,11 +482,17 @@ function Toast() {
     ${t.action ? html`<button onClick=${() => { toastSig.value = null; t.onAction(); }}>${t.action}</button>` : null}`}</div>`;
 }
 
+/** Backdrop click and Esc: ask first only if the user actually edited something in the modal. */
+function dismissModal() {
+  if (!modalSig.value?.edited || confirm('关闭会丢掉还没保存的内容，确定吗？')) closeModal();
+}
+
 function Modal() {
   const m = modalSig.value;
   if (!m) return null;
-  return html`<div class="modal-bg" onClick=${(e) => { if (e.target === e.currentTarget) closeModal(); }}>
-    <div class=${`modal ${m.wide ? 'wide' : ''}`}>${m.vnode}</div></div>`;
+  // Preact fills inputs via the value property, so defaultValue can't tell prefilled text from user edits.
+  return html`<div class="modal-bg" onMouseDown=${(e) => { if (e.target === e.currentTarget) dismissModal(); }}>
+    <div class=${`modal ${m.wide ? 'wide' : ''}`} onInput=${() => { m.edited = true; }}>${m.vnode}</div></div>`;
 }
 
 function App() {
@@ -484,7 +501,7 @@ function App() {
     loadState();
     const key = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); palOpen.value = !palOpen.value; return; }
-      if (e.key === 'Escape' && modalSig.value) { closeModal(); return; }
+      if (e.key === 'Escape' && modalSig.value) { dismissModal(); return; }
       const t = e.target instanceof Element ? e.target : document.body;
       if (t.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === '/') { e.preventDefault(); openPalette(); }
@@ -506,6 +523,15 @@ function App() {
     <${Toast} />
     <${Modal} />`;
 }
+
+// Every textarea grows with what you type and opens already fitted to prefilled text; ⌘/Ctrl+Enter submits its form.
+document.addEventListener('input', (e) => { if (e.target instanceof HTMLTextAreaElement) fit(e.target); });
+const fitted = new WeakSet();
+new MutationObserver(() => { for (const t of document.getElementsByTagName('textarea')) if (!fitted.has(t) && t.offsetWidth) { fitted.add(t); fit(t); } })
+  .observe(document.body, { childList: true, subtree: true });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.defaultPrevented && e.target instanceof HTMLTextAreaElement && e.target.form) { e.preventDefault(); e.target.form.requestSubmit(); }
+});
 
 if (!location.hash) location.hash = '#/inbox';
 render(html`<${App} />`, document.getElementById('root'));

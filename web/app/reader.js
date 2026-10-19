@@ -3,9 +3,9 @@
 // figure lightbox, which open from anywhere a card is shown.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, del, enc, short, idLabel, href, Md, citeHtml } from './lib.js';
+import { html, get, post, del, enc, short, idLabel, href, Md, citeHtml, Mark } from './lib.js';
 import {
-  route, baseRoute, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, registerAction, openReader,
+  route, baseRoute, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, registerAction, openReader, quoting,
 } from './state.js';
 import { PaperCard, PaperNotes, PdfButton, RunCard, reportState } from './papers.js';
 import { Chat } from './discuss.js';
@@ -189,7 +189,7 @@ function Report({ p, section }) {
   }, [section, !!p.report]);
   const run = p.runs.find((x) => x.kind === 'deepread' && (x.status === 'WAITING' || x.status === 'CREATING' || x.status === 'RUNNING' || x.status === 'QUEUED'));
   if (run) {
-    return html`<div class="card-wait"><span class="spin"></span>Agent 正在写深读报告，通常需要几分钟。可以先读左边的原文，写好后会自动出现在这里。</div>
+    return html`<div class="card-wait"><${Mark} spin />Agent 正在写深读报告，通常需要几分钟。可以先读左边的原文，写好后会自动出现在这里。</div>
       ${p.card?.tldr ? html`<div class="tldr">${p.card.tldr}</div>` : null}<${RunCard} r=${run} label="深读" />`;
   }
   if (!p.report) {
@@ -323,17 +323,19 @@ export function SelectionPopup() {
       if (box.current?.contains(e.target)) return;
       setTimeout(() => {
         const sel = window.getSelection();
-        if (!sel.rangeCount || box.current?.contains(sel.anchorNode)) return;
+        if (!sel.rangeCount || sel.isCollapsed || box.current?.contains(sel.anchorNode)) return;
         const range = sel.getRangeAt(0);
         const text = wholeWords(range, sel.toString()).replace(/\s+/g, ' ').trim();
         if (text.length < 2) return;
         const node = range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
-        const host = node.closest('[data-anchor-surface]');
-        if (!host) return;
-        const pg = node.closest('.pdf-page'), rect = range.getBoundingClientRect();
+        const host = node.closest('[data-anchor-surface]'), into = node.closest('.quotable')?.closest('[data-quote-scope]');
+        const editing = document.activeElement?.matches('input, textarea') && into?.contains(document.activeElement);
+        if (!host && !into || editing) return;
+        const pg = node.closest('.pdf-page'), rect = range.getBoundingClientRect(), at = { top: rect.top, bottom: rect.bottom, left: rect.left };
         setV('');
+        if (into) return setCtx({ scope: into.dataset.quoteScope, quote: text.slice(0, 2000), rect: at });
         setCtx({ pid: host.dataset.pid, surface: host.dataset.anchorSurface, quote: text.slice(0, 2000), page: pg ? +pg.dataset.page : null,
-          section: host.dataset.section || null, rect: { top: rect.top, bottom: rect.bottom, left: rect.left } });
+          section: host.dataset.section || null, rect: at });
       }, 0);
     };
     const down = (e) => { if (!box.current?.contains(e.target)) setCtx(null); };
@@ -350,6 +352,11 @@ export function SelectionPopup() {
   }, [ctx]);
   if (!ctx) return null;
   const done = () => { setCtx(null); window.getSelection().removeAllRanges(); };
+  if (ctx.scope) {
+    return html`<div id="selpop" ref=${box} onMouseDown=${(e) => e.preventDefault()}>
+      <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>
+      <div class="selpop-acts"><button class="btn sm primary" title="把这段引用放进右侧讨论的输入框，接着写想怎么改" onClick=${() => { quoting.value = { scope: ctx.scope, text: ctx.quote }; done(); }}>加入讨论</button></div></div>`;
+  }
   const discuss = async () => {
     const c = ctx, text = v.trim();
     done();

@@ -14,6 +14,7 @@ export const route = signal(parseHash());
 export const baseRoute = signal(route.value.view === 'read' ? { view: 'inbox', arg: null } : route.value);
 /** The item selected in a list view: { kind, id }. A new view starts with nothing selected, unless openItem chose it. */
 export const selected = signal(null);
+selected.subscribe(() => document.getElementById('detail')?.scrollTo(0, 0));
 let keepSelection = false;
 window.addEventListener('hashchange', () => {
   const r = parseHash(), b = baseRoute.value;
@@ -100,6 +101,8 @@ export function openReader(pid, intent = {}) {
 }
 /** The message to flash once a discussion is on screen. */
 export const highlight = signal(null);
+/** A passage selected on a page, waiting to be quoted into that scope's discussion input: { scope, text }. */
+export const quoting = signal(null);
 /** A discussion: a paper's own discussions open in the reader beside the paper, the rest in the discussion view.
  * Without threadId: the scope's latest discussion (created on first use). */
 export async function openThread(scope, threadId, mid) {

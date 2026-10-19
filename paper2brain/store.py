@@ -628,6 +628,8 @@ def counts():
         out["unsorted"] = c.execute(
             f"SELECT count(*) FROM papers p WHERE {LISTED} AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id)"
         ).fetchone()[0]
+        out["running"] = c.execute(
+            f"SELECT count(*) FROM runs WHERE status IN {_UNFINISHED_SQL}").fetchone()[0]
     return out
 
 
@@ -1028,8 +1030,8 @@ def thread_for(scope=None, thread_id=None):
         used = _research_for(c, "message", [m["id"] for m in t["messages"]])
         t["parent"] = _row(c.execute(_HEAD + "WHERE t.id=?", (t["parent_id"],)).fetchone()) if t["parent_id"] else None
         t["children"] = _rows(c.execute(_HEAD + "WHERE t.parent_id=? ORDER BY t.created_at", (t["id"],)))
-        t["siblings"] = _rows(c.execute(_HEAD + "WHERE t.parent_id IS ? AND t.fork_message_id IS ? AND t.parent_id IS NOT NULL "
-                                                "ORDER BY t.created_at, t.rowid", (t["parent_id"], t["fork_message_id"])))
+        t["siblings"] = _rows(c.execute(_HEAD + "WHERE t.parent_id IS ? AND t.fork_message_id IS ? AND (t.parent_id IS NOT NULL OR t.scope=?) "
+                                                "ORDER BY t.created_at, t.rowid", (t["parent_id"], t["fork_message_id"], t["scope"])))
         t["path"] = _path(c, t)
         t["research"] = _research_for(c, "thread", [t["id"]]).get(t["id"], [])
         t["papers"] = _papers_cited(c, [m["run_text"] or m["text"] for m in t["messages"]])

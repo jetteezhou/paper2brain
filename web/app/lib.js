@@ -1,5 +1,7 @@
 // Shared by every view: templates (htm on Preact), the API, formatting and the small Markdown renderer.
 import { h } from 'preact';
+import { useEffect, useRef } from 'preact/hooks';
+import { signal } from '@preact/signals';
 import htm from 'htm';
 
 export const html = htm.bind(h);
@@ -18,6 +20,15 @@ export async function api(method, url, body) {
 export const get = (u) => api('GET', u);
 export const post = (u, b = {}) => api('POST', u, b);
 export const del = (u) => api('DELETE', u);
+
+/** Grow a textarea to its content; `rows` stays the floor and CSS max-height the ceiling (it scrolls past that). */
+export function fit(el) {
+  if (!el?.offsetWidth) return;  // hidden: scrollHeight would be 0
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+}
+/** Phones have no Shift key handy: there Enter is a newline and the button sends. */
+export const touch = matchMedia('(pointer: coarse)').matches;
 
 // ---------- formatting ----------
 
@@ -42,6 +53,35 @@ export const authors = (a) => (a || []).length ? a.slice(0, 3).join(', ') + (a.l
 export const firstLine = (s) => (s || '').split('\n').find((l) => l.trim()) || '';
 export const short = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s || '');
 export const live = (status) => ['WAITING', 'CREATING', 'RUNNING', 'QUEUED'].includes(status);
+
+/** True while some on-screen mark is spinning, so the corner logo can follow without a fresh /api/state. */
+export const agentBusy = signal(false);
+const _busy = { n: 0 };
+const holdBusy = () => {
+  agentBusy.value = true;
+  _busy.n++;
+  return () => { _busy.n = Math.max(0, _busy.n - 1); agentBusy.value = _busy.n > 0; };
+};
+
+/** The mark. `spin` turns only the three commas around the pupil; the disc stays put. `quiet` is the corner logo, which follows others instead of counting itself. */
+export function Mark({ spin = false, cls = '', quiet = false }) {
+  const id = useRef(`mk${Math.random().toString(36).slice(2, 8)}`).current;
+  useEffect(() => (spin && !quiet ? holdBusy() : undefined), [spin, quiet]);
+  return html`<svg class=${`mark ${cls}${spin ? ' on' : ''}`} viewBox="0 0 64 64" aria-hidden="true">
+    <defs><mask id=${id}><circle cx="32" cy="32" r="30" fill="#fff"/><circle cx="32" cy="32" r="9" fill="#000"/></mask></defs>
+    <g mask=${`url(#${id})`}>
+      <circle cx="32" cy="32" r="30" fill="#fffdf9"/>
+      <g transform="translate(32 32)"><g class="tomoe"><g transform="translate(-32 -32)">
+        <path d="M32 2A30 30 0 0 1 61.836 35.136A15.19 15.19 0 0 0 38.02 21.103A10.5 10.5 0 0 1 32 2Z" fill="#e23b2e"/>
+        <circle cx="32" cy="12.5" r="10.5" fill="#e23b2e"/>
+        <path d="M57.981 47A30 30 0 0 1 14.366 56.271A15.19 15.19 0 0 0 38.427 42.662A10.5 10.5 0 0 1 57.981 47Z" fill="#f0a000"/>
+        <circle cx="48.887" cy="41.75" r="10.5" fill="#f0a000"/>
+        <path d="M6.019 47A30 30 0 0 1 19.798 4.594A15.19 15.19 0 0 0 19.553 32.235A10.5 10.5 0 0 1 6.019 47Z" fill="#0f9d94"/>
+        <circle cx="15.113" cy="41.75" r="10.5" fill="#0f9d94"/>
+      </g></g></g>
+    </g>
+  </svg>`;
+}
 export const plain = (s) => (s || '').replace(/\[(?:arxiv|doi|openreview|pdf):[^\]]*?(?:\s*p\.?\s*(\d+))?\]/gi, (m, p) => (p ? `(p.${p})` : ''))
   .replace(/[*`#>]+/g, '').replace(/\s+/g, ' ').trim();
 export const firstSentence = (s, n = 30) => short((s || '').replace(/[#*`>\-\[\]]/g, '').split(/[。！？\n.!?]/).find((x) => x.trim())?.trim() || '', n);

@@ -311,6 +311,9 @@ class Store(unittest.TestCase):
         self.assertEqual((t["parent_id"], [m["text"] for m in t["path"][0]["messages"]]),
                          (root, ["动作头怎么选", f"flow matching 更快 [{pid} p.3]"]))  # up to the fork, not after it
         self.assertEqual([s["id"] for s in t["siblings"]], [a, b])
+        one, two = store.new_thread("topic:sib", text="一"), store.new_thread("topic:sib", text="二")
+        store.new_thread("topic:other", text="别的范围")
+        self.assertEqual([s["id"] for s in store.thread_for(thread_id=two)["siblings"]], [one, two])  # roots: same scope only
         r = store.thread_for(thread_id=root)
         self.assertEqual(([x["id"] for x in r["messages"][1]["forks"]], r["papers"]), ([a, b], [{"id": pid, "title": "cited"}]))
         self.assertEqual([x["id"] for x in store.cited_in(pid)], [root])
