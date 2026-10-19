@@ -43,7 +43,7 @@ function TopicTree() {
   if (!s) return null;
   const r = baseRoute.value;
   const inTopic = (path) => (r.view === 'topic' || r.view === 'research') && r.arg === path;
-  const edit = (path) => html`<button class="nav-edit" title="改名 / 移动" onClick=${(e) => { e.stopPropagation(); topicModal(path); }}>⋯</button>`;
+  const edit = (path) => html`<button class="nav-edit" title="改名 / 移动 / 删除" onClick=${(e) => { e.stopPropagation(); topicModal(path); }}>⋯</button>`;
   return html`${s.topics.map((t) => {
     const open = openTopics.value.has(t.path) || (r.view === 'topic' && r.arg?.startsWith(t.path + '/'));
     return html`<div class=${`nav-item ${inTopic(t.path) ? 'on' : ''}`} onClick=${() => go('topic', t.path)}>
@@ -159,13 +159,27 @@ function TopicForm({ path }) {
       refresh();
     } catch (err) { fail(err); }
   };
-  return html`<h3>${t ? '改名或移动主题' : '新建主题'}</h3>
+  const kind = parent ? '子主题' : '主题';
+  const remove = async () => {
+    if (!confirm(parent
+      ? `删除子主题「${t.name}」？\n\n它下面的论文、研究、笔记和讨论都会归到上一级主题「${parent}」，不会丢失。\n子主题本身删除后不能恢复。`
+      : `删除主题「${t.name}」？\n\n它下面的论文会变成「未归类」，研究和讨论都保留（讨论移到「整个论文库」）。\n主题本身删除后不能恢复。`)) return;
+    try { await post('/api/topics/delete', { path }); } catch (err) { fail(err); return; }
+    closeModal();
+    toast(parent ? `已删除子主题「${t.name}」，内容归到「${parent}」` : `已删除主题「${t.name}」`);
+    const b = baseRoute.value;
+    if (b.view === 'topic' && b.arg === path) parent ? go('topic', parent) : go('papers');
+    refresh();
+  };
+  return html`<h3>${t ? `改名、移动或删除${kind}` : '新建主题'}</h3>
     <form class="research-create" onSubmit=${submit}>
       <input name="name" value=${t?.name || ''} placeholder="主题名，比如：模仿学习" maxlength="30" aria-label="主题名" autofocus />
       <label class="hint">放在 <select name="parent" disabled=${!!t?.children?.length} title=${t?.children?.length ? '有子主题的一级主题不能移动' : ''}>
         <option value="">（作为一级主题）</option>${roots.map((r) => html`<option value=${r.path} selected=${r.path === parent}>${r.name}</option>`)}</select> 下面</label>
       ${t ? html`<p class="hint">这个主题下的论文、研究和讨论会跟着一起改名或移动。</p>` : null}
-      <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn" onClick=${closeModal}>取消</button><button class="btn primary">${t ? '保存' : '新建'}</button></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">${t ? html`<button type="button" class="btn ghost" style="margin-right:auto"
+        disabled=${!!t.children?.length} title=${t.children?.length ? '先删除或移走它下面的子主题' : ''} onClick=${remove}>删除${kind}</button>` : null}
+        <button type="button" class="btn" onClick=${closeModal}>取消</button><button class="btn primary">${t ? '保存' : '新建'}</button></div>
     </form>`;
 }
 const topicModal = (path) => openModal(html`<${TopicForm} path=${path} />`);

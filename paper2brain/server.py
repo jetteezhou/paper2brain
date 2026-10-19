@@ -53,6 +53,12 @@ def topic_edit(q, body):
     return {"path": store.edit_topic(body.get("path"), body.get("name"), body.get("parent"))}
 
 
+@route("POST", "/api/topics/delete")
+def topic_delete(q, body):
+    store.delete_topic(body.get("path"))
+    return {"ok": True}
+
+
 @route("POST", "/api/topics/decide")
 def topic_decide(q, body):
     store.decide_topic(body.get("path"), body.get("accept") is True)

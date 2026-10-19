@@ -918,6 +918,26 @@ def edit_topic(path, name, parent):
     return new
 
 
+def delete_topic(path):
+    """The user removes a topic; what was filed under a subtopic moves up to its parent, a top-level one leaves it unsorted."""
+    with tx() as c:
+        cur = c.execute("SELECT parent FROM topics WHERE path=? AND state='active'", (path,)).fetchone()
+        if not cur:
+            raise rules.Rejected(f"主题不存在：{path}")
+        if c.execute("SELECT 1 FROM topics WHERE parent=? AND state='active'", (path,)).fetchone():
+            raise rules.Rejected("先删除或移走它下面的子主题")
+        up = cur["parent"]
+        if up:
+            c.execute("INSERT OR IGNORE INTO paper_topics SELECT paper_id, ?, by FROM paper_topics WHERE topic=?", (up, path))
+            c.execute("INSERT OR IGNORE INTO research_topics SELECT research_id, ? FROM research_topics WHERE topic=?", (up, path))
+        c.execute("DELETE FROM paper_topics WHERE topic=?", (path,))
+        c.execute("DELETE FROM research_topics WHERE topic=?", (path,))
+        c.execute("UPDATE notes SET topic=? WHERE topic=?", (up, path))
+        c.execute("UPDATE threads SET scope=? WHERE scope=?", (f"topic:{up}" if up else "library", f"topic:{path}"))
+        c.execute("DELETE FROM topics WHERE path=?", (path,))
+        _event(c, "user", "topic.delete", path)
+
+
 def decide_topic(path, accept):
     """Accepting a proposed topic also files the papers the agent proposed it for, unless the user fixed their topics."""
     with tx() as c:

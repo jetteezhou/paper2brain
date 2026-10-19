@@ -727,6 +727,25 @@ class Topics(unittest.TestCase):
             with self.assertRaisesRegex(rules.Rejected, "已经有了"):
                 store.add_topic("tokenizer", "VLA", "user")
 
+    def test_deleting_a_topic_moves_its_things_up(self):
+        with scratch_home():
+            pid, cid = "arxiv:2303.04137", store.new_id()
+            store.add_capture(cid, "dp", "web")
+            store.upsert_paper(pid, "Diffusion Policy")
+            store.link(cid, pid, "rule")
+            store.set_topics(pid, ["VLA/tokenizer"], "agent")
+            rid = store.add_research("r", "user", topics=["VLA/tokenizer"])
+            store.add_message(store.thread_for("topic:VLA/tokenizer")["id"], "user", "tokenizer 怎么选？")
+            with self.assertRaisesRegex(rules.Rejected, "子主题"):
+                store.delete_topic("VLA")
+            store.delete_topic("VLA/tokenizer")
+            self.assertEqual((store.get_paper(pid)["topics"], store.get_research(rid)["topics"]), (["VLA"], ["VLA"]))
+            self.assertEqual(store.thread_for("topic:VLA")["messages"][0]["text"], "tokenizer 怎么选？")
+            self.assertNotIn("tokenizer", [ch["name"] for t in store.topic_tree() for ch in t["children"]])
+            store.set_topics(pid, ["WAM/V-JEPA"], "user")
+            store.delete_topic("WAM/V-JEPA")
+            self.assertEqual(store.get_paper(pid)["topics"], ["WAM"])
+
     def test_agent_proposes_user_decides(self):
         from paper2brain import cli
         with scratch_home():
