@@ -1139,6 +1139,30 @@ class Sync(unittest.TestCase):
             with store.tx() as c:
                 self.assertEqual(c.execute("SELECT text FROM notes").fetchone()[0], "B 记的")
 
+    def test_keys_and_settings_follow_the_mac_that_changed_them(self):
+        import json
+        import time
+
+        from paper2brain import sync
+        cfg = lambda side: json.loads(Path(side, "config.json").read_text())  # noqa: E731
+        Path(self.a, "config.json").write_text(json.dumps({"sync": True, "machine": "a", "cursor_api_key": "k1", "search_api": {"api_key": "g1"}}))
+        Path(self.b, "config.json").write_text(json.dumps({"sync": True, "machine": "b", "only_on_b": 1}))
+        with self.mock.patch.object(sync.subprocess, "run") as run:  # never restart the real worker
+            with self.on(self.a):
+                self.assertEqual(sync.sync_config(), "sent")
+            with self.on(self.b):
+                self.assertEqual(sync.sync_config(), "taken")  # B never synced: it takes A's keys, never sends its empty ones first
+                self.assertEqual(cfg(self.b), {"sync": True, "machine": "b", "only_on_b": 1, "cursor_api_key": "k1", "search_api": {"api_key": "g1"}})
+                self.assertTrue(any("kickstart" in a.args[0] for a in run.call_args_list))  # a new Cursor key: worker restarts
+                self.assertIsNone(sync.sync_config())  # nothing new either way
+                time.sleep(0.01)
+                Path(self.b, "config.json").write_text(json.dumps({**cfg(self.b), "search_api": {"api_key": "g2"}}))
+                self.assertEqual(sync.sync_config(), "sent")
+            with self.on(self.a):
+                self.assertEqual(sync.sync_config(), "taken")
+                self.assertEqual(cfg(self.a)["search_api"], {"api_key": "g2"})
+                self.assertEqual(cfg(self.a)["machine"], "a")  # each Mac keeps its own worker name
+
     def test_a_new_mac_gets_its_own_worker_name_only_when_both_run(self):
         with self.mock.patch.object(self.handoff, "ME", "Zhou's MacBook Air"):
             merge = self.handoff.merge_config

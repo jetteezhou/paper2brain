@@ -8,10 +8,12 @@ ponytail: deletions of files do not propagate (a deleted paper's folder stays on
 checkouts are git working copies both Macs may commit in, so they stay local and sync through Overleaf itself.
 """
 import json
+import os
 import re
 import sqlite3
 import subprocess
 import tempfile
+import time
 
 from . import handoff, store
 
@@ -185,11 +187,52 @@ def pull_files():
             subprocess.run(["rsync", "-a", "--update", "--exclude=*.icloud", "--exclude=*.tmp", f"{data / d}/", f"{store.home() / d}/"], check=True)
 
 
+LOCAL_SETTINGS = ("machine",)  # each Mac's own Cursor worker name
+
+
+def sync_config():
+    """Settings and keys (config.json) follow the Mac that changed them last. settings.json in iCloud carries when
+    they changed by that Mac's clock, so iCloud's own file times don't matter. Everything reads config.json on every
+    use; only the Cursor worker reads its key once, so a new key restarts it."""
+    mine, shared = store.home() / "config.json", handoff.DROP / "settings.json"
+    if not mine.exists():
+        return None
+    with store.tx() as c:
+        done, seen = float(_kv(c, "sync:config_done")), float(_kv(c, "sync:config_seen"))
+    now = mine.stat().st_mtime
+    try:
+        theirs = json.loads(shared.read_text()) if shared.exists() else None
+    except ValueError:
+        theirs = None  # mid-download: next round
+    local = json.loads(mine.read_text())
+    other = bool(theirs) and theirs.get("host") != handoff.ME and isinstance(theirs.get("config"), dict)
+    first = done == 0 and other  # never synced here: take the shared keys before sending this Mac's, maybe empty, ones
+    if now > done and not first:
+        at = time.time()
+        shared.write_text(json.dumps({"at": at, "host": handoff.ME, "config": {k: v for k, v in local.items() if k not in LOCAL_SETTINGS}},
+                                     ensure_ascii=False))
+        marks, result = {"sync:config_done": now, "sync:config_seen": at}, "sent"
+    elif other and (first or float(theirs.get("at") or 0) > seen):
+        # merged, never dropped: a setting only this Mac has stays
+        new = {**local, **theirs["config"], **{k: local[k] for k in LOCAL_SETTINGS if k in local}}
+        mine.write_text(json.dumps(new, indent=2, ensure_ascii=False))
+        mine.chmod(0o600)
+        if new.get("cursor_api_key") != local.get("cursor_api_key"):
+            subprocess.run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.paper2brain.worker"], capture_output=True)
+        marks, result = {"sync:config_done": mine.stat().st_mtime, "sync:config_seen": float(theirs["at"])}, "taken"
+    else:
+        return None
+    with store.tx() as c:
+        c.executemany("INSERT OR REPLACE INTO kv VALUES (?, ?)", [(k, str(v)) for k, v in marks.items()])
+    return result
+
+
 def run():
     """Background job, every round of the server loop."""
     if not enabled():
         return
     subprocess.run(["brctl", "download", str(handoff.DROP)], capture_output=True)  # fetch what the other Mac uploaded
+    sync_config()
     pull_files()
     apply_others()
     export()
