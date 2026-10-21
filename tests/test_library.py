@@ -1066,26 +1066,78 @@ class Sync(unittest.TestCase):
             self.assertEqual(store.thread_for(thread_id=t)["title"], "B 起的标题")
             self.assertEqual(store.thread_for(thread_id=t)["agent_id"], "agent-on-a")  # A keeps its own agent
             with store.tx() as c:  # an older change from B arriving late loses to what A already has
-                sync._apply(c, {"tbl": "threads", "pk": t, "at": "2000-01-01T00:00:00.000", "row": {"id": t, "title": "旧"}})
+                sync._apply(c, {"tbl": "threads", "pk": [t], "at": "2000-01-01T00:00:00.000", "row": {"id": t, "title": "旧"}})
             self.assertEqual(store.thread_for(thread_id=t)["title"], "B 起的标题")
 
     def test_a_note_waits_for_its_paper_and_bad_lines_are_dropped(self):
+        import json
+
         from paper2brain import sync
-        with self.on(self.a):
-            store.upsert_paper("arxiv:2601.00001", "Only on A")
-            store.add_note("A 的笔记", "user", paper_id="arxiv:2601.00001")
-            sync.run()
-            Path(self.drop, "changes", "mac-a", f"{10**11:012d}.jsonl").write_text('not json\n{"tbl": "notes"}\n')
+        pid, c_dir = "arxiv:2601.00001", Path(self.drop, "changes", "mac-c")
+        c_dir.mkdir(parents=True)
+        note = {"tbl": "notes", "pk": ["n1"], "at": "2026-01-01T00:00:01.000",
+                "row": {"id": "n1", "created_at": "x", "text": "A 的笔记", "by": "user", "paper_id": pid}}
+        (c_dir / f"{1:012d}.jsonl").write_text(f'{{"home": "/x"}}\nnot json\n{{"tbl": "notes"}}\n{json.dumps(note)}\n')
         with self.on(self.b):
             sync.run()
             with store.tx() as c:
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 0)
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0], 1)
-            store.upsert_paper("arxiv:2601.00001", "Only on A")  # the paper comes over by handoff, or B adds it
-            sync.run()
+            paper = {"tbl": "papers", "pk": [pid], "at": "2026-01-01T00:00:02.000", "row": {"id": pid, "created_at": "x", "title": "Only on C"}}
+            (c_dir / f"{2:012d}.jsonl").write_text(f'{{"home": "/x"}}\n{json.dumps(paper)}\n')
+            sync.run()  # the paper arrives, and the waiting note right after it
             with store.tx() as c:
                 self.assertEqual(c.execute("SELECT text FROM notes").fetchone()[0], "A 的笔记")
                 self.assertEqual(c.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0], 0)
+
+    def test_papers_with_their_pdf_topics_and_research_reach_the_other_mac(self):
+        from paper2brain import sync
+        with self.on(self.a):
+            store.upsert_paper("arxiv:2601.00002", "Paper from A")
+            pdf = store.paper_dir("arxiv:2601.00002") / "paper.pdf"
+            pdf.write_bytes(b"%PDF from A")
+            store.set_fulltext("arxiv:2601.00002", pdf, PAGES)
+            store.add_topic("同步主题", None, "user")
+            store.set_topics("arxiv:2601.00002", ["同步主题"], "user")
+            rid = store.add_research("一起做的研究", "user")
+            sync.run()
+        with self.on(self.b):
+            sync.run()
+            p = store.get_paper("arxiv:2601.00002", with_anchors=False)
+            self.assertTrue(p["pdf_path"].startswith(self.b))  # the path points into B's own folder
+            self.assertEqual(Path(p["pdf_path"]).read_bytes(), b"%PDF from A")
+            self.assertEqual(p["topics"], ["同步主题"])
+            self.assertEqual(store.get_research(rid)["title"], "一起做的研究")
+        with self.on(self.a):
+            store.edit_topic("同步主题", "改名的主题", "")  # the key itself changes: the old path must go on B too
+            sync.run()
+        with self.on(self.b):
+            sync.run()  # the old topic waits until its papers have moved off it, within the same round
+            self.assertEqual(store.get_paper("arxiv:2601.00002", with_anchors=False)["topics"], ["改名的主题"])
+            with store.tx() as c:
+                paths = {r[0] for r in c.execute("SELECT path FROM topics")}
+            self.assertIn("改名的主题", paths)
+            self.assertNotIn("同步主题", paths)
+
+    def test_after_pull_this_macs_own_sent_changes_come_back(self):
+        import shutil
+
+        from paper2brain import sync
+        with self.on(self.a):
+            store.counts()
+            snap = store.backup("for-b.sqlite")  # A's library, before B's note reaches it
+        with self.on(self.b):
+            store.add_note("B 记的", "user")
+            sync.run()
+            shutil.copy(snap, Path(self.b) / "p2b.sqlite")  # what pull does: B takes A's snapshot
+            for f in ("p2b.sqlite-wal", "p2b.sqlite-shm"):
+                (Path(self.b) / f).unlink(missing_ok=True)
+            store._initialized.discard(self.b)
+            with store.tx() as c:
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 0)
+            sync.apply_others(include_self=True)
+            with store.tx() as c:
+                self.assertEqual(c.execute("SELECT text FROM notes").fetchone()[0], "B 记的")
 
     def test_auto_push_only_on_the_owner(self):
         with self.on(self.a), self.mock.patch.object(self.handoff, "_pushed", 0.0):

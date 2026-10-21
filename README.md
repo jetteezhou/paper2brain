@@ -40,7 +40,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 忘了 push 也不怕：交接过一次之后（iCloud 里有了 `paper2brain-handoff`），正在持有论文库的那台 Mac 每半小时自动往 iCloud 放一份新快照，不停服务；另一台 pull 之后由它接着放。
 
-**两台同时用（实验）**：`config.json` 里设 `"sync": true`（会随 pull 带到另一台），两台 Mac 每 20 秒通过 iCloud 互相交换改动，同一行以最后改的为准。目前只同步讨论（含已结束的 agent 回复）、笔记和划选的段落；论文、快读卡、主题和研究页还不同步，只在持有论文库的那台上改，再靠交接带过去。在一台上开的讨论到另一台接着聊时，会换一个本机的新 agent，之前说过的话照样带上。
+**两台同时用（实验）**：`config.json` 里设 `"sync": true`（会随 pull 带到另一台），两台 Mac 每 20 秒通过 iCloud 互相交换改动，同一行以最后改的为准：论文、快读卡、主题、研究页、讨论（含已结束的 agent 回复）、笔记都同步，PDF、插图、方法图和代码仓库的文件也双向同步（新的覆盖旧的，删除不同步）。Overleaf 的本地副本不同步，它经 Overleaf 自己同步。iCloud 收件箱和自动整理、深读这些后台 agent 只在持有论文库的那台上跑，免得两台各做一遍。在一台上开的讨论到另一台接着聊时，会换一个本机的新 agent，之前说过的话照样带上。
+
+**双重保险**：网页左下角“Agent”设置里的“两台 Mac”一栏显示谁持有论文库、iCloud 快照是什么时候的，点“从 iCloud 接手到这台”就等于 pull（本机旧库先备份，已同步的改动再补回来，服务重启约一分钟后页面自动刷新）。
 
 新 Mac 第一次用：克隆代码、`ops/setup.sh`（顺带装好开机自启），装好并登录 Cursor CLI 和 `tcodex`，再 pull。两台 Mac 共用 `config.json` 里同一个 worker 名（`machine`），已有的讨论换了机器也能接着聊；本机 `config.json` 里另设了 `machine` 时 pull 会保留它。
 

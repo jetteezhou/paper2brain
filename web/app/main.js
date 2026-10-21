@@ -364,6 +364,38 @@ function SearchApi() {
     <div style="text-align:right"><button class="btn sm primary">保存</button></div></form>`;
 }
 
+/** Who holds the library, how fresh the iCloud snapshot is, and the pull that takes it over on this Mac. */
+function Handoff() {
+  const [d, , err] = useLive('/api/handoff', { poll: false });
+  const [busy, setBusy] = useState(false);
+  if (err) return html`<p class="hint">读不到交接状态：${err}</p>`;
+  if (!d) return html`<span class="spin"></span>`;
+  const s = d.snapshot;
+  const pull = async () => {
+    if (!confirm(`用 iCloud 里 ${s.host} 在 ${s.at} 的快照替换这台 Mac 的论文库？\n本机现在的数据库会先备份到 backups/；${d.sync ? '两台之间已同步的改动会再补回来。' : '这台上之后没交出去的改动会被覆盖。'}\n服务会重启约一分钟。`)) return;
+    setBusy(true);
+    try { await post('/api/handoff/pull', {}); } catch (e) { setBusy(false); return fail(e); }
+    toast('正在从 iCloud 接手，服务会重启，好了自动刷新');
+    const t0 = Date.now();
+    await new Promise((r) => setTimeout(r, 8000));
+    while (Date.now() - t0 < 300000) {
+      try {
+        const h = await get('/api/handoff');
+        if (h.holder && h.snapshot?.owner === h.me) { location.reload(); return; }
+        if (['先停掉', '还没', 'Traceback'].some((w) => h.pull_log.includes(w))) { setBusy(false); return fail(h.pull_log.trim().split('\n').pop()); }
+      } catch { /* restarting */ }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    setBusy(false);
+    fail('接手超时，看 /tmp/paper2brain-pull.log');
+  };
+  return html`<p class="hint" style="margin-top:0">${!s ? '还没交接过：在终端运行一次 ops/handoff.py push，之后持有论文库的 Mac 每半小时自动放一份快照。'
+      : html`iCloud 快照：${s.host} · ${s.at}。持有论文库的是 <b>${s.owner || '（已交出，等另一台接手）'}</b>${d.holder ? '（这台）' : ''}。
+        ${d.sync ? '两台同时用的同步已打开，改动每 20 秒互通。' : '同步未打开（config.json 里 "sync": true）。'}`}</p>
+    ${s && !(d.holder && s.owner === d.me) ? html`<button class="btn sm" disabled=${busy} onClick=${pull}>${busy ? '接手中…' : '从 iCloud 接手到这台'}</button>` : null}
+    ${s && d.holder && s.owner === d.me ? html`<p class="hint">这台就是持有者，不用接手。</p>` : null}`;
+}
+
 function Setup() {
   const a = appState.value.agent, ok = a.backends || {};
   const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
@@ -393,6 +425,8 @@ function Setup() {
   <p class="hint" style="margin-top:0">搜索框停顿 1 秒后，第一条的 AI 推荐直接调这个 OpenAI 兼容接口（关闭思考，通常 1–8 秒）；不填就用上面“快速搜索”选的 TCodex 模型（约 4 秒）。
     ${a.search_ai ? '✓ 已可用' : '未可用'}</p>
   <${SearchApi} />
+  <div class="block-title" style="margin-top:14px">两台 Mac<span class="line"></span></div>
+  <${Handoff} />
   <p class="hint">调优 agent：修改仓库里的 <code>librarian/*.md</code>，再在捕获详情里点“重新整理”。</p>
   <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>知道了</button></div>`;
 }

@@ -267,7 +267,39 @@ def _v17_short_names(c):
             c.execute("UPDATE papers SET short_name=?, short_name_by='rule' WHERE id=?", (name, r["id"]))
 
 
-SYNCED = ("threads", "messages", "runs", "notes", "anchors")
+# Everything the user made, synced between Macs (sync.py). Not kv (each Mac's own cursors and marks), events (a log
+# keyed by a local counter) or trash (this Mac's undo).
+SYNCED = ("captures", "attachments", "papers", "capture_papers", "topics", "paper_topics", "notes", "threads", "messages",
+          "runs", "research", "research_topics", "research_links", "repos", "research_repos", "code_maps", "experiments",
+          "writing", "research_docs", "anchors", "paper_text", "plans", "related_work", "exp_figures")
+
+
+def primary_key(c, table):
+    return [r["name"] for r in sorted((r for r in c.execute(f"PRAGMA table_info({table})") if r["pk"]), key=lambda r: r["pk"])]
+
+
+def _sync_triggers(c):
+    """sync_rows.pk is the row's primary key as a JSON array. An update logs the old key too: renaming a topic
+    changes its path, so the old path must reach the other Mac as gone."""
+    for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'sync\\_%' ESCAPE '\\'").fetchall():
+        c.execute(f"DROP TRIGGER {name}")
+    for t in SYNCED:
+        cols = primary_key(c, t)
+
+        def log(row):
+            return (f"INSERT OR REPLACE INTO sync_rows (tbl, pk, at, mine) VALUES "
+                    f"('{t}', json_array({', '.join(f'{row}.{k}' for k in cols)}), strftime('%Y-%m-%dT%H:%M:%f', 'now'), 1);")
+        for op, rows in (("INSERT", ("NEW",)), ("UPDATE", ("OLD", "NEW")), ("DELETE", ("OLD",))):
+            when = "NOT EXISTS (SELECT 1 FROM kv WHERE key='sync:applying')"
+            if t == "runs" and op != "DELETE":
+                when += " AND NEW.status IN ('FINISHED', 'ERROR', 'CANCELLED', 'EXPIRED')"
+            c.execute(f"CREATE TRIGGER sync_{t}_{op.lower()} AFTER {op} ON {t} WHEN {when} BEGIN {' '.join(log(r) for r in rows)} END")
+
+
+def _v20_sync_everything(c):
+    """Sync every table the user's work lives in, keyed by each table's own primary key."""
+    c.execute("UPDATE sync_rows SET pk=json_array(pk) WHERE pk NOT LIKE '[%'")
+    _sync_triggers(c)
 
 
 def _v19_sync(c):
@@ -277,7 +309,7 @@ def _v19_sync(c):
     c.execute("CREATE TABLE IF NOT EXISTS sync_rows (seq INTEGER PRIMARY KEY AUTOINCREMENT, tbl TEXT NOT NULL, "
               "pk TEXT NOT NULL, at TEXT NOT NULL, mine INTEGER NOT NULL, UNIQUE (tbl, pk))")
     c.execute("CREATE TABLE IF NOT EXISTS sync_pending (line TEXT PRIMARY KEY)")
-    for t in SYNCED:
+    for t in ("threads", "messages", "runs", "notes", "anchors"):
         for op, row in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
             when = "NOT EXISTS (SELECT 1 FROM kv WHERE key='sync:applying')"
             if t == "runs" and op != "DELETE":
@@ -308,7 +340,7 @@ def _v18_trash(c):
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
-              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync]
+              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything]
 
 
 def config():

@@ -744,6 +744,28 @@ def search_api_set(q, body):
     return {"ok": True}
 
 
+PULL_LOG = Path("/tmp/paper2brain-pull.log")
+
+
+@route("GET", "/api/handoff")
+def handoff_get(q, body):
+    m = handoff.meta() if handoff.DROP.exists() else None
+    return {"me": handoff.ME, "holder": handoff.holder(), "sync": sync.enabled(), "folder": str(handoff.DROP),
+            "snapshot": m and {"host": m.get("host"), "owner": m.get("owner"), "at": m.get("at")},
+            "pull_log": PULL_LOG.read_text()[-1500:] if PULL_LOG.exists() else ""}
+
+
+@route("POST", "/api/handoff/pull")
+def handoff_pull(q, body):
+    """Take the library from iCloud. pull stops this server and starts it again, so it runs in its own session."""
+    if not handoff.meta():
+        raise rules.Rejected("iCloud 里还没有快照：先在另一台 Mac 上 push，或等它自动放一份")
+    with PULL_LOG.open("w") as log:
+        subprocess.Popen([str(WEB.parent / ".venv/bin/python"), str(WEB.parent / "ops/handoff.py"), "pull"], cwd=WEB.parent,
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    return {"ok": True}
+
+
 @route("POST", "/api/agent/login")
 def agent_login(q, body):
     return cursor_api.login(body.get("cli"))

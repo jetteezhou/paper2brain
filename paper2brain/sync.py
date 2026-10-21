@@ -1,20 +1,23 @@
 """Experimental: two Macs using the library at the same time (config.json "sync": true on both).
 
-Each Mac writes the rows it changed (store.SYNCED: discussions with their finished runs, notes, pinned passages) to
-its own folder under <iCloud handoff folder>/changes/<host>/, one file per round, and applies the other Mac's files;
-the newest change of each row wins. A row whose parent has not arrived yet (a note on a paper only the other Mac
-has) waits in sync_pending and is tried again every round.
-ponytail: papers, cards, topics and research pages do not sync yet; they still move with handoff push / pull.
+Rows: each Mac writes the rows it changed (store.SYNCED) to its own folder under <iCloud handoff folder>/changes/<host>/,
+one file per round, and applies the other Mac's files; the newest change of each row wins. A row whose parent has not
+arrived yet waits in sync_pending and is tried again every round. Files (PDFs, figures, diagrams, code checkouts) go
+both ways through <handoff folder>/data, the newer copy winning.
+ponytail: deletions of files do not propagate (a deleted paper's folder stays on the other Mac, unused); Overleaf
+checkouts are git working copies both Macs may commit in, so they stay local and sync through Overleaf itself.
 """
 import json
 import re
 import sqlite3
 import subprocess
+import tempfile
 
 from . import handoff, store
 
-KEEP_LOCAL = {"threads": {"agent_id"}}  # an agent runs on the Mac that started it; the other Mac starts its own
+KEEP_LOCAL = {"threads": {"agent_id"}, "captures": {"agent_id"}}  # an agent runs on the Mac that started it
 NAME = re.compile(r"^\.?(\d{12})\.jsonl(\.icloud)?$")
+FILES = ("papers", "diagrams", "repos")
 
 
 def enabled():
@@ -30,16 +33,27 @@ def _kv(c, key, default="0"):
     return r[0] if r else default
 
 
+def _where(c, t, pk):
+    cols = store.primary_key(c, t)
+    if not isinstance(pk, list) or len(pk) != len(cols):
+        raise ValueError(f"bad key for {t}")
+    return " AND ".join(f"{k}=?" for k in cols), pk
+
+
 def export():
     """This Mac's changes since the last round, as one file. Returns how many rows went out."""
     with store.tx() as c:
         rows = c.execute("SELECT * FROM sync_rows WHERE mine=1 AND seq>? ORDER BY seq", (int(_kv(c, "sync:exported")),)).fetchall()
         if not rows:
             return 0
-        lines = []
+        lines = [json.dumps({"home": str(store.home())})]
         for r in rows:
-            row = c.execute(f"SELECT * FROM {r['tbl']} WHERE id=?", (r["pk"],)).fetchone()
-            lines.append(json.dumps({"tbl": r["tbl"], "pk": r["pk"], "at": r["at"], "row": dict(row) if row else None}, ensure_ascii=False))
+            if r["tbl"] not in store.SYNCED:
+                continue
+            pk = json.loads(r["pk"])
+            where, args = _where(c, r["tbl"], pk)
+            row = c.execute(f"SELECT * FROM {r['tbl']} WHERE {where}", args).fetchone()
+            lines.append(json.dumps({"tbl": r["tbl"], "pk": pk, "at": r["at"], "row": dict(row) if row else None}, ensure_ascii=False))
         out = folder() / handoff.ME
         out.mkdir(parents=True, exist_ok=True)
         name = f"{rows[-1]['seq']:012d}.jsonl"
@@ -49,23 +63,30 @@ def export():
     return len(rows)
 
 
-def _apply(c, e):
+def _rehome(value, there, here):
+    return here + value[len(there):] if isinstance(value, str) and there and value.startswith(there) else value
+
+
+def _apply(c, e, there=None):
     t = e.get("tbl")
     if t not in store.SYNCED:
         return
-    have = c.execute("SELECT at FROM sync_rows WHERE tbl=? AND pk=?", (t, e["pk"])).fetchone()
+    key = json.dumps(e["pk"])
+    have = c.execute("SELECT at FROM sync_rows WHERE tbl=? AND pk=?", (t, key)).fetchone()
     if have and have["at"] >= e["at"]:
         return
+    where, args = _where(c, t, e["pk"])
     if e["row"] is None:
-        c.execute(f"DELETE FROM {t} WHERE id=?", (e["pk"],))
+        c.execute(f"DELETE FROM {t} WHERE {where}", args)
     else:
-        known = {r["name"] for r in c.execute(f"PRAGMA table_info({t})")}
-        keep = KEEP_LOCAL.get(t, set())
+        known, pks = {r["name"] for r in c.execute(f"PRAGMA table_info({t})")}, store.primary_key(c, t)
+        keep, here = KEEP_LOCAL.get(t, set()), str(store.home()).rstrip("/") + "/"
         cols = [k for k in e["row"] if k in known]  # names come from a file: only this table's own columns
-        sets = ", ".join(f"{k}=excluded.{k}" for k in cols if k != "id" and k not in keep) or "id=id"
-        c.execute(f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)}) ON CONFLICT(id) DO UPDATE SET {sets}",
-                  [None if k in keep else e["row"][k] for k in cols])
-    c.execute("INSERT OR REPLACE INTO sync_rows (tbl, pk, at, mine) VALUES (?,?,?,0)", (t, e["pk"], e["at"]))
+        sets = ", ".join(f"{k}=excluded.{k}" for k in cols if k not in pks and k not in keep)
+        c.execute(f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)}) "
+                  f"ON CONFLICT({', '.join(pks)}) DO " + (f"UPDATE SET {sets}" if sets else "NOTHING"),
+                  [None if k in keep else _rehome(e["row"][k], there, here) for k in cols])
+    c.execute("INSERT OR REPLACE INTO sync_rows (tbl, pk, at, mine) VALUES (?,?,?,0)", (t, key, e["at"]))
 
 
 def _entry(line):
@@ -73,60 +94,103 @@ def _entry(line):
         e = json.loads(line)
     except ValueError:
         return None
-    ok = isinstance(e, dict) and isinstance(e.get("pk"), str) and isinstance(e.get("at"), str) \
+    if isinstance(e, dict) and isinstance(e.get("pk"), str):
+        e["pk"] = [e["pk"]]  # files written before keys became arrays
+    ok = isinstance(e, dict) and isinstance(e.get("pk"), list) and isinstance(e.get("at"), str) \
         and (e.get("row") is None or isinstance(e["row"], dict))
     return e if ok else None
 
 
-def _try(c, e):
+def _try(c, e, there=None):
     if e is None:
         return True  # a damaged line: drop it rather than retry it forever
     c.execute("SAVEPOINT row")
     try:
-        _apply(c, e)
+        _apply(c, e, there)
         c.execute("RELEASE row")
         return True
-    except sqlite3.IntegrityError:  # its thread or paper is not here yet
+    except (sqlite3.IntegrityError, ValueError):  # its parent is not here yet, or its key does not fit
         c.execute("ROLLBACK TO row")
         c.execute("RELEASE row")
         return False
 
 
-def apply_others():
+def apply_others(include_self=False):
     """Apply what the other Macs wrote since last time, in order; a file iCloud has not downloaded yet stops that
-    Mac's queue until it arrives. Returns how many rows were applied or queued."""
+    Mac's queue until it arrives. include_self (after a pull): this Mac's own files too, from the start, since the
+    snapshot it just took may predate them. Returns how many rows were applied or queued."""
     root = folder()
     if not root.exists():
         return 0
-    subprocess.run(["brctl", "download", str(root)], capture_output=True)
     n = 0
+
+    def retry():
+        for (line,) in c.execute("SELECT line FROM sync_pending").fetchall():
+            e = _entry(line)
+            if _try(c, e, e and e.get("_home")):
+                c.execute("DELETE FROM sync_pending WHERE line=?", (line,))
     with store.tx() as c:
         c.execute("INSERT OR REPLACE INTO kv VALUES ('sync:applying', '1')")
         try:
-            for (line,) in c.execute("SELECT line FROM sync_pending").fetchall():
-                if _try(c, _entry(line)):
-                    c.execute("DELETE FROM sync_pending WHERE line=?", (line,))
-            for d in sorted(p for p in root.iterdir() if p.is_dir() and p.name != handoff.ME):
-                seen = int(_kv(c, f"sync:seen:{d.name}"))
+            retry()
+            for d in sorted(p for p in root.iterdir() if p.is_dir() and (include_self or p.name != handoff.ME)):
+                seen = 0 if d.name == handoff.ME else int(_kv(c, f"sync:seen:{d.name}"))
                 files = sorted((int(m[1]), bool(m[2]), f) for f in d.iterdir() if (m := NAME.match(f.name)))
                 for seq, placeholder, f in files:
                     if seq <= seen:
                         continue
                     if placeholder:
                         break
+                    there = None
                     for line in f.read_text().splitlines():
-                        if line.strip() and not _try(c, _entry(line)):
-                            c.execute("INSERT OR IGNORE INTO sync_pending VALUES (?)", (line,))
-                        n += 1
+                        e = _entry(line)
+                        if e is None and line.startswith('{"home"'):  # the file's first line: the sender's data folder
+                            try:
+                                there = str(json.loads(line)["home"]).rstrip("/") + "/"
+                            except (ValueError, KeyError, TypeError):
+                                pass
+                        elif line.strip() and not _try(c, e, there):
+                            c.execute("INSERT OR IGNORE INTO sync_pending VALUES (?)", (json.dumps({**e, "_home": there}, ensure_ascii=False),))
+                            n += 1
+                        else:
+                            n += bool(line.strip())
                     seen = seq
-                c.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (f"sync:seen:{d.name}", str(seen)))
+                if d.name != handoff.ME:
+                    c.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (f"sync:seen:{d.name}", str(seen)))
+            retry()  # a child listed before its parent in the same round
         finally:
             c.execute("DELETE FROM kv WHERE key='sync:applying'")
     return n
 
 
+def push_files():
+    """This Mac's new or newer files up to iCloud. A file iCloud keeps only in the cloud (.name.icloud) is left
+    alone: copying over it would leave iCloud two versions to reconcile."""
+    data = handoff.DROP / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    gone = [str(p.relative_to(data).with_name(p.name[1:-7])) for p in data.rglob(".*.icloud")]
+    with tempfile.NamedTemporaryFile("w", suffix=".txt") as skip:
+        skip.write("".join(f"/{g}\n" for g in gone))
+        skip.flush()
+        for d in FILES:
+            if (store.home() / d).exists():
+                subprocess.run(["rsync", "-a", "--update", f"--exclude-from={skip.name}", "--exclude=*.tmp",
+                                f"{store.home() / d}/", f"{data / d}/"], check=True)
+
+
+def pull_files():
+    data = handoff.DROP / "data"
+    for d in FILES:
+        if (data / d).exists():
+            subprocess.run(["rsync", "-a", "--update", "--exclude=*.icloud", "--exclude=*.tmp", f"{data / d}/", f"{store.home() / d}/"], check=True)
+
+
 def run():
     """Background job, every round of the server loop."""
-    if enabled():
-        apply_others()
-        export()
+    if not enabled():
+        return
+    subprocess.run(["brctl", "download", str(handoff.DROP)], capture_output=True)  # fetch what the other Mac uploaded
+    pull_files()
+    apply_others()
+    export()
+    push_files()

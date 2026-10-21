@@ -25,7 +25,10 @@ AUTO_EVERY = 1800
 
 
 def rsync(src, dst):
-    subprocess.run(["rsync", "-a", "--delete", *[f"--exclude={x}" for x in SKIP], f"{src}/", f"{dst}/"], check=True)
+    """With sync on, both Macs add files to the same iCloud folder, so neither side's copy may delete the other's."""
+    from . import sync
+    delete = [] if sync.enabled() else ["--delete"]
+    subprocess.run(["rsync", "-a", *delete, "--exclude=*.icloud", *[f"--exclude={x}" for x in SKIP], f"{src}/", f"{dst}/"], check=True)
 
 
 def meta():
@@ -98,6 +101,7 @@ def push():
     from . import sync
     if sync.enabled():
         sync.export()
+        sync.push_files()
     _snapshot(owner=None)
     print(f"已放进 iCloud：{DROP}，本机服务已停。\n等 iCloud 上传完（访达里 iCloud 云盘的云朵图标不再转），再到另一台 Mac 上 pull。"
           "要回到这台，先在那台 push，再在这里 pull。")
@@ -118,24 +122,28 @@ def pull():
         sys.exit(f"{DROP} 里没有交接快照，先在另一台 Mac 上 push")
     if not _downloaded():
         sys.exit("iCloud 还没把文件下载完，过一会儿再 pull")
+    from . import sync
     home = store.home()
     _stop("pull")
     if (home / "p2b.sqlite").exists():
-        from . import sync
         if sync.enabled():
             sync.export()  # what changed here since the last round still reaches the other Mac
+            sync.push_files()
         print("本机原来的数据库已备份到", store.backup(f"p2b-before-pull-{datetime.now():%Y%m%d-%H%M%S}.sqlite"))
     home.mkdir(parents=True, exist_ok=True)
     rsync(DROP / "data", home)
     for f in ("p2b.sqlite-wal", "p2b.sqlite-shm"):
         (home / f).unlink(missing_ok=True)
     subprocess.run(["cp", str(DROP / "p2b.sqlite"), str(home / "p2b.sqlite")], check=True)
+    store._initialized.discard(str(home))  # the snapshot may come from an older version: migrate it
     config, mine = json.loads((DROP / "config.json").read_text()), home / "config.json"
     if mine.exists() and "machine" in json.loads(mine.read_text()):
         config["machine"] = json.loads(mine.read_text())["machine"]  # this Mac's own worker name, when it has one
     mine.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     mine.chmod(0o600)
     moved = store.rehome(m["home"])
+    if sync.enabled():
+        sync.apply_others(include_self=True)  # the snapshot may predate changes either Mac has already sent
     (DROP / "handoff.json").write_text(json.dumps({**m, "owner": ME}))
     _jobs("bootstrap")
     print(f"已接手 {m['host']} 在 {m['at']} 交出的论文库" + (f"，改了 {moved} 条文件路径" if moved else "") + "。")
