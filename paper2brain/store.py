@@ -267,6 +267,26 @@ def _v17_short_names(c):
             c.execute("UPDATE papers SET short_name=?, short_name_by='rule' WHERE id=?", (name, r["id"]))
 
 
+SYNCED = ("threads", "messages", "runs", "notes", "anchors")
+
+
+def _v19_sync(c):
+    """Experimental sync between Macs (sync.py). sync_rows: the newest change known for each row of SYNCED, mine=1
+    when it was made here (seq orders what to send). Triggers record every change, except while sync.py applies the
+    other Mac's (kv 'sync:applying', set inside its transaction); a run only once it has ended."""
+    c.execute("CREATE TABLE IF NOT EXISTS sync_rows (seq INTEGER PRIMARY KEY AUTOINCREMENT, tbl TEXT NOT NULL, "
+              "pk TEXT NOT NULL, at TEXT NOT NULL, mine INTEGER NOT NULL, UNIQUE (tbl, pk))")
+    c.execute("CREATE TABLE IF NOT EXISTS sync_pending (line TEXT PRIMARY KEY)")
+    for t in SYNCED:
+        for op, row in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            when = "NOT EXISTS (SELECT 1 FROM kv WHERE key='sync:applying')"
+            if t == "runs" and op != "DELETE":
+                when += " AND NEW.status IN ('FINISHED', 'ERROR', 'CANCELLED', 'EXPIRED')"
+            c.execute(f"CREATE TRIGGER IF NOT EXISTS sync_{t}_{op.lower()} AFTER {op} ON {t} WHEN {when} BEGIN "
+                      f"INSERT OR REPLACE INTO sync_rows (tbl, pk, at, mine) "
+                      f"VALUES ('{t}', {row}.id, strftime('%Y-%m-%dT%H:%M:%f', 'now'), 1); END")
+
+
 def _v18_trash(c):
     """Recently deleted papers and discussions: the rows as they were (rows, JSON by table) until restored or purged;
     a paper's files wait in trash/<id>. The old one-slot trash (kv 'trash:paper', trash/paper) becomes the first entry."""
@@ -288,7 +308,12 @@ def _v18_trash(c):
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
-              _v16_experiment_design, _v17_short_names, _v18_trash]
+              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync]
+
+
+def config():
+    path = home() / "config.json"
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 def home():

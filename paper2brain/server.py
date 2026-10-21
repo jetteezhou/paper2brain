@@ -14,7 +14,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import cursor_api, export, inbox, overleaf, pipeline, repos, rules, store, structure
+from . import cursor_api, export, handoff, inbox, overleaf, pipeline, repos, rules, store, structure, sync
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 mimetypes.add_type("text/javascript", ".mjs")  # ES modules (PDF.js) must not be served as octet-stream
@@ -928,7 +928,7 @@ class Handler(BaseHTTPRequestHandler):
 def _poll_inbox():
     while True:
         for job in (store.backup, cursor_api.expire_stale, inbox.drain, cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending,
-                    cursor_api.card_pending, structure.backfill):
+                    cursor_api.card_pending, structure.backfill, sync.run, lambda: bg(handoff.auto_push)):
             try:
                 job()
             except Exception:
@@ -936,18 +936,13 @@ def _poll_inbox():
         time.sleep(20)
 
 
-def _config():
-    path = store.home() / "config.json"
-    return json.loads(path.read_text()) if path.exists() else {}
-
-
 def _password():
-    return os.environ.get("P2B_PASSWORD") or _config().get("password")
+    return os.environ.get("P2B_PASSWORD") or store.config().get("password")
 
 
 def _hosts():
     """P2B_HOSTS (comma-separated) and config.json "hosts", read on every request so a new tunnel domain needs no restart."""
-    return [h.strip() for h in os.environ.get("P2B_HOSTS", "").split(",") + list(_config().get("hosts") or []) if h.strip()]
+    return [h.strip() for h in os.environ.get("P2B_HOSTS", "").split(",") + list(store.config().get("hosts") or []) if h.strip()]
 
 
 def _lan_ip():

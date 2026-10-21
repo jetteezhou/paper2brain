@@ -1000,7 +1000,7 @@ class Server(unittest.TestCase):
                 self.assertEqual(get(f"{ip}:{port}", **ok), 200)
                 self.assertEqual(get(f"{ip}:{port}"), 401)
                 self.assertEqual(get(f"rebind.example:{port}", **ok), 403)
-            with mock.patch.dict(os.environ, {"P2B_PASSWORD": ""}), mock.patch.object(server, "_config", lambda: {}):
+            with mock.patch.dict(os.environ, {"P2B_PASSWORD": ""}), mock.patch.object(store, "config", lambda: {}):
                 self.assertEqual(get(f"{ip}:{port}"), 403)  # no password: the LAN is refused even if bound to it
         finally:
             httpd.shutdown()
@@ -1016,6 +1016,86 @@ class Handoff(unittest.TestCase):
         self.assertEqual(store.get_repo(kept)["path"], "/opt/elsewhere/b")
         self.assertEqual(store.get_repo(twin)["path"], "/Users/old/paper2brain-data2/repos/c")
         self.assertEqual(store.rehome(store.home()), 0)
+
+
+class Sync(unittest.TestCase):
+    """Two Macs, each with its own data directory, sharing one iCloud folder."""
+
+    def setUp(self):
+        from unittest import mock
+
+        from paper2brain import handoff
+        self.mock, self.handoff = mock, handoff
+        self.drop, self.a, self.b = (tempfile.mkdtemp(prefix=f"p2b-sync-{n}-") for n in "dab")
+        for h in (self.a, self.b):
+            Path(h, "config.json").write_text('{"sync": true}')
+
+    def on(self, side):
+        from contextlib import ExitStack
+        s = ExitStack()
+        s.enter_context(self.mock.patch.dict(os.environ, {"P2B_HOME": side}))
+        s.enter_context(self.mock.patch.object(self.handoff, "DROP", Path(self.drop)))
+        s.enter_context(self.mock.patch.object(self.handoff, "ME", "mac-a" if side == self.a else "mac-b"))
+        return s
+
+    def test_discussions_flow_both_ways_newest_change_winning(self):
+        from paper2brain import sync
+        with self.on(self.a):
+            t = store.thread_for("library")["id"]
+            store.set_thread_agent(t, "agent-on-a")
+            store.add_message(t, "user", "两台一起用")
+            store.add_run("tc-1", "agent-on-a", "chat", t, "p", "RUNNING")
+            store.add_message(t, "assistant", "", "tc-1")
+            sync.run()
+        with self.on(self.b):
+            sync.run()
+            got = store.thread_for(thread_id=t)
+            self.assertEqual([m["text"] for m in got["messages"]], ["两台一起用", ""])
+            self.assertIsNone(got["agent_id"])  # B starts its own agent
+            self.assertIsNone(store.get_run("tc-1"))  # still running on A: not B's to watch
+        with self.on(self.a):
+            store.update_run("tc-1", status="FINISHED", text="可以")
+            sync.run()
+        with self.on(self.b):
+            sync.run()
+            self.assertEqual(store.thread_for(thread_id=t)["messages"][1]["run_text"], "可以")
+            store.set_thread_title(t, "B 起的标题", "user")
+            sync.run()
+        with self.on(self.a):
+            sync.run()
+            self.assertEqual(store.thread_for(thread_id=t)["title"], "B 起的标题")
+            self.assertEqual(store.thread_for(thread_id=t)["agent_id"], "agent-on-a")  # A keeps its own agent
+            with store.tx() as c:  # an older change from B arriving late loses to what A already has
+                sync._apply(c, {"tbl": "threads", "pk": t, "at": "2000-01-01T00:00:00.000", "row": {"id": t, "title": "旧"}})
+            self.assertEqual(store.thread_for(thread_id=t)["title"], "B 起的标题")
+
+    def test_a_note_waits_for_its_paper_and_bad_lines_are_dropped(self):
+        from paper2brain import sync
+        with self.on(self.a):
+            store.upsert_paper("arxiv:2601.00001", "Only on A")
+            store.add_note("A 的笔记", "user", paper_id="arxiv:2601.00001")
+            sync.run()
+            Path(self.drop, "changes", "mac-a", f"{10**11:012d}.jsonl").write_text('not json\n{"tbl": "notes"}\n')
+        with self.on(self.b):
+            sync.run()
+            with store.tx() as c:
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 0)
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0], 1)
+            store.upsert_paper("arxiv:2601.00001", "Only on A")  # the paper comes over by handoff, or B adds it
+            sync.run()
+            with store.tx() as c:
+                self.assertEqual(c.execute("SELECT text FROM notes").fetchone()[0], "A 的笔记")
+                self.assertEqual(c.execute("SELECT COUNT(*) FROM sync_pending").fetchone()[0], 0)
+
+    def test_auto_push_only_on_the_owner(self):
+        with self.on(self.a), self.mock.patch.object(self.handoff, "_pushed", 0.0):
+            store.counts()
+            self.handoff.auto_push()
+            self.assertEqual(self.handoff.meta()["owner"], "mac-a")
+            Path(self.drop, "handoff.json").write_text('{"owner": "mac-b"}')
+            self.handoff._pushed = 0.0
+            self.handoff.auto_push()
+            self.assertEqual(self.handoff.meta()["owner"], "mac-b")  # B took the library: A leaves its snapshot alone
 
 
 class Diagrams(unittest.TestCase):

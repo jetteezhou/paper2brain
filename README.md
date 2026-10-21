@@ -38,6 +38,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python ops/handoff.py pull   # 要接手的 Mac：等 iCloud 同步完再运行；会先备份本机旧库，再接手并重启服务
 ```
 
+忘了 push 也不怕：交接过一次之后（iCloud 里有了 `paper2brain-handoff`），正在持有论文库的那台 Mac 每半小时自动往 iCloud 放一份新快照，不停服务；另一台 pull 之后由它接着放。
+
+**两台同时用（实验）**：`config.json` 里设 `"sync": true`（会随 pull 带到另一台），两台 Mac 每 20 秒通过 iCloud 互相交换改动，同一行以最后改的为准。目前只同步讨论（含已结束的 agent 回复）、笔记和划选的段落；论文、快读卡、主题和研究页还不同步，只在持有论文库的那台上改，再靠交接带过去。在一台上开的讨论到另一台接着聊时，会换一个本机的新 agent，之前说过的话照样带上。
+
 新 Mac 第一次用：克隆代码、`ops/setup.sh`（顺带装好开机自启），装好并登录 Cursor CLI 和 `tcodex`，再 pull。两台 Mac 共用 `config.json` 里同一个 worker 名（`machine`），已有的讨论换了机器也能接着聊；本机 `config.json` 里另设了 `machine` 时 pull 会保留它。
 
 **从别的设备访问**：默认只接受本机。要对外开放，必须设访问口令：`config.json` 的 `password`，或环境变量 `P2B_PASSWORD`（浏览器会弹登录框，用户名随便填；设了之后本机访问也要输）。经代理或域名访问时，再把那个域名写进 `config.json` 的 `hosts`（或环境变量 `P2B_HOSTS`，逗号隔开）。
