@@ -21,6 +21,10 @@ from . import rules, store
 
 API = "https://api.cursor.com/v1"
 TERMINAL = {"FINISHED", "ERROR", "CANCELLED", "EXPIRED"}
+# the shared server's agents work in a checkout of this on the member's Mac: ./p2b forwarding back, no server code
+CLIENT_REPO = "https://github.com/jetteezhou/paper2brain-client"
+# there the librarian specs live on the server, so every task first fetches the current ones into that checkout
+GUIDE_FIRST = "（先运行 `./p2b guide`，把 librarian/ 工作规范更新到服务器上的当前版本，再按下面做。）\n"
 
 
 def config():
@@ -31,7 +35,7 @@ def config():
     return {
         "api_key": os.environ.get("CURSOR_API_KEY") or who.get("cursor_api_key"),
         "machine": os.environ.get("P2B_MACHINE") or who.get("machine"),
-        "repo": cfg.get("repo") or "https://github.com/jetteezhou/paper2brain",
+        "repo": cfg.get("repo") or (CLIENT_REPO if store.multi() else "https://github.com/jetteezhou/paper2brain"),
         "model": cfg.get("model"),
         "models": cfg.get("models") or {},
         "auto_agent": cfg.get("auto_agent", True),
@@ -64,7 +68,7 @@ def set_backend(backend):
 def _missing(backend):
     if backend == "tcodex":
         if store.multi():
-            return [] if runner_online() else ["在线的本机 TCodex（在装了 tcodex 的 Mac 上运行 ops/client.sh）"]
+            return [] if runner_online() else ["在线的本机 TCodex（在装了 tcodex 的 Mac 上运行 paper2brain-client 的 setup.sh）"]
         return [] if _tcodex_bin() else ["tcodex 命令"]
     cfg = config()
     return [k for k, v in (("CURSOR_API_KEY", cfg["api_key"]), ("P2B_MACHINE", cfg["machine"])) if not v]
@@ -219,6 +223,8 @@ def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=No
     if _missing(backend):
         raise AgentError(f"{'TCodex' if backend == 'tcodex' else 'Cursor'} 后端未配置：缺 " + "、".join(_missing(backend)))
     agent_id = agent_id or f"{'codex' if backend == 'tcodex' else 'bc'}-{uuid.uuid4()}"
+    if store.multi():
+        text = GUIDE_FIRST + text
     store.add_run(placeholder, agent_id, kind, ref, text, "WAITING", launch={"name": name, "new": new, "model": model})
     if images:
         _images[placeholder] = list(images)
@@ -462,7 +468,7 @@ def _codex_done(agent_id, run_id, out, tools, error, duration_ms):
 
 
 def codex_turn(session, text, images, model, progress, started=None, env=None):
-    """Run one `tcodex exec` turn on this machine (the server's own, or a member's Mac: tcodex_runner.py).
+    """Run one `tcodex exec` turn on this machine (single-user; paper2brain-client has the same for members' Macs).
     images: [(bytes, mime)]. progress(text, tools, new session id or None) after each event; started(process) lets
     the caller stop it. Returns (text, tools, error)."""
     out, tools, error, notice = "", {}, None, None
@@ -505,7 +511,7 @@ def codex_turn(session, text, images, model, progress, started=None, env=None):
     return out, list(tools.values()), error
 
 
-# ---------- TCodex on the shared server: a member's Mac takes the run (tcodex_runner.py), the server only records it ----------
+# ---------- TCodex on the shared server: a member's Mac takes the run (paper2brain-client), the server only records it ----------
 
 _jobs = {}  # ponytail: a queued run's images live in memory; after a server restart it is sent without them
 _runners = {}  # a member's personal library id -> when their Mac last asked for TCodex work
@@ -552,9 +558,10 @@ SEARCH_MODEL = {"id": "deepseek-v4.1-flash", "backend": "tcodex", "params": [{"i
 
 
 def search_api():
-    """The OpenAI-compatible chat API the search bar calls directly (config.json "search_api"), or None."""
-    path = store.home() / "config.json"
-    api = (json.loads(path.read_text()) if path.exists() else {}).get("search_api") or {}
+    """The OpenAI-compatible chat API the search bar calls directly (config.json "search_api"), or None. A shared
+    space without its own uses the one of the member who runs its agents."""
+    cfg = store.config()
+    api = cfg.get("search_api") or (store.config_of(cfg["agent_library"]).get("search_api") if cfg.get("agent_library") else None) or {}
     return api if api.get("base_url") and api.get("api_key") and api.get("model") else None
 
 

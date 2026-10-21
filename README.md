@@ -77,7 +77,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 - **角色**：所有者（邀请、改角色、确立研究、删研究、改模型和 Overleaf）、编辑、只读。
 - **共享空间的 agent**：用空间里指定的一位成员（默认是创建者）的 key 和 Mac 跑；所有者可以在设置里换人。
-- **TCodex**：也在成员自己的 Mac 上跑。装了 `tcodex` 的 Mac 运行 `ops/client.sh` 时会顺便装上本机 TCodex（`ops/tcodex.sh`，日志 `/tmp/paper2brain-tcodex.log`），它向服务器领取这个人（和由 ta 负责 agent 的共享空间）的 TCodex 任务、在本机运行并把回答传回；这台 Mac 在线时模型列表里才有 TCodex 的模型。搜索框的 AI 推荐、起标题这些一次性的快速调用不走 TCodex，要用就配"快速搜索接口"。
+- **TCodex**：也在成员自己的 Mac 上跑。装了 `tcodex` 的 Mac 接入时会顺便装上本机 TCodex，它向服务器领取这个人（和由 ta 负责 agent 的共享空间）的 TCodex 任务、在本机运行并把回答传回；这台 Mac 在线时模型列表里才有 TCodex 的模型。搜索框的 AI 推荐、起标题这些一次性的快速调用不走 TCodex，要用就配"快速搜索接口"。
 - **服务器上不跑的**：iCloud 收件箱、多台 Mac 同步与交接；Overleaf 只能在网页上推拉，agent 改不了服务器上的本地副本。
 
 **搭服务器**（Ubuntu 24.04，域名的 A 记录已指向它，只开 22/80/443 端口）：
@@ -89,7 +89,7 @@ sudo ops/server.sh p2b.example.com    # 依赖、Chromium、systemd 服务 paper
 
 数据在 `/var/lib/paper2brain`（`hub.sqlite` 是账号和成员，`libs/<库 id>/` 是各个论文库，每个库每天自己备份到 `backups/`）。再要邀请新账号：`sudo -u <运行用户> env P2B_ROOT=/var/lib/paper2brain ./p2b admin invite --url https://p2b.example.com`；已有账号的人也可以在共享空间里直接生成邀请链接，对方用它就会顺便建好账号。
 
-**每个人的 Mac**：打开邀请链接、写名字；在网页左下角"Agent"设置里点"生成本机 agent 的口令"，照着显示的命令在终端里运行（`ops/client.sh <服务器地址> <口令>`：问一次 Cursor API key，向服务器登记本机 worker，把 worker 装成开机自启）。这台 Mac 不需要 Python 依赖，也不存数据库。换设备登录用设置里的"生成登录链接"。
+**每个人的 Mac**：打开邀请链接、写名字；在网页左下角"Agent"设置里点"生成本机 agent 的口令"，照着显示的命令在终端里运行。成员的 Mac 用的是单独的仓库 [paper2brain-client](https://github.com/jetteezhou/paper2brain-client)（`setup.sh <服务器地址> <口令>`：问一次 Cursor API key 和快速搜索接口，登记到服务器上这个人的论文库，把 worker 和 TCodex 装成开机自启）。它只有转发 `./p2b` 和运行 TCodex 的少量代码，基本不变；agent 的工作规范 `librarian/` 每个任务开始时用 `./p2b guide` 从服务器取，所以服务代码和规范怎么改，成员都不用更新客户端。换设备登录用设置里的"生成登录链接"。
 
 ## 连接 Cursor agent
 
@@ -129,12 +129,12 @@ tail -f /tmp/paper2brain.log /tmp/paper2brain-worker.log           # 日志；�
 ```
 paper2brain/   代码：store（唯一碰 SQLite）、rules（写入校验）、sources（抓取）、pipeline（规则预处理）、
                structure（插图与目录）、cursor_api（agent）、server（Web API）、cli（./p2b）、inbox（iCloud 收件箱）、
-               accounts（团队版的账号、库与成员）、remote（团队版成员 Mac 上的 ./p2b，转发到服务器）
+               accounts（团队版的账号、库与成员）
 librarian/     agent 工作规范
 web/           Web 界面：Preact + htm + signals（web/vendor），ES 模块直接加载，无构建步骤；
                app/main.js 外壳与路由，discuss.js 讨论工作台，papers.js 收件箱与论文，reader.js 阅读器，research.js 研究
 shortcuts/     iPhone 快捷指令搭建说明
-ops/           worker 启动脚本、launchd 配置；团队版的 server.sh（Linux 服务器）、client.sh（成员的 Mac）、systemd 和 Caddy 配置
+ops/           worker 启动脚本、launchd 配置；团队版的 server.sh（Linux 服务器）、systemd 和 Caddy 配置
 tests/         写入规则与存储测试（临时数据库）
 ```
 

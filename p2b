@@ -1,5 +1,3 @@
 #!/bin/sh
 here="$(cd "$(dirname "$0")" && pwd)"
-py="$here/.venv/bin/python"
-[ -x "$py" ] || py=python3  # a member's Mac talking to the shared server (P2B_SERVER) needs no venv
-PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m paper2brain "$@"
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" exec "$here/.venv/bin/python" -m paper2brain "$@"

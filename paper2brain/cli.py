@@ -241,6 +241,10 @@ def run(args):
     if cmd == "serve":
         from . import server
         server.serve(args.host, args.port)
+    if cmd == "guide":
+        # the agent's working specs; a member's Mac (paper2brain-client) writes them into its librarian/
+        folder = Path(__file__).resolve().parent.parent / "librarian"
+        return {"docs": {p.name: p.read_text() for p in sorted(folder.glob("*.md"))}}
     if cmd == "admin":
         from . import accounts
         if not store.multi():
@@ -267,7 +271,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def run_remote(argv, files):
-    """./p2b sent from an agent's machine (remote.py), run in the library chosen for it. files maps each --file /
+    """./p2b sent from an agent's machine (paper2brain-client), run in the library chosen for it. files maps each --file /
     --image value the client named ("-" for stdin) to its base64 content; no other path on this machine is read.
     Returns (output, {server path: base64}) for the files in the output the agent needs to look at."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -453,6 +457,7 @@ def parser(cls=argparse.ArgumentParser):
     s = sub.add_parser("serve", help="启动 Web 界面")
     s.add_argument("--host", help="默认：设了口令时也对内网开放（0.0.0.0），否则只开本机")
     s.add_argument("--port", type=int, default=8765)
+    sub.add_parser("guide", help="librarian/ 工作规范的当前版本（团队版：成员 Mac 上的 ./p2b guide 把它们写到本地）")
     s = sub.add_parser("admin", help="多用户服务器：invite 生成一个新账号的邀请链接（在服务器上运行）")
     s.add_argument("action", choices=["invite"])
     s.add_argument("--url", required=True, help="网页地址，例如 https://p2b.example.com")

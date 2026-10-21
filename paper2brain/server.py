@@ -88,23 +88,29 @@ def login_link(q, body):
 
 @route("POST", "/api/me/agent-token")
 def agent_token(q, body):
-    """The token ops/client.sh puts on the user's Mac; a new one replaces the old."""
+    """The token setup.sh of paper2brain-client puts on the user's Mac; a new one replaces the old."""
     return {"token": accounts.issue(_me()["user"]["id"], "agent")}
 
 
 @route("POST", "/api/agent/connect")
 def agent_connect(q, body):
-    """The user's Cursor key and the name of the worker on their Mac (ops/client.sh sends both)."""
+    """From the setup on the user's Mac (paper2brain-client): their Cursor key, the name of the worker there and,
+    optionally, the quick search API ({base_url, model, api_key, web_model}), all kept in the user's own library."""
     key, machine = (body.get("cursor_api_key") or "").strip(), (body.get("machine") or "").strip()
     if not key or not re.fullmatch(r"[\w.-]{1,60}", machine):
         raise rules.Rejected("需要 Cursor API key 和 worker 名（字母、数字、点、横线）")
-    accounts.write_config(_me()["user"]["library"], cursor_api_key=key, machine=machine)
-    return {"ok": True}
+    s = body.get("search_api")
+    with store.at_home(store.library_home(_me()["user"]["library"])):
+        if isinstance(s, dict) and s.get("base_url"):
+            sources.check_public(s["base_url"])
+            cursor_api.set_search_api(s.get("base_url"), s.get("model"), s.get("api_key"), s.get("web_model"))
+        accounts.write_config(_me()["user"]["library"], cursor_api_key=key, machine=machine)
+        return {"ok": True, "search_api": bool(cursor_api.search_api())}
 
 
 @route("POST", "/api/cli")
 def cli_remote(q, body):
-    """./p2b from an agent on a member's Mac (paper2brain/remote.py); the server chose the library already."""
+    """./p2b from an agent on a member's Mac (paper2brain-client); the server chose the library already."""
     if not isinstance(body.get("argv"), list) or not isinstance(body.get("files") or {}, dict):
         raise rules.Rejected("请求格式不对")
     out, files = cli.run_remote(body["argv"], body.get("files") or {})
@@ -113,7 +119,7 @@ def cli_remote(q, body):
 
 @route("POST", "/api/tcodex/claim")
 def tcodex_claim(q, body):
-    """A member's Mac (paper2brain/tcodex_runner.py) asks for a TCodex run to do; waits up to 25 s for one."""
+    """A member's Mac (paper2brain-client's tcodex_runner) asks for a TCodex run to do; waits up to 25 s for one."""
     me = _me()["user"]
     deadline = time.time() + min(max(float(body.get("wait", 25)), 0), 25)
     while True:
