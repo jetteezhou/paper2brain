@@ -3,6 +3,7 @@ Chromium turns its #figure element into a vector PDF for LaTeX and a 3x PNG the 
 import json
 import math
 import shutil
+import urllib.parse
 from pathlib import Path
 
 from . import rules, store
@@ -54,6 +55,27 @@ CHECK = """() => {
 }"""
 
 
+SANDBOX = "http://p2b.diagram/"
+
+
+def _sandbox(page, src):
+    """Serve the figure from a made-up http origin, from which Chromium refuses file:// loads, and answer only the
+    figure and KaTeX: everything else (the network, other files) is aborted."""
+    katex = KATEX.resolve()
+
+    def answer(route):
+        path = urllib.parse.urlsplit(route.request.url)
+        f = None
+        if f"{path.scheme}://{path.netloc}/" == SANDBOX:
+            f = src if path.path == "/figure.html" else (katex / path.path.removeprefix("/katex/")).resolve()
+        if f == src or (f and path.path.startswith("/katex/") and katex in f.parents and f.is_file()):
+            return route.fulfill(path=str(f))
+        route.abort()
+
+    page.route("**/*", answer)
+    return SANDBOX + "figure.html", SANDBOX + "katex/"
+
+
 def render(rid, name, src, title=None, caption=None, kind=None):
     if not store.get_research(rid):
         raise rules.Rejected("这个研究不存在或已删除")
@@ -75,14 +97,17 @@ def render(rid, name, src, title=None, caption=None, kind=None):
             browser = p.chromium.launch()
             try:
                 page = browser.new_page(viewport={"width": 2400, "height": 1600}, device_scale_factor=3)
-                page.goto(src.as_uri(), wait_until="networkidle")
+                url, katex = src.as_uri(), KATEX.as_uri() + "/"
+                if store.multi():  # the agent's HTML must not read other files or the network of the shared server
+                    url, katex = _sandbox(page, src)
+                page.goto(url, wait_until="networkidle")
                 if not page.query_selector("#figure"):
                     raise rules.Rejected('HTML 里要有一个 id="figure" 的元素，图就是它（固定 px 宽度）')
                 page.add_style_tag(content="html,body{margin:0!important;padding:0!important;background:#fff}#figure{margin:0!important}")
                 if "\\(" in page.inner_text("#figure"):
-                    page.add_style_tag(url=(KATEX / "katex.min.css").as_uri())
-                    page.add_script_tag(url=(KATEX / "katex.min.js").as_uri())
-                    page.add_script_tag(url=(KATEX / "auto-render.min.js").as_uri())
+                    page.add_style_tag(url=katex + "katex.min.css")
+                    page.add_script_tag(url=katex + "katex.min.js")
+                    page.add_script_tag(url=katex + "auto-render.min.js")
                     page.evaluate("renderMathInElement(document.getElementById('figure'),"
                                   " {delimiters: [{left: '\\\\(', right: '\\\\)', display: false}], throwOnError: false})")
                 page.evaluate("document.fonts.ready.then(() => 1)")

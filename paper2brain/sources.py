@@ -1,15 +1,17 @@
 """Fetching from the outside world: article pages (WeChat, Xiaohongshu, generic) and arXiv."""
 import difflib
 import html
+import ipaddress
 import json
 import re
+import socket
 import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 
-from . import rules
+from . import rules, store
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
@@ -17,9 +19,35 @@ UA = (
 )
 
 
+def check_public(url):
+    """On the shared server, users' links must not reach this machine or its private network (cloud metadata, other
+    services). ponytail: the name is resolved again when connecting, so a DNS-rebinding host can slip through; put the
+    server where nothing private answers if that matters."""
+    p = urllib.parse.urlsplit(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise rules.Rejected(f"只能抓取 http(s) 链接：{url[:100]}")
+    try:
+        addrs = {i[4][0] for i in socket.getaddrinfo(p.hostname, None)}
+    except socket.gaierror:
+        return  # the fetch itself reports it
+    if not all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addrs):
+        raise rules.Rejected(f"不能访问内网或本机地址：{p.hostname}")
+
+
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_public(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_public_opener = urllib.request.build_opener(_PublicRedirects)
+
+
 def http_get(url, timeout=25):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    if store.multi():
+        check_public(url)
+    with (_public_opener.open if store.multi() else urllib.request.urlopen)(req, timeout=timeout) as r:
         return r.geturl(), r.read(), r.headers.get("Content-Type", "")
 
 

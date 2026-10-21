@@ -3,7 +3,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import rules
+from . import rules, sources, store
 
 
 def normalize(url):
@@ -22,9 +22,16 @@ def normalize(url):
 
 def local_dir(home, url):
     if url.startswith("/"):
+        if store.multi():
+            raise rules.Rejected("多用户服务器上只能关联 https 的代码仓库")  # a server path would read other libraries
         return Path(url)
     host, path = re.match(r"https://([^/]+)/(.+)", url).groups()
-    return home / "repos" / host / path
+    out = home / "repos" / host / path
+    if store.multi():
+        sources.check_public(url)
+        if (home / "repos").resolve() not in out.resolve().parents:
+            raise rules.Rejected(f"认不出代码仓库地址：{url}")
+    return out
 
 
 def _git(path, *args, timeout=600):
