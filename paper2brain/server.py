@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import subprocess
 import threading
 import time
 import traceback
@@ -846,14 +847,16 @@ class Handler(BaseHTTPRequestHandler):
     def _refuse(self, method):
         """Any web page the user has open can send requests to 127.0.0.1. Host must name this server (DNS rebinding);
         writes must come from our own page (Origin) as JSON, which a cross-site form or no-cors fetch cannot send.
-        Clients that send no Origin at all (curl) are not browsers and are let through. P2B_HOSTS adds names reached
-        from elsewhere (a LAN IP, a tunnel domain); P2B_PASSWORD then guards every request, loopback included,
-        since a tunnel reaches us from 127.0.0.1."""
-        host, port = self.headers.get("Host", ""), self.server.server_address[1]
+        Clients that send no Origin at all (curl) are not browsers and are let through. From the LAN, Host is the IP
+        the client actually reached (a rebinding domain never is); P2B_HOSTS adds other names. A password then guards
+        every request, loopback included, since a tunnel or proxy reaches us from 127.0.0.1."""
+        host, port, here = self.headers.get("Host", ""), self.server.server_address[1], self.connection.getsockname()[0]
         extra = _hosts()
-        if host not in {f"{h}:{port}" for h in ("127.0.0.1", "localhost", self.server.server_address[0], *extra)} | set(extra):
-            return 403, "Host 不对：只接受 127.0.0.1、localhost 或 P2B_HOSTS 里的地址"
+        if host not in {f"{h}:{port}" for h in ("127.0.0.1", "localhost", here, *extra)} | set(extra):
+            return 403, "Host 不对：只接受 127.0.0.1、localhost、本机 IP 或 P2B_HOSTS 里的地址"
         password = _password()
+        if not password and not here.startswith("127."):
+            return 403, "从别的设备访问要先在 config.json 里设 password"
         if password:
             kind, _, cred = self.headers.get("Authorization", "").partition(" ")
             try:
@@ -947,13 +950,27 @@ def _hosts():
     return [h.strip() for h in os.environ.get("P2B_HOSTS", "").split(",") + list(_config().get("hosts") or []) if h.strip()]
 
 
-def serve(host="127.0.0.1", port=8765):
+def _lan_ip():
+    """This Mac's address on the office network: the default route's interface. A VPN client (iOA) routes every
+    other destination through its own tunnel, whose address LAN peers cannot reach."""
+    try:
+        route = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True, timeout=5).stdout
+        iface = re.search(r"interface:\s*(\S+)", route).group(1)
+        return subprocess.run(["ipconfig", "getifaddr", iface], capture_output=True, text=True, timeout=5).stdout.strip() or None
+    except (OSError, AttributeError, subprocess.TimeoutExpired):
+        return None  # not macOS, or offline
+
+
+def serve(host=None, port=8765):
+    """host None: the LAN too when a password is set (other devices on the office network), else only this Mac."""
+    host = host or ("0.0.0.0" if _password() else "127.0.0.1")
     if (host not in ("127.0.0.1", "localhost") or _hosts()) and not _password():
         raise SystemExit("对本机以外开放（--host 或 P2B_HOSTS）时必须设置 P2B_PASSWORD：这个服务能让 agent 在本机执行命令")
     store.counts()
     cursor_api.resume_watchers()
     bg(_poll_inbox)
-    print(f"paper2brain 已启动：http://{host}:{port}  数据目录：{store.home()}")
+    lan = _lan_ip() if host == "0.0.0.0" else None
+    print(f"paper2brain 已启动：http://127.0.0.1:{port}" + (f"  内网：http://{lan}:{port}" if lan else "") + f"  数据目录：{store.home()}")
     a = cursor_api.status()
     print("Agent：" + (f"已配置，本机 worker = {a['machine']}" if a["enabled"] else f"未配置（缺 {', '.join(a['missing'])}），只做规则预处理"))
     ThreadingHTTPServer((host, port), Handler).serve_forever()

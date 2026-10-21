@@ -389,7 +389,7 @@ def parser():
     sub.add_parser("search").add_argument("query")
     sub.add_parser("inbox", help="处理 iCloud 收件箱").add_argument("action", choices=["drain"])
     s = sub.add_parser("serve", help="启动 Web 界面")
-    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--host", help="默认：设了口令时也对内网开放（0.0.0.0），否则只开本机")
     s.add_argument("--port", type=int, default=8765)
     return p
 

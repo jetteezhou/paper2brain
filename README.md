@@ -40,12 +40,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 新 Mac 第一次用：克隆代码、`ops/setup.sh`（顺带装好开机自启），装好并登录 Cursor CLI 和 `tcodex`，再 pull。两台 Mac 共用 `config.json` 里同一个 worker 名（`machine`），已有的讨论换了机器也能接着聊；本机 `config.json` 里另设了 `machine` 时 pull 会保留它。
 
-**从别的设备访问**：默认只接受本机。要对外开放，必须设访问口令：`config.json` 的 `password`，或环境变量 `P2B_PASSWORD`（浏览器会弹登录框，用户名随便填；设了之后本机访问也要输），并在 `config.json` 的 `hosts`（或环境变量 `P2B_HOSTS`，逗号隔开）里列出别的设备用来访问的地址：
+**从别的设备访问**：默认只接受本机。要对外开放，必须设访问口令：`config.json` 的 `password`，或环境变量 `P2B_PASSWORD`（浏览器会弹登录框，用户名随便填；设了之后本机访问也要输）。经代理或域名访问时，再把那个域名写进 `config.json` 的 `hosts`（或环境变量 `P2B_HOSTS`，逗号隔开）。
 
-```sh
-# 公司内网：手机和别的电脑打开 http://10.43.38.194:8765
-P2B_HOSTS=10.43.38.194 ./p2b serve --host 0.0.0.0
-```
+设了口令后，服务默认也对内网开放：同一网络里的手机和电脑打开 `http://<这台 Mac 的 IP>:8765`（启动日志 `/tmp/paper2brain.log` 里打印了这个地址）。只想开本机就用 `./p2b serve --host 127.0.0.1`。
 
 **升级与备份**：数据库带版本号（`PRAGMA user_version`）。新版本第一次打开旧数据库时（`./p2b serve` 或任何一条 `./p2b` 命令），先把原库完整复制到 `~/paper2brain-data/backups/p2b-before-v<N>-<时间>.sqlite`，再按顺序补上缺的表、列和索引，原有数据不删不改。例外是两次结构调整：只写了一句想法、没有任何内容的旧捕获，变成一条独立想法（v4）；每条想法变成一段讨论，原话是第一条消息、提炼成为标题，它原来那段讨论和研究素材并进来，之后删掉想法表（v7）。服务运行时每天另存一份 `backups/p2b-YYYYMMDD.sqlite`，保留最近 7 份。要回退，停掉服务后把备份复制回 `p2b.sqlite` 即可。
 

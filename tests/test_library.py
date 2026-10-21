@@ -973,6 +973,38 @@ class Server(unittest.TestCase):
         with mock.patch.dict(os.environ, {"P2B_PASSWORD": ""}), self.assertRaises(SystemExit):
             server.serve("0.0.0.0", 0)
 
+    def test_lan_reaches_the_ip_it_connected_to_with_the_password(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        from unittest import mock
+
+        from paper2brain import server
+        ip = server._lan_ip()
+        if not ip or ip.startswith("127."):
+            self.skipTest("no LAN interface")
+        httpd = ThreadingHTTPServer(("0.0.0.0", 0), server.Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+
+        def get(host, **headers):
+            c = http.client.HTTPConnection(ip, port)
+            c.request("GET", "/api/state", headers={"Host": host, **headers})
+            r = c.getresponse()
+            r.read()
+            c.close()
+            return r.status
+        ok = {"Authorization": "Basic " + base64.b64encode(b"me:s3cret").decode()}
+        try:
+            with mock.patch.dict(os.environ, {"P2B_PASSWORD": "s3cret"}):
+                self.assertEqual(get(f"{ip}:{port}", **ok), 200)
+                self.assertEqual(get(f"{ip}:{port}"), 401)
+                self.assertEqual(get(f"rebind.example:{port}", **ok), 403)
+            with mock.patch.dict(os.environ, {"P2B_PASSWORD": ""}), mock.patch.object(server, "_config", lambda: {}):
+                self.assertEqual(get(f"{ip}:{port}"), 403)  # no password: the LAN is refused even if bound to it
+        finally:
+            httpd.shutdown()
+
 
 class Handoff(unittest.TestCase):
     def test_paths_from_the_other_mac_point_here(self):
