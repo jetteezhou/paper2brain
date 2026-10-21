@@ -257,12 +257,38 @@ def _v16_experiment_design(c):
     c.execute("ALTER TABLE exp_figures ADD COLUMN design TEXT")
 
 
+def _v17_short_names(c):
+    """short_name: what the paper calls itself (Long-WAM, π0.5). NULL: not looked for yet; '': the paper names nothing.
+    short_name_by = 'user' keeps the user's name. Titles like "Long-WAM: ..." give it right away."""
+    c.execute("ALTER TABLE papers ADD COLUMN short_name TEXT")
+    c.execute("ALTER TABLE papers ADD COLUMN short_name_by TEXT")
+    for r in c.execute("SELECT id, title FROM papers").fetchall():
+        if name := rules.title_short_name(r["title"]):
+            c.execute("UPDATE papers SET short_name=?, short_name_by='rule' WHERE id=?", (name, r["id"]))
+
+
+def _v18_trash(c):
+    """Recently deleted papers and discussions: the rows as they were (rows, JSON by table) until restored or purged;
+    a paper's files wait in trash/<id>. The old one-slot trash (kv 'trash:paper', trash/paper) becomes the first entry."""
+    c.execute("CREATE TABLE IF NOT EXISTS trash (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL, kind TEXT NOT NULL, "
+              "ref TEXT NOT NULL, title TEXT, detail TEXT, rows TEXT NOT NULL)")
+    old = c.execute("SELECT value FROM kv WHERE key='trash:paper'").fetchone()
+    if old:
+        snap, tid = json.loads(old[0]), new_id()
+        title = (snap["rows"].get("papers") or [{}])[0].get("title")
+        c.execute("INSERT INTO trash (id, deleted_at, kind, ref, title, rows) VALUES (?,?,?,?,?,?)",
+                  (tid, now(), "paper", snap["id"], title, json.dumps(snap["rows"], ensure_ascii=False)))
+        c.execute("DELETE FROM kv WHERE key='trash:paper'")
+        if (home() / "trash" / "paper").exists():
+            shutil.move(str(home() / "trash" / "paper"), str(home() / "trash" / tid))
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
-              _v16_experiment_design]
+              _v16_experiment_design, _v17_short_names, _v18_trash]
 
 
 def home():
@@ -332,6 +358,16 @@ def backup(name=None):
         for old in sorted(folder.glob("p2b-[0-9]*.sqlite"))[:-BACKUPS_KEPT]:
             old.unlink()
     return path
+
+
+def rehome(old):
+    """After the data directory came from another machine (ops/handoff.py): point stored absolute paths at this one."""
+    old, new = str(old).rstrip("/") + "/", str(home()).rstrip("/") + "/"
+    if old == new:
+        return 0
+    with tx() as c:
+        return sum(c.execute(f"UPDATE {t} SET {col} = ? || substr({col}, ?) WHERE substr({col}, 1, ?) = ?",
+                             (new, len(old) + 1, len(old), old)).rowcount for t, col in (("papers", "pdf_path"), ("repos", "path")))
 
 
 def _migrate(conn):
@@ -527,6 +563,160 @@ def delete_capture(capture_id):
         shutil.rmtree(paper_dir(pid, create=False), ignore_errors=True)
 
 
+TRASH_DAYS = 30
+
+
+def _snapshot(c, parts):
+    """The rows about to be deleted, by table, in restore order (parents before children)."""
+    snap = {}
+    for table, where, args in parts:
+        if args and (rows := _rows(c.execute(f"SELECT * FROM {table} WHERE {where}", args))):
+            snap[table] = rows
+    return snap
+
+
+def _drop_threads_to_trash(c, snap, ids):
+    """_drop_threads, remembering which outside discussions it lifts a level so restore can hang them back."""
+    kids = _rows(c.execute(f"SELECT id, parent_id, fork_message_id FROM threads WHERE parent_id IN ({_qs(ids)}) "
+                           f"AND id NOT IN ({_qs(ids)})", (*ids, *ids))) if ids else []
+    _drop_threads(c, ids)
+    for k in kids:
+        k["lifted"] = c.execute("SELECT parent_id FROM threads WHERE id=?", (k["id"],)).fetchone()[0]
+    if kids:
+        snap["_reparent"] = kids
+
+
+def _to_trash(c, kind, ref, title, detail, snap):
+    tid = new_id()
+    c.execute("INSERT INTO trash (id, deleted_at, kind, ref, title, detail, rows) VALUES (?,?,?,?,?,?,?)",
+              (tid, now(), kind, ref, title, detail, json.dumps(snap, ensure_ascii=False)))
+    _event(c, "user", f"{kind}.delete", ref, trash=tid)
+    return tid
+
+
+def delete_paper(pid):
+    """The user disowns one paper: it and everything hanging off it go, wherever it came from or is used.
+    Captures that mentioned it stay (they just lose the link). It waits in the trash; returns the trash id."""
+    with tx() as c:
+        title = (c.execute("SELECT coalesce(short_name, title) FROM papers WHERE id=?", (pid,)).fetchone() or [None])[0]
+        if title is None:
+            raise KeyError(pid)
+        deps = _paper_dependents(c, pid)
+        gone = {"paper": [pid], **deps}
+        refs = [pid, *deps["thread"]]
+        snap = _snapshot(c, (
+            ("papers", "id=?", [pid]), ("anchors", "paper_id=?", [pid]), ("paper_topics", "paper_id=?", [pid]),
+            ("capture_papers", "paper_id=?", [pid]), ("paper_text", "paper_id=?", [pid]), ("code_maps", "paper_id=?", [pid]),
+            ("threads", f"id IN ({_qs(deps['thread'])})", deps["thread"]), ("messages", f"thread_id IN ({_qs(deps['thread'])})", deps["thread"]),
+            ("notes", f"id IN ({_qs(deps['note'])})", deps["note"]), ("runs", f"ref IN ({_qs(refs)})", refs),
+            ("research_links", " OR ".join(f"(kind='{k}' AND ref IN ({_qs(v)}))" for k, v in gone.items() if v),
+             [x for v in gone.values() for x in v])))
+        for kind, ids in gone.items():
+            if ids:
+                c.execute(f"DELETE FROM research_links WHERE kind=? AND ref IN ({_qs(ids)})", (kind, *ids))
+        c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(refs)})", refs)
+        _drop_threads_to_trash(c, snap, deps["thread"])
+        if deps["note"]:
+            c.execute(f"DELETE FROM notes WHERE id IN ({_qs(deps['note'])})", deps["note"])
+        for table in ("anchors", "paper_topics", "capture_papers", "paper_text", "code_maps"):
+            c.execute(f"DELETE FROM {table} WHERE paper_id=?", (pid,))
+        c.execute("DELETE FROM papers WHERE id=?", (pid,))
+        detail = "、".join(f"{len(deps[k])} {w}" for k, w in (("thread", "段讨论"), ("anchor", "处划词"), ("note", "条笔记")) if deps[k])
+        tid = _to_trash(c, "paper", pid, title, detail and f"连同 {detail}", snap)
+    src = paper_dir(pid, create=False)
+    if src.exists():
+        (home() / "trash").mkdir(exist_ok=True)
+        shutil.move(str(src), str(home() / "trash" / tid))
+    purge_trash()
+    return tid
+
+
+def delete_thread(thread_id):
+    """The user deletes one discussion: its messages, its agent runs and its place in researches. Notes saved from
+    it stay. What grew out of it moves up a level (and back on restore). Returns the trash id."""
+    with tx() as c:
+        t = c.execute("SELECT title FROM threads WHERE id=?", (thread_id,)).fetchone()
+        if not t:
+            raise KeyError(thread_id)
+        if c.execute(f"SELECT 1 FROM runs WHERE ref=? AND status IN {_UNFINISHED_SQL}", (thread_id,)).fetchone():
+            raise rules.Rejected("agent 还在这段讨论里回复，等它说完再删")
+        msgs = _ids(c, "SELECT id FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,))
+        first = c.execute("SELECT text FROM messages WHERE thread_id=? AND role='user' AND text!='' ORDER BY created_at LIMIT 1",
+                          (thread_id,)).fetchone()
+        links = [thread_id, *msgs]
+        snap = _snapshot(c, (
+            ("threads", "id=?", [thread_id]), ("messages", "thread_id=?", [thread_id]), ("runs", "ref=?", [thread_id]),
+            ("research_links", f"(kind='thread' AND ref=?) OR (kind='message' AND ref IN ({_qs(msgs) or 'NULL'}))", links)))
+        c.execute(f"DELETE FROM research_links WHERE (kind='thread' AND ref=?) OR (kind='message' AND ref IN ({_qs(msgs) or 'NULL'}))", links)
+        c.execute("DELETE FROM runs WHERE ref=?", (thread_id,))
+        _drop_threads_to_trash(c, snap, [thread_id])
+        title = t["title"] or (first and first[0][:80]) or "（空讨论）"
+        tid = _to_trash(c, "thread", thread_id, title, f"{len(msgs)} 条消息" if msgs else "", snap)
+    purge_trash()
+    return tid
+
+
+# the owner a discussion's scope points at; restoring a discussion whose owner is gone would orphan it
+_SCOPE_OWNER = {"paper": "papers", "anchor": "anchors", "capture": "captures", "find": "captures", "research": "research"}
+
+
+def restore_trash(trash_id):
+    """Put a recently deleted paper or discussion back. Rows whose capture or research is gone meanwhile are skipped;
+    a paper taken in again meanwhile keeps its current row and files. Returns what came back: {kind, ref, scope}."""
+    with tx() as c:
+        e = c.execute("SELECT kind, ref, rows FROM trash WHERE id=?", (trash_id,)).fetchone()
+        if not e:
+            raise rules.Rejected("已经不能恢复了")
+        snap = json.loads(e["rows"])
+        scope = (snap.get("threads") or [{}])[0].get("scope") if e["kind"] == "thread" else None
+        if scope:
+            kind, _, ref = scope.partition(":")
+            if kind in _SCOPE_OWNER and not c.execute(f"SELECT 1 FROM {_SCOPE_OWNER[kind]} WHERE id=?", (ref,)).fetchone():
+                raise rules.Rejected("它所在的论文、划词或研究已经删除了，先恢复那边")
+        kids = snap.pop("_reparent", [])
+        for table, rows in snap.items():
+            for r in rows:
+                try:
+                    c.execute(f"INSERT OR IGNORE INTO {table} ({','.join(r)}) VALUES ({_qs(r)})",  # _row decodes JSON columns
+                              [json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v for v in r.values()])
+                except sqlite3.IntegrityError:
+                    pass
+        back = [r["id"] for r in snap.get("threads", [])]
+        if back:  # a parent deleted meanwhile: hang at the top level instead
+            c.execute(f"UPDATE threads SET parent_id=NULL, fork_message_id=NULL WHERE id IN ({_qs(back)}) "
+                      "AND parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM threads)", back)
+        for k in kids:
+            c.execute("UPDATE threads SET parent_id=?, fork_message_id=? WHERE id=? AND parent_id IS ?",
+                      (k["parent_id"], k["fork_message_id"], k["id"], k["lifted"]))
+        c.execute("DELETE FROM trash WHERE id=?", (trash_id,))
+        _event(c, "user", f"{e['kind']}.restore", e["ref"])
+    files = home() / "trash" / trash_id
+    if files.exists():
+        dst = paper_dir(e["ref"], create=False)
+        if dst.exists():
+            shutil.rmtree(files)
+        else:
+            shutil.move(str(files), str(dst))
+    return {"kind": e["kind"], "ref": e["ref"], "scope": scope}
+
+
+def purge_trash(trash_id=None):
+    """Delete for good: one entry, or (None) everything deleted more than TRASH_DAYS ago."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=TRASH_DAYS)).isoformat(timespec="seconds")
+    with tx() as c:
+        ids = [trash_id] if trash_id else _ids(c, "SELECT id FROM trash WHERE deleted_at < ?", (cutoff,))
+        if ids:
+            c.execute(f"DELETE FROM trash WHERE id IN ({_qs(ids)})", ids)
+    for i in ids:
+        shutil.rmtree(home() / "trash" / i, ignore_errors=True)
+
+
+def list_trash():
+    purge_trash()
+    with tx() as c:
+        return _rows(c.execute("SELECT id, deleted_at, kind, ref, title, detail FROM trash ORDER BY deleted_at DESC, rowid DESC"))
+
+
 def get_capture(capture_id):
     with tx() as c:
         cap = _row(c.execute("SELECT * FROM captures WHERE id=?", (capture_id,)).fetchone())
@@ -667,6 +857,7 @@ def counts():
         out["inbox"] = c.execute(f"SELECT count(*) FROM captures c WHERE c.triage='inbox' OR ({PENDING})").fetchone()[0]
         out["papers"] = c.execute(f"SELECT count(*) FROM papers p WHERE {LISTED}").fetchone()[0]
         out["research"] = c.execute("SELECT count(*) FROM research").fetchone()[0]
+        out["trash"] = c.execute("SELECT count(*) FROM trash").fetchone()[0]
         out["unsorted"] = c.execute(
             f"SELECT count(*) FROM papers p WHERE {LISTED} AND NOT EXISTS (SELECT 1 FROM paper_topics pt WHERE pt.paper_id=p.id)"
         ).fetchone()[0]
@@ -730,10 +921,29 @@ def upsert_paper(pid, title, authors=None, abstract=None, published=None, url=No
                 (title, json.dumps(authors or [], ensure_ascii=False), abstract, published, url, pid),
             )
         else:
+            name = rules.title_short_name(title)
             c.execute(
-                "INSERT INTO papers (id, created_at, title, authors, abstract, published, url) VALUES (?,?,?,?,?,?,?)",
-                (pid, now(), title, json.dumps(authors or [], ensure_ascii=False), abstract, published, url),
+                "INSERT INTO papers (id, created_at, title, authors, abstract, published, url, short_name, short_name_by) VALUES (?,?,?,?,?,?,?,?,?)",
+                (pid, now(), title, json.dumps(authors or [], ensure_ascii=False), abstract, published, url, name, name and "rule"),
             )
+
+
+def set_short_name(pid, name, by):
+    """by='user' always wins and stays; others only fill what nobody set ('' records that the paper names nothing)."""
+    name = re.sub(r"\s+", " ", name or "").strip()[:40]
+    with tx() as c:
+        cur = c.execute("SELECT short_name_by FROM papers WHERE id=?", (pid,)).fetchone()
+        if not cur:
+            raise rules.Rejected("这篇论文不存在")
+        if by != "user" and cur["short_name_by"] == "user":
+            return
+        c.execute("UPDATE papers SET short_name=?, short_name_by=? WHERE id=?", (name, by, pid))
+
+
+def unnamed_papers(limit=8):
+    """Listed papers nobody has looked for a short name in yet."""
+    with tx() as c:
+        return _rows(c.execute(f"SELECT p.id, p.title, p.abstract FROM papers p WHERE p.short_name IS NULL AND {LISTED} LIMIT ?", (limit,)))
 
 
 def set_fulltext(pid, pdf_path, pages):
@@ -760,6 +970,7 @@ def get_paper(pid, with_anchors=True):
         if not p:
             return None
         p["topics"] = _topics_of(c, [pid])[pid]
+        p["listed"] = bool(c.execute(f"SELECT {LISTED} FROM papers p WHERE p.id=?", (pid,)).fetchone()[0])
         p["topic_by"] = {r["topic"]: r["by"] for r in c.execute("SELECT topic, by FROM paper_topics WHERE paper_id=?", (pid,))}
         p["captures"] = _rows(c.execute(
             "SELECT c.id, c.created_at, c.channel, c.title, c.author, c.url, substr(c.raw,1,300) AS raw, c.triage, c.agent_id, cp.state, cp.by "
@@ -780,7 +991,7 @@ def get_paper(pid, with_anchors=True):
 def list_papers(topic=None):
     """topic=None: every listed paper (LISTED); '' : papers without a topic; a path includes its children."""
     sql = (
-        "SELECT p.id, p.title, p.authors, p.published, p.card, p.report IS NOT NULL AS has_report, "
+        "SELECT p.id, p.title, p.short_name, p.authors, p.published, p.card, p.report IS NOT NULL AS has_report, "
         "coalesce((SELECT max(c.created_at) FROM capture_papers cp JOIN captures c ON c.id=cp.capture_id "
         "WHERE cp.paper_id=p.id AND cp.state='confirmed'), p.created_at) AS last_captured, "
         "EXISTS (SELECT 1 FROM capture_papers cp2 JOIN captures c2 ON c2.id=cp2.capture_id WHERE cp2.paper_id=p.id "
@@ -1078,6 +1289,9 @@ def thread_for(scope=None, thread_id=None):
         t["research"] = _research_for(c, "thread", [t["id"]]).get(t["id"], [])
         t["papers"] = _papers_cited(c, [m["run_text"] or m["text"] for m in t["messages"]])
         t["scope_title"] = _scope_title(c, t["scope"])
+        # the model the agent was created on: its first run's
+        made = c.execute("SELECT launch FROM runs WHERE agent_id=? AND launch IS NOT NULL ORDER BY created_at, rowid LIMIT 1", (t["agent_id"],)).fetchone()
+        t["model"] = made and json.loads(made[0]).get("model")
         kind, _, ref = t["scope"].partition(":")
         t["scope_papers"] = _rows(c.execute(f"SELECT id, title FROM papers WHERE id IN ({_qs(ref.split('|'))})", ref.split("|"))) if kind == "papers" \
             else _rows(c.execute("SELECT p.id, p.title FROM capture_papers cp JOIN papers p ON p.id=cp.paper_id "
@@ -1307,6 +1521,11 @@ def add_message(thread_id, role, text, run_id=None):
     with tx() as c:
         c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
     return mid
+
+
+def drop_messages(ids):
+    with tx() as c:
+        c.execute(f"DELETE FROM messages WHERE id IN ({_qs(ids)})", ids)
 
 
 # ---------- research ----------
@@ -1636,9 +1855,10 @@ def add_experiment(rid, raw, by, title=None):
     return eid
 
 
-def update_experiment(eid, by, base_rev=None, **fields):
+def update_experiment(eid, by, base_rev=None, asked=False, **fields):
     """title / target / setup / results / charts / conclusion / conclusion_text / status. The agent structures a record
-    until the user edits it; from then on the user's version stands (a fresh revision does not get the agent past that)."""
+    until the user edits it; from then on the user's version stands (a fresh revision does not get the agent past that),
+    unless asked: the user confirmed this change in a discussion."""
     if "status" in fields and fields["status"] not in EXPERIMENT_STATUS:
         raise rules.Rejected(f"未知状态：{fields['status']}")
     if fields.get("conclusion") not in (None, *CONCLUSIONS):
@@ -1650,7 +1870,7 @@ def update_experiment(eid, by, base_rev=None, **fields):
         cur = c.execute("SELECT revision, edited_by FROM experiments WHERE id=?", (eid,)).fetchone()
         if not cur:
             raise rules.Rejected("实验不存在")
-        if by != "user" and cur["edited_by"] == "user":
+        if by != "user" and cur["edited_by"] == "user" and not asked:
             raise rules.Rejected("用户已手动改过这条实验记录，agent 不能修改。需要补充时在回复里告诉用户")
         rules.check_revision(cur["revision"], base_rev)
         cols = ", ".join(f"{k}=?" for k in fields)
@@ -1980,6 +2200,107 @@ def unfinished_runs():
         return _rows(c.execute(f"SELECT * FROM runs WHERE status IN {_UNFINISHED_SQL} ORDER BY created_at, rowid"))
 
 
+# Research-page tab a run lands on. experiment's ref is an experiment id, resolved separately.
+_RESEARCH_PAGE = {
+    "draft": ("起草", "overview"), "motivation": ("动机图", "overview"), "plan": ("排计划", "plan"),
+    "related": ("相关工作", "materials"), "writing": ("写作", "writing"), "figures": ("实验设计", "experiments"),
+    "codemap": ("代码对照", "code"), "diagram": ("方法图", "code"),
+}
+_CHAT_PAGE = {
+    "research": ("研究讨论", "overview"), "writing": ("写作讨论", "writing"), "related": ("相关工作讨论", "materials"),
+    "plan": ("计划讨论", "plan"), "code": ("代码讨论", "code"), "experiment": ("实验讨论", "experiments"),
+}
+
+
+def _cell(c, sql, arg):
+    row = c.execute(sql, (arg,)).fetchone()
+    return row[0] if row else None
+
+
+def working():
+    """Unfinished runs, newest first. Each says which page shows that work, so the corner logo can jump there."""
+    with tx() as c:
+        runs = _rows(c.execute(
+            f"SELECT id, kind, ref, status FROM runs WHERE status IN {_UNFINISHED_SQL} ORDER BY created_at DESC, rowid DESC"))
+        return [x for r in runs if (x := _working_item(c, r))]
+
+
+def recent_work(n=3):
+    """Newest runs that already landed on a page, skipping ones still running.
+    The corner logo lists these under the live work, or alone when nothing is running.
+    ponytail: only the latest 24 finished runs are considered; older work stays off the menu."""
+    with tx() as c:
+        runs = _rows(c.execute(
+            f"SELECT id, kind, ref, status FROM runs WHERE status NOT IN {_UNFINISHED_SQL} "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 24"))
+        out = []
+        for r in runs:
+            x = _working_item(c, r)
+            if x and x["go"]:
+                out.append(x)
+                if len(out) == n:
+                    break
+        return out
+
+
+def _working_item(c, r):
+    kind, ref = r["kind"], r["ref"] or ""
+    label, title, go = kind, "", None
+    if kind in ("card", "deepread"):
+        label = "快读卡" if kind == "card" else "深读"
+        title = _cell(c, "SELECT title FROM papers WHERE id=?", ref) or ref
+        go = {"to": "paper" if kind == "card" else "reader", "id": ref}
+        if kind == "deepread":
+            go["tab"] = "report"
+    elif kind == "capture":
+        label = "整理"
+        title = _cell(c, "SELECT coalesce(nullif(title, ''), substr(raw, 1, 80)) FROM captures WHERE id=?", ref) or ref
+        go = {"to": "capture", "id": ref}
+    elif kind == "find":
+        label = "找论文"
+        title = _cell(c, "SELECT substr(raw, 1, 80) FROM captures WHERE id=?", ref) or ref
+        go = {"to": "thread", "scope": f"find:{ref}"}
+        tid = _cell(c, "SELECT id FROM threads WHERE scope=? ORDER BY created_at DESC LIMIT 1", f"find:{ref}")
+        if tid:
+            go["id"] = tid
+    elif kind == "experiment":
+        row = c.execute("SELECT research_id, title FROM experiments WHERE id=?", (ref,)).fetchone()
+        if not row:
+            return None
+        label = "整理实验"
+        title = _cell(c, "SELECT title FROM research WHERE id=?", row["research_id"]) or ""
+        if row["title"]:
+            title = f"{title} · {row['title']}" if title else row["title"]
+        go = {"to": "research", "id": row["research_id"], "tab": "experiments"}
+    elif kind in _RESEARCH_PAGE:
+        label, tab = _RESEARCH_PAGE[kind]
+        title = _cell(c, "SELECT title FROM research WHERE id=?", ref) or ref
+        go = {"to": "research", "id": ref, "tab": tab}
+    elif kind == "chat":
+        t = c.execute("SELECT scope, title FROM threads WHERE id=?", (ref,)).fetchone()
+        if not t:
+            return None
+        sk, _, sref = t["scope"].partition(":")
+        title = t["title"] or _scope_title(c, t["scope"]) or "讨论"
+        if sk == "paper":
+            label, go = "论文讨论", {"to": "reader", "id": sref, "tab": "chat", "thread": ref}
+        elif sk == "anchor":
+            pid = _cell(c, "SELECT paper_id FROM anchors WHERE id=?", sref)
+            if not pid:
+                return None
+            label, go = "划词讨论", {"to": "reader", "id": pid, "tab": "anchor", "anchor": sref, "thread": ref}
+        elif sk in _CHAT_PAGE:
+            label, tab = _CHAT_PAGE[sk]
+            go = {"to": "research", "id": sref, "tab": tab, "thread": ref}
+        else:
+            label, go = "讨论", {"to": "thread", "scope": t["scope"], "id": ref}
+    elif kind == "distill":
+        label, title, go = "起标题", "给讨论起标题", {"to": "discuss"}
+    else:
+        title = ref
+    return {"id": r["id"], "label": label, "title": title or label, "status": r["status"], "go": go}
+
+
 def stale_runs(cutoff):
     """Live runs started before cutoff (ISO time)."""
     with tx() as c:
@@ -1997,14 +2318,20 @@ def forget_agent(agent_id):
 
 # ---------- search ----------
 
-PAPER_FIELDS = ("p.title", "p.id", "p.authors", "p.abstract", "p.card", "p.report", "pt.text")
+PAPER_FIELDS = ("p.title", "p.short_name", "p.id", "p.authors", "p.abstract", "p.card", "p.report", "pt.text")
 
 
-def _every_word(terms, fields):
-    """WHERE clause: each word appears in at least one of the fields (case-insensitive for Latin letters)."""
+def _every_word(terms, fields, op=" AND "):
+    """WHERE clause: each word (op=" OR ": any word) appears in at least one of the fields (case-insensitive for Latin letters)."""
     esc = [t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") for t in terms]
-    clause = " AND ".join("(" + " OR ".join(f"{f} LIKE ? ESCAPE '\\'" for f in fields) + ")" for _ in terms)
+    clause = op.join("(" + " OR ".join(f"{f} LIKE ? ESCAPE '\\'" for f in fields) + ")" for _ in terms)
     return clause, [f"%{t}%" for t in esc for _ in fields]
+
+
+def _loose_terms(terms):
+    """For the fallback: Chinese runs of 3+ characters typed without spaces become overlapping character pairs."""
+    out = [w for t in terms for w in ([t[i:i + 2] for i in range(len(t) - 1)] if re.fullmatch(r"[\u4e00-\u9fff]{3,}", t) else [t])]
+    return list(dict.fromkeys(out))[:12]
 
 
 def _snippet(text, terms, n=90):
@@ -2014,46 +2341,62 @@ def _snippet(text, terms, n=90):
     return ("…" if at > 30 else "") + s
 
 
+HIT_WEIGHT = {"标题": 8, "缩写": 8, "编号": 8, "作者": 4, "摘要": 3, "快读卡": 2, "深读报告": 1, "原文": 1}
+
+
 def search(q, limit=30):
     """"我记得有篇……": the words may come from anywhere, in any order. Every word must match; papers match on title,
-    authors, abstract, card, report or full text, and say where (hits)."""
+    authors, abstract, card, report or full text, say where (hits), and come best first (more words, in the title
+    before the full text). When nothing matches every word, results matching any word come back with loose=True."""
     terms = q.split()[:8]
-    empty = {"papers": [], "captures": [], "threads": [], "notes": [], "messages": [], "research": []}
+    empty = {"papers": [], "captures": [], "threads": [], "notes": [], "messages": [], "research": [], "loose": False}
     if not terms:
         return empty
+    found = _search(terms, " AND ", limit)
+    loose = _loose_terms(terms)
+    if not any(found.values()) and len(loose) > 1:
+        found = {**_search(loose, " OR ", limit), "loose": True}
+    return {**empty, **found}
+
+
+def _search(terms, op, limit):
     with tx() as c:
-        where, args = _every_word(terms, PAPER_FIELDS)
+        where, args = _every_word(terms, PAPER_FIELDS, op)
+        # ponytail: ranks every matching paper in Python; fine for a personal library, move scoring to FTS5 past ~10k papers.
         papers = _rows(c.execute(
-            f"SELECT p.id, p.title, p.authors, p.abstract, p.card, p.report, pt.text AS fulltext FROM papers p "
-            f"LEFT JOIN paper_text pt ON pt.paper_id=p.id WHERE {LISTED} AND {where} LIMIT ?", (*args, limit)))
-        where, args = _every_word(terms, ["raw", "title", "snapshot_text", "author"])
+            f"SELECT p.id, p.title, p.short_name, p.authors, p.abstract, p.card, p.report, pt.text AS fulltext FROM papers p "
+            f"LEFT JOIN paper_text pt ON pt.paper_id=p.id WHERE {LISTED} AND {where}", args))
+        where, args = _every_word(terms, ["raw", "title", "snapshot_text", "author"], op)
         captures = _rows(c.execute(
             f"SELECT id, created_at, title, author, channel, source, substr(raw,1,200) AS raw FROM captures WHERE {where} "
             f"ORDER BY created_at DESC LIMIT ?", (*args, limit)))
-        where, args = _every_word(terms, ["t.title"])
+        where, args = _every_word(terms, ["t.title"], op)
         threads = _rows(c.execute(_HEAD + f"WHERE {where} ORDER BY t.created_at DESC LIMIT ?", (*args, limit)))
-        where, args = _every_word(terms, ["text"])
+        where, args = _every_word(terms, ["text"], op)
         notes = _rows(c.execute(f"SELECT * FROM notes WHERE {where} ORDER BY created_at DESC LIMIT ?", (*args, limit)))
-        where, args = _every_word(terms, ["coalesce(nullif(m.text, ''), r.text, '')"])
+        where, args = _every_word(terms, ["coalesce(nullif(m.text, ''), r.text, '')"], op)
         messages = _rows(c.execute(
             f"SELECT m.id, m.role, m.created_at, m.thread_id, t.scope, coalesce(nullif(m.text, ''), r.text) AS text "
             f"FROM messages m JOIN threads t ON t.id=m.thread_id LEFT JOIN runs r ON r.id=m.run_id WHERE {where} "
             f"ORDER BY m.created_at DESC LIMIT ?", (*args, limit)))
-        where, args = _every_word(terms, ["title", "summary", "body"])
+        where, args = _every_word(terms, ["title", "summary", "body"], op)
         research = _rows(c.execute(f"SELECT id, title, summary, stage, updated_at FROM research WHERE {where} "
                                    f"ORDER BY updated_at DESC LIMIT ?", (*args, limit)))
     for p in papers:
         card, report = p.pop("card"), p.pop("report")
-        fields = {"标题": p["title"], "编号": p["id"], "作者": " ".join(p["authors"] or []), "摘要": p.pop("abstract"),
+        fields = {"标题": p["title"], "缩写": p["short_name"], "编号": p["id"], "作者": " ".join(p["authors"] or []), "摘要": p.pop("abstract"),
                   "快读卡": card and json.dumps(card, ensure_ascii=False), "深读报告": report and json.dumps(report, ensure_ascii=False),
                   "原文": p.pop("fulltext")}
-        p["hits"] = [k for k, v in fields.items() if v and any(t.lower() in v.lower() for t in terms)]
+        low = {k: v.lower() for k, v in fields.items() if v}
+        p["hits"] = [k for k, v in low.items() if any(t.lower() in v for t in terms)]
+        p["_score"] = sum(max((HIT_WEIGHT[k] for k, v in low.items() if t.lower() in v), default=0) for t in terms)
+        p["tldr"] = card and card.get("tldr")
+    papers = sorted(papers, key=lambda p: -p.pop("_score"))[:limit]
+    for p in papers:
         if "原文" in p["hits"]:
             texts = pages(p["id"])
             n = next((i for i, text in enumerate(texts, 1) if any(t.lower() in text.lower() for t in terms)), None)
             p["hit_page"], p["hit_text"] = n, n and _snippet(texts[n - 1], terms)
-        p["tldr"] = card and card.get("tldr")
     for m in messages:
         m["text"] = _snippet(m["text"], terms, 140)
-    return {**empty, "papers": papers, "captures": captures, "threads": threads, "notes": notes, "messages": messages,
-            "research": research}
+    return {"papers": papers, "captures": captures, "threads": threads, "notes": notes, "messages": messages, "research": research}

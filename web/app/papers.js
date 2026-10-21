@@ -2,10 +2,10 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
 import {
-  html, get, post, del, enc, ago, short, firstLine, idLabel, channel, authors, live, href, plain, mdHtml, citeHtml, readBase64, Mark,
+  html, get, post, del, enc, ago, short, firstLine, idLabel, channel, authors, live, href, plain, mdHtml, citeHtml, readBase64, Mark, DockGrip,
 } from './lib.js';
 import {
-  appState, agentOn, selected, useLive, refresh, toast, fail, go, openReader, openThread, openPaper, openResearch, openCapture, openModal, closeModal,
+  appState, agentOn, selected, useLive, refresh, toast, fail, restoreTrash, go, openReader, openThread, openPaper, openResearch, openCapture, openModal, closeModal, peekPaper,
 } from './state.js';
 import { Chat, ThreadLines, JotForm, scopeLabel } from './discuss.js';
 import { researchPicker, openComposer, ResearchChip, StageChip } from './research.js';
@@ -26,7 +26,7 @@ const wide = () => innerWidth > 900;
 const Html = ({ s, tag = 'span', cls }) => html`<${tag} class=${cls} dangerouslySetInnerHTML=${{ __html: s }} />`;
 const inlineMd = (s) => mdHtml(s).replace(/^<p>|<\/p>$/g, '');
 
-export const PaperChip = ({ id, title }) => html`<a href="#" class="chip paper-chip" title="打开论文卡片" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); openPaper(id); }}>论文 · ${short(title || id, 26)}</a>`;
+export const PaperChip = ({ id, title, peek }) => html`<a href="#" class="chip paper-chip" title=${peek ? '悬浮窗速览原文（⌥点击：打开论文卡片）' : '打开论文卡片（⌥点击：悬浮窗速览原文）'} onClick=${(e) => { e.preventDefault(); e.stopPropagation(); (e.altKey !== !!peek ? peekPaper : openPaper)(id); }}>论文 · ${short(title || id, 26)}</a>`;
 
 // ---------- list + detail layout and selection ----------
 
@@ -35,12 +35,13 @@ export function ListDetail({ list, detail, hasSel, single }) {
     ${hasSel && !wide() ? html`<button class="btn sm ghost" onClick=${() => (selected.value = null)}>← 返回列表</button>` : null}${detail}</section></div>`;
 }
 
-/** The selected item of this kind, auto-selecting the first one on wide screens. */
+/** The selected item of this kind, auto-selecting the first one on wide screens when nothing is selected.
+ * A selection missing from the list is kept: the list may not have refreshed yet (a paper just taken in from a citation). */
 function useSel(kind, items) {
   const s = selected.value;
   const id = s?.kind === kind ? s.id : null;
   useEffect(() => {
-    if (items && items.length && (!id || !items.some((x) => x.id === id)) && wide()) selected.value = { kind, id: items[0].id };
+    if (items && items.length && !id && wide()) selected.value = { kind, id: items[0].id };
   }, [items, id]);
   return id;
 }
@@ -102,17 +103,17 @@ const figSrc = (pid, n) => `/api/papers/${enc(pid)}/figures/${n}`;
 const figText = (caption) => caption.replace(/^\s*(?:Figure|Fig\.)\s*\d+\s*[:.|]\s*/i, '');
 
 function Figures({ p }) {
-  const figs = p.key_figures || [], track = useRef();
+  const key = p.key_figures || [], track = useRef();
+  const figs = [...key, ...(p.figures || []).filter((f) => !key.some((k) => k.n === f.n))];  // picks first, then every other figure
   const [i, setI] = useState(0);
   if (!figs.length) return null;
-  const more = (p.figures || []).length - figs.length;
   const step = (d) => track.current.scrollBy({ left: d * track.current.clientWidth, behavior: 'smooth' });
   return html`<div class="figs"><div class="figs-track" ref=${track} onScroll=${(e) => setI(Math.round(e.target.scrollLeft / e.target.clientWidth))}>
       ${figs.map((f) => html`<figure class="fig"><button class="fig-img" title="放大看" onClick=${(e) => { e.stopPropagation(); openFigure(p.id, f.n); }}><img loading="lazy" src=${figSrc(p.id, f.n)} alt=${`图 ${f.n}`} /></button>
         <figcaption>${f.note ? html`<b>${f.note}</b>　` : null}<span class="hint">图 ${f.n} · p.${f.page}</span>　${short(figText(f.caption), 150)}</figcaption></figure>`)}</div>
     ${figs.length > 1 ? html`<button class="figs-nav prev" aria-label="上一张" onClick=${(e) => { e.stopPropagation(); step(-1); }}>‹</button><button class="figs-nav next" aria-label="下一张" onClick=${(e) => { e.stopPropagation(); step(1); }}>›</button>` : null}
     <div class="figs-foot"><span class="figs-count">${figs.length > 1 ? `${i + 1} / ${figs.length}` : ''}</span><span class="grow"></span>
-      ${more > 0 ? html`<a href="#" onClick=${(e) => { e.preventDefault(); openFigure(p.id, figs[0].n, true); }}>全部 ${figs.length + more} 张图</a>` : null}</div></div>`;
+    </div></div>`;
 }
 
 export function PdfButton({ capture, paper }) {
@@ -143,6 +144,11 @@ function DeepButton({ p }) {
     }}>进入深读 →</button>`;
   }
   return html`<button class="btn primary" onClick=${() => openReader(p.id)}>进入深读 →</button>`;
+}
+/** The capture's one main action, at the top: open its paper to read. */
+function TopDeep({ pid }) {
+  const [p] = useLive(`/api/papers/${enc(pid)}`);
+  return p ? html`<${DeepButton} p=${p} />` : null;
 }
 export const deepToast = () => (agentOn.value ? '已加入稍后深读，agent 会先把深读报告写好' : '已加入稍后深读');
 
@@ -184,17 +190,33 @@ export function PaperCard({ paper: p, capture, inReader }) {
     await post(`/api/captures/${enc(capture.id)}/unlink`, { paper: p.id }).catch(fail);
     refresh();
   };
+  const removePaper = async (e) => {
+    e.preventDefault();
+    let r;
+    try { r = await del(`/api/papers/${enc(p.id)}`); } catch (err) { fail(err); return; }
+    toast(`已删除《${short(p.short_name || p.title, 30)}》，可在“最近删除”找回`, '撤销', () => restoreTrash(r.trash_id), false, 10000);
+    selected.value = null;
+    refresh();
+  };
   const toggleDeep = async () => {
     await post(`/api/papers/${enc(p.id)}/triage`, { triage: deep ? 'inbox' : 'deep' }).catch(fail);
     toast(deep ? '已移回收件箱' : deepToast());
     refresh();
   };
+  const rename = async (e) => {
+    e.preventDefault();
+    const v = prompt('论文缩写（如 Simple-WAM）。留空表示这篇没有缩写：', p.short_name || '');
+    if (v === null) return;
+    try { await post(`/api/papers/${enc(p.id)}/name`, { name: v }); refresh(); } catch (err) { fail(err); }
+  };
   return html`<article class="paper" data-anchor-surface="card" data-pid=${p.id} ref=${ref}>
-    ${inReader ? null : html`<h1 class="paper-title">${p.title}</h1>`}
+    ${inReader ? null : html`<h1 class="paper-title">${p.short_name ? html`<span class="short-name">${p.short_name}</span>` : null}${p.title}</h1>`}
     <div class="paper-meta">${authors(p.authors)}${p.published ? ' · ' + p.published : ''} · ${p.url ? html`<a href=${href(p.url)} target="_blank" rel="noopener">${idLabel(p.id)} ↗</a>` : idLabel(p.id)}
       ${p.page_count ? ` · ${p.page_count} 页` : html` · <span style="color:var(--amber)">没有全文</span>`}
       ${capture && p.captures?.length > 1 ? html` · <a href="#" onClick=${(e) => { e.preventDefault(); openPaper(p.id); }}>共 ${p.captures.length} 个来源</a>` : null}
-      ${capture ? html` · <a href="#" title=${capture.source === 'find' ? '不是你要找的方向' : '这条捕获不是讲这篇'} onClick=${unlink}>${capture.source === 'find' ? '不对路？' : '不是这篇？'}</a>` : null}</div>
+      ${capture ? html` · <a href="#" title=${capture.source === 'find' ? '不是你要找的方向' : '这条捕获不是讲这篇'} onClick=${unlink}>${capture.source === 'find' ? '不对路？' : '不是这篇？'}</a>` : null}
+      · <a href="#" title=${p.short_name_by === 'user' ? '你起的缩写，点击修改' : '自动识别的缩写，点击修改'} onClick=${rename}>${p.short_name ? `缩写 ${p.short_name}` : '加缩写'}</a>
+      · <a href="#" class="danger" title="从库里彻底删除这篇论文及它的卡片、报告、划线、讨论和笔记" onClick=${removePaper}>删除论文</a></div>
     <${TopicsRow} owner=${p} />
     <${Jumps} p=${p} j=${fullJumps(p)} full />
     ${p.page_count ? null : html`<div class="notice" style="margin-top:12px">没下载到这篇论文的 PDF（可能需要登录或不公开）。上传 PDF 后才能写快读卡、深读和对照原文。<br /><${PdfButton} paper=${p.id} /></div>`}
@@ -230,7 +252,7 @@ function PaperDetail({ pid }) {
         <div class="item-meta"><span class="src">${channel(c)}${c.author ? ' · ' + c.author : ''}</span><time>${ago(c.created_at)}</time></div>
         <div>${c.title || short(firstLine(c.raw), 80)}</div></div>`)}</div>` : null}
     <${PaperNotes} p=${p} /></div></div>
-    <aside class="research-dock"><${Chat} key=${p.id} scope=${`paper:${p.id}`} /></aside></div>`;
+    <aside class="research-dock"><${DockGrip} /><${Chat} key=${p.id} scope=${`paper:${p.id}`} /></aside></div>`;
 }
 
 // ---------- captures ----------
@@ -357,7 +379,7 @@ function CaptureDetail({ id, view }) {
   if (!c) return html`<div class="empty"><span class="spin"></span></div>`;
   const papers = c.papers.filter((p) => p.state === 'confirmed');
   const running = c.runs.find((r) => live(r.status));
-  const tb = (t, label) => html`<button class=${`btn sm ${c.triage === t ? 'primary' : ''}`} onClick=${() => triage(c.id, c.triage === t ? 'inbox' : t, [c], view)}>${label}</button>`;
+  const tb = (t, label) => html`<button class=${`btn sm ${c.triage === t ? 'on' : ''}`} aria-pressed=${c.triage === t} onClick=${() => triage(c.id, c.triage === t ? 'inbox' : t, [c], view)}>${label}</button>`;
   const undo = async () => {
     const plan = await get(`/api/captures/${enc(c.id)}/removal`).catch(fail);
     if (!plan || !confirm(removalText(plan))) return;
@@ -391,8 +413,9 @@ function CaptureDetail({ id, view }) {
   return html`<div class="detail">
     <div class="src-bar"><span class="chip">${channel(c)}</span>${c.author ? html`<span>${c.author}</span>` : null}<span>${ago(c.created_at)}</span>
       ${c.url ? html`<a href=${href(c.url)} target="_blank" rel="noopener">打开原文 ↗</a>` : null}<span class="grow"></span>
+      <button class="btn sm ghost danger" title="删除这条捕获及由它产生的内容" onClick=${undo}>撤销收下</button>
       ${tb('deep', '稍后深读')}${tb('archived', '存档')}${tb('ignored', '忽略')}
-      <button class="btn sm ghost" title="删除这条捕获及由它产生的内容" onClick=${undo}>撤销收下</button></div>
+      ${papers.length === 1 && !find ? html`<${TopDeep} pid=${papers[0].id} />` : null}</div>
     <div class="hint" style="margin-top:4px">当前在：${{ inbox: '收件箱', deep: '稍后深读', archived: '已存档', ignored: '已忽略' }[c.triage]}</div>
     ${c.title && !find ? html`<div class="cap-title">${c.title}</div>` : null}
     ${!find && (rawExtra || (!c.title && c.raw)) ? html`<${Html} tag="div" cls="raw" s=${inlineMd(c.raw)} />` : null}
@@ -413,7 +436,7 @@ export function CapturesView({ view }) {
   useEffect(() => {
     const key = (e) => {
       const t = e.target instanceof Element ? e.target : document.body;
-      if (t.closest('input, textarea, select') || e.metaKey || e.ctrlKey || e.altKey || !list?.length || document.querySelector('.modal-bg')) return;
+      if (t.closest('input, textarea, select') || (e.key === 'Enter' && t.closest('button, a, [role=link], [role=button]')) || e.metaKey || e.ctrlKey || e.altKey || !list?.length || document.querySelector('.modal-bg')) return;
       const i = list.findIndex((x) => x.id === sel), k = e.key.toLowerCase();
       if (k === 'j' || e.key === 'ArrowDown' || k === 'k' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -447,7 +470,7 @@ export function PaperItem({ p, on, picked, onPick }) {
   return html`<div class=${`item ${on ? 'on' : ''}${picked ? ' picked' : ''}`} data-id=${p.id}
       onClick=${() => (onPick ? onPick(p.id) : (selected.value = { kind: 'paper', id: p.id }))}>
     <div class="item-meta"><span class="src">${idLabel(p.id)}</span>${p.published ? html`<span>· ${p.published.slice(0, 7)}</span>` : null}<time>${ago(p.last_captured)}</time></div>
-    <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${p.title}</div>
+    <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${p.short_name ? html`<b class="short-name">${p.short_name}</b>` : null}${p.title}</div>
     <div class="item-meta" style="margin:3px 0 0">${authors(p.authors)}</div>
     ${p.tldr ? html`<div class="item-tldr">${p.tldr}</div>` : null}
     ${p.hits ? html`<div class="item-meta" style="margin-top:4px">命中：${p.hits.map((x) => html`<span class="chip">${x}${x === '原文' && p.hit_page ? ` p.${p.hit_page}` : ''}</span>`)}</div>` : null}
@@ -518,8 +541,47 @@ export const openCompare = (ids) => openModal(html`<${Compare} ids=${ids} />`, t
 
 // ---------- search ----------
 
+/** A paper found on the web: openPaper takes it into the library first (a few seconds on arXiv), then opens its card. */
+export const addAndOpen = (pid) => { toast('正在加入论文库…'); openPaper(pid); };
+const AddBtn = ({ pid, then }) => html`<button class="btn sm" title="加入论文库并打开它的卡片，agent 会写快读卡"
+  onClick=${(e) => { e.preventDefault(); e.stopPropagation(); then?.(); addAndOpen(pid); }}>加入论文库</button>`;
+
+/** "上网找论文": the web model's picks, each confirmed on arXiv; the checked ones go in as one capture. */
+function WebFind({ text, onAgent }) {
+  const [r, setR] = useState(null), [err, setErr] = useState(null), [pick, setPick] = useState({});
+  useEffect(() => {
+    post('/api/find/web', { text }).then((d) => { setR(d); setPick(Object.fromEntries(d.papers.filter((p) => !p.in_library).map((p) => [p.pid, true]))); })
+      .catch((e) => setErr(e.message));
+  }, []);
+  const chosen = r ? r.papers.filter((p) => pick[p.pid]) : [];
+  const take = async () => {
+    closeModal();
+    try {
+      const c = await post('/api/captures', { text: `找论文：${text}\n${chosen.map((p) => p.url).join('\n')}` });
+      toast(`已收下 ${chosen.length} 篇，正在入库、写快读卡`);
+      refresh(); openCapture(c.id);
+    } catch (e) { fail(e); }
+  };
+  const agent = onAgent && agentOn.value ? html`<button class="btn" style="margin-right:auto" title="agent 检索得更全，找到的直接入库并开一段讨论，要一两分钟"
+    onClick=${() => { closeModal(); onAgent(); }}>交给 agent 找</button>` : null;
+  return html`<h3>上网找论文：${short(text, 40)}</h3>
+    ${err ? html`<p class="hint" style="color:var(--red)">${err}</p>` : !r ? html`<p class="hint"><span class="spin"></span> 在网上搜，再到 arXiv 逐篇核对…（约 5 秒）</p>`
+      : !r.papers.length ? html`<p class="hint">没找到 arXiv 上能核对的论文，换个说法试试${agent ? '，或交给 agent 找' : ''}。</p>`
+      : r.papers.map((p) => html`<label class="cand"><input type="checkbox" checked=${!!pick[p.pid]} onChange=${(e) => setPick({ ...pick, [p.pid]: e.target.checked })} />
+        <div class="cand-body"><div class="cand-title">${p.title}</div>
+          <div class="cand-meta">${idLabel(p.pid)} · ${p.published}${p.authors.length ? ` · ${p.authors.join(', ')}` : ''}${p.in_library ? ' · 库里已有' : ''}</div>
+          ${p.why ? html`<div class="cand-meta">${p.why}</div>` : null}</div>
+        <a class="btn sm ghost" href=${p.url} target="_blank" onClick=${(e) => e.stopPropagation()}>arXiv</a>
+        ${p.in_library ? html`<button class="btn sm ghost" onClick=${(e) => { e.preventDefault(); closeModal(); openPaper(p.pid); }}>打开</button>` : html`<${AddBtn} pid=${p.pid} then=${closeModal} />`}</label>`)}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">${agent}<button class="btn" onClick=${closeModal}>取消</button>
+      <button class="btn primary" disabled=${!chosen.length} onClick=${take}>收下选中的 ${chosen.length || ''} 篇</button></div>`;
+}
+export const openWebFind = (text, onAgent) => openModal(html`<${WebFind} text=${text} onAgent=${onAgent} />`);
+
 export function SearchView({ q }) {
   const [r] = useLive(`/api/search?q=${enc(q)}`, { poll: false });
+  const aiOn = appState.value?.agent?.search_ai && q.trim();
+  const [ai, , aiErr] = useLive(aiOn ? `/api/search/ai?q=${enc(q)}` : null, { poll: false });
   const s = selected.value, sel = s && (s.kind === 'paper' || s.kind === 'capture') ? s : null;
   const askAgent = async () => {
     try {
@@ -531,9 +593,23 @@ export function SearchView({ q }) {
   };
   if (!r) return html`<${ListDetail} list=${html`<${ListHead} title="搜索" sub="" />`} />`;
   const total = r.papers.length + r.captures.length + r.threads.length + r.notes.length + r.messages.length + r.research.length;
-  const ask = agentOn.value ? html`<button class=${`btn sm ${total ? 'ghost' : 'primary'}`} onClick=${askAgent}>让 agent 在库里找</button>` : null;
+  const ask = !agentOn.value && !appState.value?.agent?.search_api ? null : html`${agentOn.value ? html`<button class=${`btn sm ${total ? 'ghost' : 'primary'}`} onClick=${askAgent}>让 agent 在库里找</button>` : null}
+    ${appState.value?.agent?.search_api ? html` <button class="btn sm ghost" title="网上搜到的论文先给你挑，约 5 秒" onClick=${() => openWebFind(q)}>上网找</button>` : null}`;
   const pickPaper = (id) => (selected.value = { kind: 'paper', id });
-  const list = html`<${ListHead} title=${`“${q}”`} sub=${`${total} 条结果`} keys=${html`<span class="hint">每个词都要命中</span>`} />
+  const aiBlock = !aiOn || aiErr || (ai && !ai.answer && !ai.papers.length && !ai.web?.length) ? null : html`<div class="group-label">AI 推荐</div>
+    ${!ai ? html`<div class="item"><span class="spin"></span> <span class="hint">AI 在库里${appState.value?.agent?.search_api ? '和网上' : ''}找…</span></div>` : html`
+      ${ai.answer ? html`<div class="item"><div class="item-tldr" style="-webkit-line-clamp:unset">✦ ${ai.answer}</div></div>` : null}
+      ${(ai.named ? [webList(ai), libList(ai)] : [libList(ai), webList(ai)])}`}`;
+  function libList(a) { return a.papers.length ? html`<div class="group-label">库里</div>${a.papers.map((p) => html`<${PaperItem} p=${p} on=${sel?.id === p.id} onPick=${pickPaper} />`)}` : null; }
+  function webList(a) {
+    return a.web?.length ? html`<div class="group-label">网上</div>${a.web.map((w) => html`<a class="item" href=${w.url} target="_blank" rel="noopener">
+      <div class="item-meta"><span class="src">${w.pid ? idLabel(w.pid) : new URL(w.url).hostname}</span>${w.published ? html`<span>· ${w.published.slice(0, 7)}</span>` : null}
+        ${w.pid ? html`<span style="margin-left:auto"><${AddBtn} pid=${w.pid} /></span>` : null}</div>
+      <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${w.title}</div>${w.why ? html`<div class="item-tldr">${w.why}</div>` : null}</a>`)}
+` : null;
+  }
+  const list = html`<${ListHead} title=${`“${q}”`} sub=${`${total} 条结果`} keys=${html`<span class="hint">${r.loose ? '没有同时命中每个词的，下面是只命中部分词的' : '每个词都要命中，命中标题的排前面'}</span>`} />
+    ${aiBlock}
     ${!total ? html`<div class="empty"><b>库里没找到</b>换几个词试试：英文标题里的词、方法名、作者、公众号名，或你讨论里的说法。<div style="margin-top:12px">${ask}</div></div>` : html`
     ${r.papers.length ? html`<div class="group-label">论文</div>${r.papers.map((p) => html`<${PaperItem} p=${p} on=${sel?.id === p.id} onPick=${pickPaper} />`)}` : null}
     ${r.research.length ? html`<div class="group-label">研究</div>${r.research.map((x) => html`<div class="item" onClick=${() => openResearch(x.id)}><div class="item-meta"><${StageChip} stage=${x.stage} /><time>${ago(x.updated_at)}</time></div>

@@ -2,9 +2,9 @@
 // experiments and writing. Only the user establishes a research; the agent's changes arrive as drafts.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal, effect } from '@preact/signals';
-import { html, get, post, del, enc, ago, short, firstLine, idLabel, plain, threadName, live, Md, mdHtml, citeHtml, readBase64, diffText, Mark } from './lib.js';
+import { html, get, post, del, enc, ago, short, firstLine, idLabel, plain, threadName, live, Md, mdHtml, citeHtml, readBase64, diffText, Mark, DockGrip } from './lib.js';
 import {
-  appState, agentOn, selected, useLive, refresh, toast, fail, openModal, closeModal, openItem, openReader, openThread, openCapture, openResearch, quoting,
+  appState, agentOn, selected, useLive, refresh, toast, fail, openModal, closeModal, openItem, openReader, openThread, openCapture, openResearch, quoting, peekPaper,
 } from './state.js';
 import { ListDetail, TopicsRow, TopicTabs, RunCard, openCompare, PaperChip } from './papers.js';
 import { Chat } from './discuss.js';
@@ -95,33 +95,37 @@ function EditForm({ x, done }) {
   const submit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
-    const body = Object.fromEntries(FIELDS.map(([k]) => [k, (f.get(k) || '').trim() || null]));
-    try { await post(`/api/research/${enc(x.id)}`, { title: f.get('title'), summary: f.get('summary'), body, base_rev: x.revision }); toast('已保存'); done(); refresh(); } catch (err) { fail(err); }
+    try { await post(`/api/research/${enc(x.id)}`, { title: f.get('title'), summary: f.get('summary'), base_rev: x.revision }); toast('已保存'); done(); refresh(); } catch (err) { fail(err); }
   };
   return html`<form class="research-form" onSubmit=${submit}>
-    <input name="title" class="research-title-input" value=${x.title} placeholder="研究名称" />
+    <input name="title" class="research-title-input" defaultValue=${x.title} placeholder="研究名称" />
     <textarea name="summary" rows="2" placeholder="一句话：做什么、为什么可能有效">${x.summary || ''}</textarea>
-    ${FIELDS.map(([k, label, hint]) => html`<label>${label}<span class="hint">　${hint}</span></label><textarea name=${k} rows=${k === 'notes' ? 2 : 4}>${x.body?.[k] || ''}</textarea>`)}
-    <p class="hint">可以引用论文：[arxiv:2410.24164 p.3]。保存不会改变确立状态。</p>
     <div style="display:flex;gap:8px"><button class="btn primary">保存</button><button type="button" class="btn ghost" onClick=${done}>取消</button></div></form>`;
 }
 
-function Overview({ x, edit }) {
+function Overview({ x }) {
   const run = liveRun(runsOf(x, 'draft')), drafts = runsOf(x, 'draft');
+  const [editing, setEditing] = useState(null);
+  const save = async (e, k) => {
+    e.preventDefault();
+    const v = e.target.querySelector('textarea').value.trim() || null;
+    try { await post(`/api/research/${enc(x.id)}`, { body: { ...x.body, [k]: v }, base_rev: x.revision }); setEditing(null); toast('已保存'); refresh(); } catch (err) { fail(err); }
+  };
   const ready = x.stage !== 'established' && !x.proposal && ELEMENTS.every(([k]) => x.body?.[k]);
   const draft = async () => {
     try { await post(`/api/research/${enc(x.id)}/draft`); toast('已交给 agent 起草，写好后会作为修改稿等你确认'); refresh(); } catch (e) { fail(e); }
   };
   return html`<div class="tab-acts"><button class=${`btn sm ${ready || x.proposal ? '' : 'primary'}`} title="和 agent 一起推敲；它的调整会作为修改稿交给你确认" onClick=${talk}>在讨论里推进</button>
-      <button class="btn sm ghost" disabled=${!agentOn.value || !!run} title=${agentOn.value ? '让 agent 根据素材起草三要素，作为修改稿交给你确认' : '需要先连接 agent'} onClick=${draft}>${run ? html`<${Mark} spin />起草中` : '让 agent 起草'}</button>
-      <button class="btn sm ghost" onClick=${edit}>编辑</button></div>
+      <button class="btn sm ghost" disabled=${!agentOn.value || !!run} title=${agentOn.value ? '让 agent 根据素材起草三要素，作为修改稿交给你确认' : '需要先连接 agent'} onClick=${draft}>${run ? html`<${Mark} spin />起草中` : '让 agent 起草'}</button></div>
     ${run ? html`<div class="card-wait"><${Mark} spin />Agent 正在起草：读素材、查库里的相关工作。写好后会作为修改稿等你确认…</div>` : null}
     ${x.proposal ? html`<${Proposal} key=${x.proposal.at} x=${x} />` : null}
     <${Diagrams} x=${x} kind="motivation" hideRuns />
-    <div class="elements">${ELEMENTS.map(([k, label, hint]) => x.body?.[k]
-      ? html`<div class="element"><h3>${label}</h3><${Md} class="quotable" text=${x.body[k]} /></div>`
-      : html`<div class="element blank" title="点一下补上" onClick=${edit}><h3>${label}</h3><div class="hint">${hint}</div></div>`)}
-      ${x.body?.notes ? html`<div class="element"><h3>其他</h3><${Md} class="quotable" text=${x.body.notes} /></div>` : null}</div>
+    <div class="elements">${FIELDS.map(([k, label, hint]) => editing === k
+      ? html`<form class="element writing-form" key=${k} onSubmit=${(e) => save(e, k)}><h3>${label}<span class="hint" style="font-weight:400">　${hint}</span></h3><textarea rows="8" ref=${(el) => el?.focus()}>${x.body?.[k] || ''}</textarea>
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${() => setEditing(null)}>取消</button><span class="hint">可以引用论文：[arxiv:2410.24164 p.3]。保存不会改变确立状态。</span></div></form>`
+      : x.body?.[k]
+        ? html`<div class="element" key=${k}><h3>${label}<button class="btn sm ghost" style="float:right" onClick=${() => setEditing(k)}>编辑</button></h3><${Md} class="quotable" text=${x.body[k]} /></div>`
+        : html`<div class="element blank" key=${k} title="点一下补上" onClick=${() => setEditing(k)}><h3>${label}</h3><div class="hint">${hint}</div></div>`)}</div>
     <${EstablishBar} x=${x} />
     <${RunsBlock} runs=${runsOf(x, 'motivation')} label="画动机图" spec="librarian/diagram.md" />
     ${drafts.length ? html`<details class="runs" open=${!!run}><summary>agent 起草记录 · ${drafts.length} 次 <span class="hint">（调优：改 librarian/research.md）</span></summary>${drafts.map((r) => html`<${RunCard} r=${r} label="起草" />`)}</details>` : null}`;
@@ -176,9 +180,9 @@ function Materials({ x }) {
       ${papers.length > 1 ? html`<button class="btn sm ghost" onClick=${() => openCompare(papers.map((l) => l.ref))}>对比论文</button>` : null}
       <button class="btn sm ghost" onClick=${() => openModal(html`<${PaperPicker} rid=${x.id} />`)}>+ 关联库里的论文</button></div>
     ${papers.length ? html`<p class="hint" style="margin:0 0 6px">给论文标上用途（baseline、方法借鉴、反面证据……），agent 起草三要素时会按用途使用它们。</p>` : null}
-    ${x.links.length ? x.links.map((l) => html`<div class=${`source ${l.missing ? 'missing' : ''}`} title=${l.missing ? '' : '跳过去看'} onClick=${() => !l.missing && openSource(l)}>
+    ${x.links.length ? x.links.map((l) => html`<div class=${`source ${l.missing ? 'missing' : ''}`} title=${l.missing ? '' : '跳过去看'} role=${l.missing ? null : 'link'} tabIndex=${l.missing ? null : 0} onClick=${() => !l.missing && openSource(l)}>
         <span class="source-kind">${kindLabel(l)}</span><span class=${`source-label ${l.kind === 'paper' ? 'serif' : ''}`}>${l.missing ? '（已删除）' : short(plain(l.label), 160)}</span>
-        ${l.kind === 'paper' && !l.missing ? html`<${RoleSelect} value=${l.role} onChange=${(r) => setRole(l, r)} />` : null}
+        ${l.kind === 'paper' && !l.missing ? html`<button class="btn sm ghost" title="悬浮窗看原文，不离开研究页" onClick=${(e) => { e.stopPropagation(); peekPaper(l.ref); }}>速览</button><${RoleSelect} value=${l.role} onChange=${(r) => setRole(l, r)} />` : null}
         ${l.at ? html`<time>${ago(l.at)}</time>` : null}<button class="x" title="移出素材" onClick=${(e) => unlink(e, l)}>×</button></div>`)
       : html`<div class="hint">还没有素材。在讨论、讨论消息或论文卡片上点“加入研究”，就会出现在这里，点一下能跳回去。</div>`}</div>`;
 }
@@ -190,7 +194,7 @@ const linkTitles = (x) => Object.fromEntries(x.links.filter((l) => l.kind === 'p
 function Comparison({ t, title }) {
   return html`<div class="cmp-wrap"><table class="cmp"><thead><tr><th>工作</th>${t.columns.map((c) => html`<th>${c}</th>`)}</tr></thead>
     <tbody>${t.rows.map((r) => html`<tr class=${r.paper === 'ours' ? 'ours' : ''}>
-      <td>${r.paper === 'ours' ? html`<b>${r.name || '我们'}</b>` : html`${r.name ? html`<b>${r.name}</b><br />` : null}<${PaperChip} id=${r.paper} title=${title[r.paper] || idLabel(r.paper)} />`}</td>
+      <td>${r.paper === 'ours' ? html`<b>${r.name || '我们'}</b>` : html`${r.name ? html`<b>${r.name}</b><br />` : null}<${PaperChip} peek id=${r.paper} title=${title[r.paper] || idLabel(r.paper)} />`}</td>
       ${r.cells.map((c) => html`<td>${c}</td>`)}</tr>`)}</tbody></table></div>`;
 }
 
@@ -203,10 +207,10 @@ function RelatedProposal({ x }) {
   const newTable = p.comparison && JSON.stringify(p.comparison) !== JSON.stringify(r.comparison) ? p.comparison : null;
   const decide = (action) => act(`${enc(x.id)}/related/proposal`, { action, base_rev: r.revision }, action === 'discard' ? '已放弃修改稿' : '已采用，方向里的论文已加入素材');
   return html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的相关工作修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动，方向里的论文会加入素材</span></div>
-    ${p.note ? html`<div class="hint" style="margin-bottom:6px">${p.note}</div>` : null}
+    ${p.note ? html`<div class="hint" style="margin-bottom:6px"><${Html} s=${inlineMd(p.note)} /></div>` : null}
     ${rows.length ? rows.map(([k, cls, g]) => html`<div class="pr-row"><label class="pr-label"><span><b>${g.name}</b>${k === '修改' && cur[g.id].name !== g.name ? html`<span class="hint">（原：${cur[g.id].name}）</span>` : null}</span><span class=${`chip ${cls}`}>${k}</span></label>
         ${k === '删除' ? null : html`<div class="pr-new quotable">${k === '修改' ? html`<${Diff} a=${cur[g.id].text || ''} b=${g.text || ''} />` : html`<${Md} text=${g.text || ''} />`}
-          ${g.diff ? html`<div class="hint">我们的区别：${g.diff}</div>` : null}<div class="hint">${g.papers.length} 篇论文</div></div>`}</div>`)
+          ${g.diff ? html`<div class="hint">我们的区别：<${Html} s=${inlineMd(g.diff)} /></div>` : null}<div class="hint">${g.papers.length} 篇论文</div></div>`}</div>`)
       : newTable ? null : html`<div class="hint">和现在的一样。</div>`}
     ${newTable ? html`<div class="pr-row"><label class="pr-label"><b>对比表</b><span class="chip">${r.comparison ? '修改' : '新增'}</span></label>
       <${Comparison} t=${newTable} title=${linkTitles(x)} /></div>` : null}
@@ -220,9 +224,9 @@ function GroupForm({ g, done, save }) {
     const f = new FormData(e.target);
     save({ ...g, name: f.get('name').trim(), text: f.get('text').trim() || null, diff: f.get('diff').trim() || null }).then((ok) => ok && done());
   };
-  return html`<form class="element writing-form" onSubmit=${submit}><input name="name" class="task-title" value=${g.name} placeholder="方向名" aria-label="方向名" />
+  return html`<form class="element writing-form" onSubmit=${submit}><input name="name" class="task-title" defaultValue=${g.name} placeholder="方向名" aria-label="方向名" />
     <textarea name="text" rows="6" placeholder="写进论文 Related Work 的一段，引用写成 [arxiv:2410.24164]">${g.text || ''}</textarea>
-    <input name="diff" class="task-title" value=${g.diff || ''} placeholder="我们和这条线的区别，一句话" aria-label="我们的区别" />
+    <input name="diff" class="task-title" defaultValue=${g.diff || ''} placeholder="我们和这条线的区别，一句话" aria-label="我们的区别" />
     <div style="display:flex;gap:8px;margin-top:8px"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button></div></form>`;
 }
 
@@ -244,9 +248,9 @@ function RelatedWork({ x }) {
     ${r.comparison ? html`<div class="element"><h3>和最接近的工作对比</h3><${Comparison} t=${r.comparison} title=${title} /></div>` : null}
     ${r.groups.map((g) => editing === g.id ? html`<${GroupForm} key=${g.id} g=${g} done=${() => setEditing(null)} save=${(ng) => save(r.groups.map((o) => (o.id === g.id ? ng : o)))} />`
       : html`<div class="element" key=${g.id}><h3>${g.name}<span style="float:right"><button class="btn sm ghost" onClick=${() => setEditing(g.id)}>编辑</button>
-          <button class="btn sm ghost" onClick=${() => confirm(`删除方向「${g.name}」？论文仍留在素材里。`) && save(r.groups.filter((o) => o.id !== g.id))}>删除</button></span></h3>
-        <div class="scope-papers">${g.papers.map((pid) => html`<${PaperChip} id=${pid} title=${title[pid] || idLabel(pid)} />`)}</div>
-        ${g.text ? html`<${Md} class="quotable" text=${g.text} />` : null}${g.diff ? html`<div class="relevance"><b>我们的区别</b>　<span class="quotable">${g.diff}</span></div>` : null}</div>`)}
+          <button class="btn sm ghost danger" onClick=${() => confirm(`删除方向「${g.name}」？论文仍留在素材里。`) && save(r.groups.filter((o) => o.id !== g.id))}>删除</button></span></h3>
+        <div class="scope-papers">${g.papers.map((pid) => html`<${PaperChip} peek id=${pid} title=${title[pid] || idLabel(pid)} />`)}</div>
+        ${g.text ? html`<${Md} class="quotable" text=${g.text} />` : null}${g.diff ? html`<div class="relevance"><b>我们的区别</b>　<${Html} cls="quotable" s=${inlineMd(g.diff)} /></div>` : null}</div>`)}
     ${!r.groups.length && !r.proposal ? html`<div class="hint">还没有梳理。agent 会把这个领域分成几条研究方向，每条写清做到哪、局限在哪、我们差在哪；它们也是论文 Related Work 一节的段落（写作页可见、随 LaTeX 导出）。</div>` : null}
     <${RunsBlock} runs=${runsOf(x, 'related')} label="梳理相关工作" spec="librarian/related.md" /></div>`;
 }
@@ -335,12 +339,12 @@ function Diagrams({ x, kind = 'method', hideRuns = false }) {
     ${run ? html`<div class="card-wait"><${Mark} spin />${waiting}</div>` : null}
     ${mine.map((d) => html`<figure class="diagram" key=${d.name}>
       <a href=${url(d, 'figure.pdf')} target="_blank"><img src=${`${url(d, 'figure.png')}?v=${encodeURIComponent(d.at)}`} alt=${d.caption || d.title || d.name} /></a>
-      <figcaption><b>${d.title || d.name}</b>${d.caption ? html`　<span class="quotable">${d.caption}</span>` : null}</figcaption>
+      <figcaption><b>${d.title || d.name}</b>${d.caption ? html`　<${Html} cls="quotable" s=${inlineMd(d.caption)} />` : null}</figcaption>
       <div class="diagram-bar"><span class="hint mono">${d.name} · ${d.width}px 宽 · ${ago(d.at)}</span><span class="grow"></span>
         <a class="btn sm ghost" href=${url(d, 'figure.pdf')} download=${`${d.name}.pdf`}>PDF</a>
         <a class="btn sm ghost" href=${url(d, 'figure.png')} download=${`${d.name}.png`}>PNG</a>
         <a class="btn sm ghost" href=${url(d, 'figure.html')} download=${`${d.name}.html`}>源文件</a>
-        <button class="btn sm ghost" onClick=${() => remove(d)}>删除</button></div></figure>`)}
+        <button class="btn sm ghost danger" onClick=${() => remove(d)}>删除</button></div></figure>`)}
     ${!mine.length && !run ? html`<div class="hint">${empty}HTML/SVG 渲染成矢量 PDF，agent 自己看图反复修改；PDF 可以直接放进 LaTeX，也可以在讨论里让它放进 Overleaf 论文。</div>` : null}
     ${hideRuns ? null : html`<${RunsBlock} runs=${runsOf(x, runKind)} label=${`画${title}`} spec="librarian/diagram.md" />`}</div>`;
 }
@@ -360,8 +364,8 @@ function ExpForm({ e, done }) {
     } catch (err) { fail(err); }
   };
   return html`<form class="exp-card exp-form" onSubmit=${submit}>
-    <input name="title" value=${e.title || ''} placeholder="做了什么" />
-    <input name="target" value=${e.target || ''} placeholder="验证三要素里的哪一点" />
+    <input name="title" defaultValue=${e.title || ''} placeholder="做了什么" />
+    <input name="target" defaultValue=${e.target || ''} placeholder="验证三要素里的哪一点" />
     <textarea name="setup" rows="2" placeholder="设置：配置、数据、平台、commit">${e.setup || ''}</textarea>
     <textarea name="results" rows="3" placeholder="结果，每行一个：指标: 数值">${(e.results || []).map((r) => `${r.name}: ${r.value}`).join('\n')}</textarea>
     <div style="display:flex;gap:8px"><select name="status">${Object.entries(EXP_STATUS).map(([k, l]) => html`<option value=${k} selected=${e.status === k}>${l}</option>`)}</select>
@@ -402,14 +406,14 @@ function ExpCard({ e }) {
       ${run ? html`<span class="chip violet"><${Mark} spin />agent 整理中</span>` : null}<span class="grow"></span><span class="hint">${ago(e.created_at)}</span></div>
     ${e.target ? html`<div class="exp-row"><span class="hint">验证</span><${Html} cls="quotable" s=${inlineMd(e.target)} /></div>` : null}
     ${e.setup ? html`<div class="exp-row"><span class="hint">设置</span><${Html} cls="quotable" s=${inlineMd(e.setup)} /></div>` : null}
-    ${(e.results || []).length ? html`<div class="exp-row"><span class="hint">结果</span><span class="quotable">${e.results.map((r, i) => html`${i ? '；' : ''}${r.name} <b class="mono">${r.value}</b>${r.note ? html`<span class="hint">（${r.note}）</span>` : null}`)}</span></div>` : null}
+    ${(e.results || []).length ? html`<div class="exp-row"><span class="hint">结果</span><span class="quotable">${e.results.map((r, i) => html`${i ? '；' : ''}${r.name} <b class="mono">${r.value}</b>${r.note ? html`<span class="hint">（<${Html} s=${inlineMd(r.note)} />）</span>` : null}`)}</span></div>` : null}
     ${(e.charts || []).length ? html`<div class="exp-charts">${e.charts.map((c, i) => html`<${ExpChart} key=${i} c=${c} />`)}</div>` : null}
     ${e.conclusion_text ? html`<div class="exp-row"><span class="hint">结论</span><${Html} cls="quotable" s=${inlineMd(e.conclusion_text)} /></div>` : null}
     ${e.raw ? html`<details><summary class="hint">原始结果</summary><pre class="quotable">${e.raw}</pre></details>` : null}
     <div class="exp-acts"><button class="btn sm ghost" onClick=${() => setEditing(true)}>编辑</button>
       <button class="btn sm ghost" disabled=${!(agentOn.value && !run && e.raw && e.edited_by !== 'user')} title=${e.edited_by === 'user' ? '你改过这条记录，agent 不再改动' : ''}
         onClick=${async () => { await post(`/api/experiments/${enc(e.id)}/structure`).catch(fail); toast('已交给 agent 整理'); refresh(); }}>让 agent 整理</button>
-      <button class="btn sm ghost" onClick=${remove}>删除</button></div>
+      <button class="btn sm ghost danger" onClick=${remove}>删除</button></div>
     ${e.runs.length && !run && e.runs[0].status === 'ERROR' ? html`<div class="hint" style="color:var(--red)">agent 整理出错：${e.runs[0].error || ''}</div>` : null}</div>`;
 }
 
@@ -422,6 +426,9 @@ const cellKey = (r, s) => `${r}\u0000${s}`;
 const metricOf = (d, name) => d?.metrics.find((m) => m.name === name);
 const arrow = (m) => (m ? (m.better === 'lower' ? '↓' : '↑') : '');
 const metricLabel = (m) => (m ? `${m.name}${m.unit ? ` (${m.unit})` : ''} ${arrow(m)}` : '');
+const DESIGN_FIELDS = [['questions', '问题'], ['benchmarks', '基准'], ['method', '方法'], ['baselines', '对比'], ['controls', '对照'], ['metrics', '指标'], ['implementation', '实现']];
+const named = (b) => [b.name, b.paper, b.note].filter(Boolean).join(' · ');
+const DESIGN_LINE = { benchmarks: named, baselines: named, controls: named, metrics: metricLabel };
 
 /** Paper order (by section, then as listed), Tables and Figures numbered separately as LaTeX does. */
 function numbered(figs) {
@@ -433,8 +440,8 @@ function numbered(figs) {
 function DesignView({ d }) {
   return html`<div class="exp-card design">
     <div class="exp-row"><span class="hint">问题</span><ol class="quotable">${d.questions.map((q) => html`<li>${q}</li>`)}</ol></div>
-    <div class="exp-row"><span class="hint">基准</span><span class="quotable">${d.benchmarks.map((b, i) => html`${i ? '；' : ''}<b>${b.name}</b>${b.note ? html`<span class="hint">（${b.note}）</span>` : null}`)}</span></div>
-    <div class="exp-row"><span class="hint">对比</span><span class="quotable"><b>${d.method}</b>（我们）vs ${d.baselines.map((b, i) => html`${i ? '、' : ''}<span title=${[b.paper, b.note].filter(Boolean).join(' · ')}>${b.name}</span>`)}</span></div>
+    <div class="exp-row"><span class="hint">基准</span><span class="quotable">${d.benchmarks.map((b, i) => html`${i ? '；' : ''}<b>${b.name}</b>${b.note ? html`<span class="hint">（<${Html} s=${inlineMd(b.note)} />）</span>` : null}`)}</span></div>
+    <div class="exp-row"><span class="hint">对比</span><span class="quotable"><b>${d.method}</b>（我们）vs ${d.baselines.map((b, i) => html`${i ? '、' : ''}<span title=${b.note || ''}>${b.name}</span>${b.paper ? html` <${Html} s=${inlineMd(`[${b.paper}]`)} />` : null}`)}</span></div>
     ${d.controls?.length ? html`<div class="exp-row"><span class="hint">对照</span><span class="quotable">${d.controls.map((b, i) => html`${i ? '、' : ''}<span title=${b.note || ''}>${b.name}</span>`)}<span class="hint">（自己方法的变体与简单对照）</span></span></div>` : null}
     <div class="exp-row"><span class="hint">指标</span><span class="quotable">${d.metrics.map(metricLabel).join('；')}</span></div>
     ${d.implementation ? html`<div class="exp-row"><span class="hint">实现</span><${Html} cls="quotable" s=${inlineMd(d.implementation)} /></div>` : null}</div>`;
@@ -473,13 +480,13 @@ function FigureCard({ x, f, d, label, remove }) {
     ...f.series.map((s) => ({ label: s, data: f.rows.map((r) => (at(r, s) ? num(at(r, s).value) : null)), spanGaps: true })),
     ...(f.target ? [{ ...(f.kind === 'bar' ? { type: 'line' } : {}), label: f.target.label || `目标 ${f.target.value}`, data: f.rows.map(() => f.target.value), borderDash: [6, 4], pointRadius: 0, fill: false }] : [])] },
     options: f.kind === 'radar' ? {} : { scales: { x: axis(f.x_title), y: axis(f.y_title || metricLabel(metricOf(d, f.metric))) } } };
-  const caption = f.caption ? html`<div class="fig-caption quotable"><b>${label}:</b> ${f.caption}</div>` : null;
+  const caption = f.caption ? html`<div class="fig-caption quotable"><b>${label}:</b> <${Html} s=${inlineMd(f.caption)} /></div>` : null;
   const q = d?.questions[f.question - 1];
   return html`<div class="exp-card"><div class="exp-head"><b>${label}</b><span class="quotable">${f.title}</span>
       ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[f.kind]}</span>
       <span class=${`chip ${n === total ? 'green' : ''}`} title="已经有实验结果的格子">已填 ${n}/${total}</span><span class="grow"></span>
       ${remove ? html`<span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
-    ${f.claim ? html`<div class="hint quotable">要证明：${f.claim}</div>` : null}
+    ${f.claim ? html`<div class="hint quotable">要证明：<${Html} s=${inlineMd(f.claim)} /></div>` : null}
     ${chart ? html`<${ExpChart} c=${chart} />${caption}` : html`${caption}<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
         ${f.series.map((s) => html`<th>${s}${!f.metric && colMetric(s) ? ` ${arrow(colMetric(s))}` : ''}</th>`)}</tr></thead>
       <tbody>${f.rows.map((r) => html`<tr class=${r === d?.method ? 'ours' : ''}><td>${r}</td>${f.series.map((s) => {
@@ -497,12 +504,15 @@ function FiguresProposal({ x }) {
     return [add.length && `加${what}：${add.join('、')}`, gone.length && `删${what}：${gone.join('、')}`].filter(Boolean); };
   const diff = (o, f) => [o.title !== f.title && `改名：${o.title}`, o.section !== f.section && `${FIG_SECTION[o.section] || '未分节'} → ${FIG_SECTION[f.section]}`,
     o.kind !== f.kind && `${FIG_KIND[o.kind]} → ${FIG_KIND[f.kind]}`, o.question !== f.question && `改答 Q${f.question}`, o.metric !== f.metric && `指标改为 ${f.metric || '按列'}`,
-    ...names(o.rows, f.rows, '行'), ...names(o.series, f.series, '系列'), JSON.stringify(o.target) !== JSON.stringify(f.target) && '目标线有改动',
-    (o.caption || '') !== (f.caption || '') && '图注有改动', (o.claim || '') !== (f.claim || '') && '论点有改动'].filter(Boolean);
+    ...names(o.rows, f.rows, '行'), ...names(o.series, f.series, '系列'), JSON.stringify(o.target) !== JSON.stringify(f.target) && '目标线有改动'].filter(Boolean);
+  const texts = (o, f) => [['claim', '论点'], ['caption', '图注']].filter(([k]) => (o[k] || '') !== (f[k] || ''));
   const shape = (f) => `${FIG_SECTION[f.section]} · ${FIG_KIND[f.kind]} · ${f.rows.length} 行 × ${f.series.length} 系列${f.claim ? ` · ${f.claim}` : ''}`;
-  const rows = [...p.figures.map((f) => (!cur[f.id] ? ['新增', 'green', f, []] : diff(cur[f.id], f).length ? ['修改', '', f, diff(cur[f.id], f)] : null)).filter(Boolean),
+  const rows = [...p.figures.map((f) => (!cur[f.id] ? ['新增', 'green', f, []] : diff(cur[f.id], f).length || texts(cur[f.id], f).length ? ['修改', '', f, diff(cur[f.id], f)] : null)).filter(Boolean),
     ...fg.figures.filter((f) => !kept.has(f.id)).map((f) => ['删除', 'red', f, []])];
   const design = p.design && JSON.stringify(p.design) !== JSON.stringify(fg.design);
+  // One item per line so the diff marks whole items; each line ends in \n so appending one doesn't touch the last.
+  const lines = (d, k) => [d[k] || []].flat().map((v) => `${DESIGN_LINE[k] ? DESIGN_LINE[k](v) : v}\n`).join('');
+  const designRows = design && fg.design ? DESIGN_FIELDS.filter(([k]) => lines(fg.design, k) !== lines(p.design, k)) : [];
   const decide = async (action) => {
     try {
       const r = await post(`/api/research/${enc(x.id)}/figures/proposal`, { action, base_rev: fg.revision });
@@ -511,11 +521,13 @@ function FiguresProposal({ x }) {
     refresh();
   };
   return html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的实验设计修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动实验设计</span></div>
-    ${p.note ? html`<div class="hint" style="margin-bottom:6px">${p.note}</div>` : null}
+    ${p.note ? html`<div class="hint" style="margin-bottom:6px"><${Html} s=${inlineMd(p.note)} /></div>` : null}
     ${design ? html`<div class="task-diff"><span class=${`chip ${fg.design ? '' : 'green'}`}>${fg.design ? '修改' : '新增'}</span><span>实验设置</span>
-      <span class="hint">${p.design.questions.length} 个研究问题 · ${p.design.benchmarks.length} 个基准 · ${p.design.baselines.length} 个对比方法 · ${p.design.metrics.length} 个指标</span></div>` : null}
+      ${fg.design ? null : html`<span class="hint">${p.design.questions.length} 个研究问题 · ${p.design.benchmarks.length} 个基准 · ${p.design.baselines.length} 个对比方法 · ${p.design.metrics.length} 个指标</span>`}</div>` : null}
+    ${designRows.map(([k, l]) => html`<div class="exp-row"><span class="hint">${l}</span><${Diff} a=${lines(fg.design, k)} b=${lines(p.design, k)} /></div>`)}
     ${rows.length ? rows.map(([k, cls, f, why]) => html`<div class="task-diff"><span class=${`chip ${cls}`}>${k}</span><span class=${`quotable ${k === '删除' ? 'struck' : ''}`}>${f.title}</span>
-        <span class="hint">${why.length ? why.join('；') : shape(f)}</span></div>`) : design ? null : html`<div class="hint">和现在的实验设计一样。</div>`}
+        <span class="hint">${why.length ? why.join('；') : k === '修改' ? '' : shape(f)}</span></div>
+      ${k === '修改' ? texts(cur[f.id], f).map(([t, l]) => html`<div class="exp-row"><span class="hint">${l}</span><${Diff} a=${cur[f.id][t] || ''} b=${f[t] || ''} /></div>`) : null}`) : design ? null : html`<div class="hint">和现在的实验设计一样。</div>`}
     ${design || rows.length ? html`<details><summary class="hint">预览采用后的实验部分</summary>${p.design ? html`<${DesignView} d=${p.design} />` : null}
       <${Sections} x=${x} d=${p.design || fg.design} figs=${p.figures} /></details>` : null}
     <div class="proposal-acts"><button class="btn primary" onClick=${() => decide('accept')}>采用</button>
@@ -530,8 +542,7 @@ function Figures({ x }) {
     try { await post(`/api/research/${enc(x.id)}/figures/draft`, { instruction: ins }); setIns(''); toast('已交给 agent，设计好后会作为修改稿等你确认'); refresh(); } catch (err) { fail(err); }
   };
   const remove = (f) => confirm(`删除图表「${f.title}」？已填的格子会一起清掉，实验记录不受影响。`)
-    && act(`${enc(x.id)}/figures`, { figures: fg.figures.filter((g) => g.id !== f.id), base_rev: fg.revision }, '已删除');
-  return html`<div class="block"><div class="block-title">实验设计<span class="hint">　按论文 Experiments 一节组织：研究问题 → 实验设置 → 主结果 → 消融 → 分析</span><span class="line"></span></div>
+    && act(`${enc(x.id)}/figures`, { figures: fg.figures.filter((g) => g.id !== f.id), base_rev: fg.revision }, '已删除');  return html`<div class="block"><div class="block-title">实验设计<span class="hint">　按论文 Experiments 一节组织：研究问题 → 实验设置 → 主结果 → 消融 → 分析</span><span class="line"></span></div>
     <form class="add-line" onSubmit=${draft}><input value=${ins} onInput=${(e) => setIns(e.target.value)} disabled=${!agentOn.value || !!run}
         placeholder=${agentOn.value ? '给 agent 的要求（可选）：比如“主表加上 OpenVLA-OFT”“加一张数据量的消融”' : '需要先连接 agent'} />
       <button class="btn sm primary" disabled=${!agentOn.value || !!run}>${run ? html`<${Mark} spin />处理中` : fg.design ? '让 agent 更新实验设计' : '让 agent 设计实验'}</button></form>
@@ -581,7 +592,7 @@ function PlanProposal({ x }) {
   const same = p.tasks.length - rows.filter(([k]) => k !== '删除').length;
   const decide = (action) => act(`${enc(x.id)}/plan/proposal`, { action, base_rev: pl.revision }, action === 'discard' ? '已放弃修改稿' : '已采用新计划');
   return html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的计划修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动计划${same ? ` · 另有 ${same} 条不变` : ''}</span></div>
-    ${p.note ? html`<div class="hint" style="margin-bottom:6px">${p.note}</div>` : null}
+    ${p.note ? html`<div class="hint" style="margin-bottom:6px"><${Html} s=${inlineMd(p.note)} /></div>` : null}
     ${rows.length ? rows.map(([k, cls, t, why]) => html`<div class="task-diff"><span class=${`chip ${cls}`}>${k}</span><span class=${`quotable ${k === '删除' ? 'struck' : ''}`}>${t.title}</span>
         <span class="hint">${why.length ? why.join('；') : [TASK_STATUS[t.status], t.due && `截止 ${t.due}`].filter(Boolean).join(' · ')}</span></div>`)
       : html`<div class="hint">和现在的计划一样。</div>`}
@@ -609,8 +620,8 @@ function Plan({ x }) {
     ${pl.proposal ? html`<${PlanProposal} key=${pl.proposal.at} x=${x} />` : null}
     <div class="tasks">${tasks.map((t, i) => html`<div key=${t.id} class=${`task ${t.status} ${overdue(t) ? 'late' : ''}`}>
         <select class="role-select" value=${t.status} onChange=${(e) => patch(t.id, { status: e.target.value })}>${Object.entries(TASK_STATUS).map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select>
-        <div class="task-body"><input class="task-title" value=${t.title} onChange=${(e) => e.target.value.trim() && patch(t.id, { title: e.target.value.trim() })} />
-          ${t.note ? html`<div class="hint quotable">${t.note}</div>` : null}</div>
+        <div class="task-body"><input class="task-title" key=${t.title} defaultValue=${t.title} onChange=${(e) => e.target.value.trim() && patch(t.id, { title: e.target.value.trim() })} />
+          ${t.note ? html`<${Html} tag="div" cls="hint quotable" s=${inlineMd(t.note)} />` : null}</div>
         <input type="date" class="task-due" value=${t.due || ''} title="截止日期" onChange=${(e) => patch(t.id, { due: e.target.value || null })} />
         <span class="task-acts"><button class="x" title="上移" disabled=${!i} onClick=${() => move(i, -1)}>↑</button><button class="x" title="下移" disabled=${i === tasks.length - 1} onClick=${() => move(i, 1)}>↓</button>
           <button class="x" title="删除" onClick=${() => confirm(`删除任务「${t.title}」？`) && save(tasks.filter((u) => u.id !== t.id))}>×</button></span></div>`)}</div>
@@ -631,7 +642,7 @@ function WritingProposal({ x }) {
   const all = pick.size === rows.length;
   const decide = (op) => act(`${enc(x.id)}/writing/proposal`, { action: op, base_rev: op === 'accept' ? w.revision : undefined, fields: [...pick] }, op === 'discard' ? '已放弃修改稿' : '已采用修改稿');
   return html`<div class="proposal"><div class="proposal-head"><b>Agent 提交的写作修改稿</b><span class="hint">${ago(p.at)} · 采用后才会改动草稿</span></div>
-    ${p.note ? html`<div class="hint" style="margin-bottom:6px">${p.note}</div>` : null}
+    ${p.note ? html`<div class="hint" style="margin-bottom:6px"><${Html} s=${inlineMd(p.note)} /></div>` : null}
     ${rows.length ? html`<${DraftRows} rows=${rows} cur=${(k) => w[k] || ''} p=${p} pick=${pick} setPick=${setPick} />` : html`<div class="hint">和现在的内容一样。</div>`}
     <div class="proposal-acts"><button class="btn primary" disabled=${rows.length && !pick.size} onClick=${() => decide('accept')}>${all ? '采用' : `采用勾选的 ${pick.size} 项，其余放弃`}</button>
       <button class="btn" onClick=${talk}>继续调整（去写作讨论）</button><button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>`;
@@ -725,11 +736,22 @@ function Writing({ x }) {
 // ---------- detail and list ----------
 
 const tabOf = {};
+/** Set before opening a research so its detail lands on the tab (and discussion) where work is happening. */
+const researchFocus = signal(null);
+export function showResearch(id, tab, threadId) {
+  const next = tab || 'overview';
+  tabOf[id] = next;
+  researchFocus.value = { id, tab: next, thread: threadId || null };
+  if (threadId) setDock(true);
+  openResearch(id);
+}
 
 function ResearchDetail({ id }) {
   const [x, , err] = useLive(`/api/research/${enc(id)}`);
   const [editing, setEditing] = useState(false);
   const [tab, setTab] = useState(tabOf[id] || 'overview');
+  const focus = researchFocus.value;
+  useEffect(() => { if (focus?.id === id && focus.tab) setTab(focus.tab); }, [focus, id]);
   if (err) return html`<div class="empty"><b>打不开</b>${err}</div>`;
   if (!x) return html`<div class="empty"><span class="spin"></span></div>`;
   const exps = x.experiments, by = (c) => exps.filter((e) => e.conclusion === c).length, ps = planStats(x.plan.tasks);
@@ -750,17 +772,18 @@ function ResearchDetail({ id }) {
       ${x.figures.proposal ? html`<a href="#" class="chip violet" onClick=${toTab('experiments')}>实验设计修改稿待确认</a>` : null}
       ${x.overleaf_changed ? html`<a href="#" class="chip violet" title="agent 改了论文，去写作页查看并推送" onClick=${toTab('writing')}>Overleaf 改动待推送 ${x.overleaf_changed}</a>` : null}
       <span>${x.stage === 'established' ? `${ago(x.established_at)}确立` : `更新于 ${ago(x.updated_at)}`}</span><span class="grow"></span>
-      <button class="btn sm ghost" onClick=${remove}>删除</button></div>`;
+      <button class="btn sm ghost danger" onClick=${remove}>删除</button></div>`;
   const scope = `${{ overview: 'research', materials: 'related', experiments: 'experiment' }[tab] || tab}:${x.id}`;
+  const tid = focus?.id === id && focus.tab === tab ? focus.thread : null;
   const split = (main) => html`<div class=${`research-split ${dockOn.value ? '' : 'off'}`}><div class="research-main" data-quote-scope=${scope}><div class="detail">${main}</div></div>
-    ${dockOn.value ? html`<aside class="research-dock"><${Chat} key=${scope} scope=${scope} /></aside>` : null}</div>`;
-  if (editing) return split(html`${head}<${EditForm} x=${x} done=${() => setEditing(false)} />`);
+    ${dockOn.value ? html`<aside class="research-dock"><${DockGrip} /><${Chat} key=${`${scope}:${tid || ''}`} scope=${scope} threadId=${tid || undefined} /></aside>` : null}</div>`;
   const tabs = [['overview', '概览'], ['plan', '计划', x.plan.tasks.length], ['materials', '素材', x.links.length], ['code', '代码', x.repos.length], ['experiments', '实验', exps.length], ['writing', '写作']];
   const pick = (k) => { tabOf[id] = k; setTab(k); };
   const body = tab === 'plan' ? html`<${Plan} x=${x} />` : tab === 'materials' ? html`<${RelatedWork} x=${x} /><${Materials} x=${x} />` : tab === 'code' ? html`<${Code} x=${x} />` : tab === 'experiments' ? html`<${Experiments} x=${x} />`
-    : tab === 'writing' ? html`<${Writing} x=${x} />` : html`<${Overview} x=${x} edit=${() => setEditing(true)} />`;
+    : tab === 'writing' ? html`<${Writing} x=${x} />` : html`<${Overview} x=${x} />`;
   return split(html`${head}
-    <h1 class="research-title">${x.title}</h1>${x.summary ? html`<div class="research-summary"><${Html} s=${inlineMd(x.summary)} /></div>` : null}
+    ${editing ? html`<${EditForm} x=${x} done=${() => setEditing(false)} />`
+      : html`<h1 class="research-title">${x.title}<button class="btn sm ghost" style="float:right" onClick=${() => setEditing(true)}>编辑</button></h1>${x.summary ? html`<div class="research-summary"><${Html} s=${inlineMd(x.summary)} /></div>` : null}`}
     <${TopicsRow} kind="research" owner=${x} />
     <div class="rtabs">${tabs.map(([k, label, n]) => html`<button class=${`tab ${tab === k ? 'on' : ''}`} onClick=${() => pick(k)}>${label}${n ? html`<span class="n">${n}</span>` : null}</button>`)}
       <span class="grow"></span><button class="btn sm ghost" title="每个标签有自己的讨论，右侧跟着标签切换；概览里聊研究本身" onClick=${() => setDock(!dockOn.value)}>${dockOn.value ? '收起讨论 ›' : '‹ 讨论'}</button></div>
@@ -768,7 +791,7 @@ function ResearchDetail({ id }) {
 }
 
 function ResearchItem({ x, on }) {
-  return html`<div class=${`item ${on ? 'on' : ''}`} onClick=${() => (selected.value = { kind: 'research', id: x.id })}>
+  return html`<div class=${`item ${on ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${on ? 'true' : null} onClick=${() => (selected.value = { kind: 'research', id: x.id })}>
     <div class="item-meta"><${StageChip} stage=${x.stage} /><${ElementsChip} n=${x.elements_done} />${x.has_proposal ? html`<span class="chip violet">修改稿待确认</span>` : null}<time>${ago(x.updated_at)}</time></div>
     <div class="item-title">${x.title}</div>${x.summary ? html`<div class="item-tldr">${x.summary}</div>` : null}
     <div class="item-tags">${x.topics.map((t) => html`<span class="chip topic">${t}</span>`)}${x.link_count ? html`<span class="chip">${x.link_count} 份素材</span>` : null}
@@ -828,7 +851,7 @@ function Picker({ ctx }) {
       <div class="pick-list">${shown.map((x) => html`<div class="pick" onClick=${() => join(x)}><${StageChip} stage=${x.stage} /><span class="pick-title">${x.title}</span><span class="hint">${x.topics.join(' ')}</span></div>`)}</div>
       <div class="block-title" style="margin-top:16px">或者开始一个新研究<span class="line"></span></div>` : null}
     <form class="research-create" onSubmit=${create}>
-      <input name="title" value=${ctx.title || ''} placeholder="研究名称（30 字以内）" />
+      <input name="title" defaultValue=${ctx.title || ''} placeholder="研究名称（30 字以内）" />
       <textarea name="summary" rows="2" placeholder="一句话：想研究什么（可以先空着）">${ctx.summary || ''}</textarea>
       <p class="hint">新研究从<b>构思中</b>开始：先攒素材，再推敲三要素（研究问题、研究方法、验证方案），由你确认确立。${ctx.topics?.length ? `主题：${ctx.topics.join('、')}。` : '主题跟随素材里的论文，之后可以改。'}</p>
       <div style="display:flex;gap:8px;justify-content:flex-end"><button type="button" class="btn" onClick=${closeModal}>取消</button><button class="btn primary">开始研究</button></div></form>`;

@@ -2,15 +2,26 @@
 import { render } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, del, short, ago, readBase64, idLabel, threadName, Icon, fit, Mark, agentBusy } from './lib.js';
+import { html, get, post, del, enc, short, ago, readBase64, idLabel, threadName, Icon, fit, Mark, workHot, openWork } from './lib.js';
 import {
-  route, baseRoute, go, appState, loadState, refresh, toast, toastSig, fail, modalSig, openModal, closeModal,
-  selected, openThread, openCapture, openReader, openPaper, openResearch, useLive,
+  route, baseRoute, go, appState, loadState, refresh, toast, toastSig, fail, restoreTrash, modalSig, openModal, closeModal,
+  selected, openThread, openCapture, openReader, openPaper, openResearch, useLive, peekPaper,
 } from './state.js';
-import { CapturesView, PapersView, SearchView } from './papers.js';
-import { ResearchView, openComposer, researchPicker } from './research.js';
+import { CapturesView, PapersView, SearchView, ListDetail, openWebFind, addAndOpen } from './papers.js';
+import { ResearchView, openComposer, researchPicker, showResearch } from './research.js';
 import { DiscussView } from './discuss.js';
-import { Reader, SelectionPopup } from './reader.js';
+import { Reader, SelectionPopup, Peek } from './reader.js';
+
+/** An overlay's value, kept on screen for a moment after it goes away so it can animate out: [shown, leaving]. */
+function useLeaving(v, ms = 160) {
+  const [last, setLast] = useState(v);
+  useEffect(() => {
+    if (v) { setLast(v); return; }
+    const id = setTimeout(() => setLast(null), ms);
+    return () => clearTimeout(id);
+  }, [v]);
+  return [v || last, !v && !!last];
+}
 
 // ---------- sidebar ----------
 
@@ -26,7 +37,7 @@ const INBOX_VIEWS = ['inbox', 'deep', 'archived', 'ignored'];
 function NavItem({ view, label, n, hot, icon = view, arg }) {
   const r = baseRoute.value;
   const on = view === 'inbox' ? INBOX_VIEWS.includes(r.view) : r.view === view && (arg ? r.arg === arg : !(view === 'research' && r.arg));
-  return html`<div class=${`nav-item ${on ? 'on' : ''}`} onClick=${() => go(view, arg)}>
+  return html`<div class=${`nav-item ${on ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${on ? 'page' : null} onClick=${() => go(view, arg)}>
     <${Icon} k=${icon} /><span>${label}</span>${n ? html`<span class=${`n ${hot ? 'hot' : ''}`} title=${hot ? `其中 ${hot} 条需要你确认` : ''}>${n}</span>` : null}</div>`;
 }
 
@@ -43,17 +54,18 @@ function TopicTree() {
   if (!s) return null;
   const r = baseRoute.value;
   const inTopic = (path) => (r.view === 'topic' || r.view === 'research') && r.arg === path;
-  const edit = (path) => html`<button class="nav-edit" title="改名 / 移动 / 删除" onClick=${(e) => { e.stopPropagation(); topicModal(path); }}>⋯</button>`;
+  const edit = (path) => html`<button class="nav-edit" title="改名 / 移动 / 删除" aria-label=${`编辑主题 ${path}`} onClick=${(e) => { e.stopPropagation(); topicModal(path); }}>⋯</button>`;
   return html`${s.topics.map((t) => {
     const open = openTopics.value.has(t.path) || (r.view === 'topic' && r.arg?.startsWith(t.path + '/'));
-    return html`<div class=${`nav-item ${inTopic(t.path) ? 'on' : ''}`} onClick=${() => go('topic', t.path)}>
-        <span class=${`caret ${open ? 'open' : ''}`} onClick=${(e) => { e.stopPropagation(); toggleTopic(t.path); }}>
+    return html`<div class=${`nav-item ${inTopic(t.path) ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${inTopic(t.path) ? 'page' : null} onClick=${() => go('topic', t.path)}>
+        <span class=${`caret ${open ? 'open' : ''}`} role="button" tabIndex="0" aria-expanded=${open} aria-label=${open ? '收起子主题' : '展开子主题'}
+          onClick=${(e) => { e.stopPropagation(); toggleTopic(t.path); }}>
           <svg width="10" height="10" viewBox="0 0 10 10"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
         <span>${t.name}</span>${t.count ? html`<span class="n">${t.count}</span>` : null}${edit(t.path)}</div>
-      ${open && t.children.map((ch) => html`<div class=${`nav-item tree-child ${inTopic(ch.path) ? 'on' : ''}`} onClick=${() => go('topic', ch.path)}>
+      ${open && t.children.map((ch) => html`<div class=${`nav-item tree-child ${inTopic(ch.path) ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${inTopic(ch.path) ? 'page' : null} onClick=${() => go('topic', ch.path)}>
         <span>${ch.name}</span>${ch.count ? html`<span class="n">${ch.count}</span>` : null}${edit(ch.path)}</div>`)}`;
   })}
-  ${s.topic_proposals.length ? html`<div class="nav-item proposals" onClick=${proposalsModal}><span>agent 提议了 ${s.topic_proposals.length} 个新主题</span></div>` : null}`;
+  ${s.topic_proposals.length ? html`<div class="nav-item proposals" role="button" tabIndex="0" onClick=${proposalsModal}><span>agent 提议了 ${s.topic_proposals.length} 个新主题</span></div>` : null}`;
 }
 
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -101,7 +113,7 @@ function activityRow(x) {
     triage: [TRIAGE_LABEL[x.text] || '分拣', x.extra, jump(() => openCapture(x.ref))],
     read: ['阅读', x.extra || x.ref, jump(() => openReader(x.ref))],
   }[x.kind];
-  return html`<div class=${`act-row ${row[2] ? '' : 'static'}`} onClick=${row[2]}><time>${new Date(x.at).toTimeString().slice(0, 5)}</time>
+  return html`<div class=${`act-row ${row[2] ? '' : 'static'}`} role=${row[2] ? 'link' : null} tabIndex=${row[2] ? 0 : null} onClick=${row[2]}><time>${new Date(x.at).toTimeString().slice(0, 5)}</time>
     <span class="chip">${row[0]}</span><span class="act-text">${short(row[1] || '', 90)}</span></div>`;
 }
 
@@ -119,16 +131,109 @@ function Activity({ day: first }) {
 }
 const activityModal = (day) => openModal(html`<${Activity} key=${day || 'today'} day=${day} />`, true);
 
+const workAt = signal(null);
+const RUN_STATUS = { WAITING: '排队中', CREATING: '启动中', QUEUED: '排队中', RUNNING: '进行中', FINISHED: '完成', ERROR: '失败', CANCELLED: '已停止' };
+function workLists() {
+  const live = appState.value?.working || [];
+  const skip = new Set(live.map((w) => w.id));
+  const recent = (appState.value?.recent || []).filter((w) => !skip.has(w.id));
+  return { live, recent, items: [...live, ...recent] };
+}
+
+function jumpWork(w) {
+  const g = w.go || {};
+  if (g.to === 'reader') openReader(g.id, { tab: g.tab, threadId: g.thread, anchor: g.anchor });
+  else if (g.to === 'paper') openPaper(g.id);
+  else if (g.to === 'capture') openCapture(g.id);
+  else if (g.to === 'thread') openThread(g.scope, g.id);
+  else if (g.to === 'research') showResearch(g.id, g.tab, g.thread);
+  else if (g.to === 'discuss') go('discuss');
+}
+
+async function toggleWork(e) {
+  if (workAt.value) { workAt.value = null; return; }
+  const box = e.currentTarget.getBoundingClientRect();
+  const place = () => {
+    const width = 320;
+    let left = box.left;
+    if (left + width > innerWidth - 8) left = Math.max(8, innerWidth - 8 - width);
+    workAt.value = { top: box.bottom + 6, left };
+  };
+  if (workLists().items.length) { place(); loadState(); return; }
+  await loadState();
+  if (workLists().items.length) place();
+  else toast('还没有 agent 做过工作');
+}
+openWork.fn = toggleWork;
+
+function WorkMenuHost() {
+  const [at, leaving] = useLeaving(workAt.value);
+  return at ? html`<${WorkMenu} at=${at} leaving=${leaving} />` : null;
+}
+
+function WorkMenu({ at, leaving }) {
+  const { live, recent, items } = workLists();
+  const [i, setI] = useState(0);
+  const close = () => { workAt.value = null; };
+  const cur = Math.min(i, Math.max(0, items.length - 1));
+  const stamp = items.map((w) => w.id).join();
+  useEffect(() => { if (!items.length) close(); }, [items.length]);
+  useEffect(() => {
+    const down = (e) => { if (!e.target.closest?.('.work-menu, .brand, .m-brand, .reader-brand')) close(); };
+    const key = (e) => {
+      if (e.key === 'Escape') { e.stopImmediatePropagation(); close(); return; }
+      if (!items.length || (e.target instanceof Element && e.target.closest('input, textarea, select'))) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setI((n) => (Math.min(n, items.length - 1) + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length);
+      } else if (e.key === 'Enter') {
+        const w = items[cur];
+        if (!w?.go) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        jumpWork(w);
+        close();
+      }
+    };
+    document.addEventListener('mousedown', down);
+    document.addEventListener('keydown', key, true);
+    return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key, true); };
+  }, [cur, stamp]);
+  useEffect(() => { document.querySelector('.work-menu .work-item.on')?.scrollIntoView({ block: 'nearest' }); }, [cur, stamp]);
+  if (!items.length) return null;
+  const row = (w, j) => html`<button type="button" role="menuitem" disabled=${!w.go} class=${`work-item ${j === cur ? 'on' : ''}`}
+    onMouseMove=${() => i !== j && setI(j)} onClick=${() => { if (w.go) { jumpWork(w); close(); } }}>
+    <span class="work-label">${w.label}</span><span class="work-title">${w.title}</span><span class="hint">${RUN_STATUS[w.status] || w.status}</span></button>`;
+  const label = live.length && recent.length ? '正在工作和最近的工作' : live.length ? '正在工作' : '最近的工作';
+  return html`<div class=${`work-menu${leaving ? ' leaving' : ''}`} style=${`top:${at.top}px;left:${at.left}px`} role="menu" aria-label=${label}>
+    ${live.length ? html`<div class="work-head">正在工作</div>${live.map((w, j) => row(w, j))}` : null}
+    ${recent.length ? html`<div class="work-head">最近的工作</div>${recent.map((w, j) => row(w, live.length + j))}` : null}</div>`;
+}
+
+function Brand() {
+  const hot = workHot(appState.value);
+  return html`<button type="button" class="brand" title=${hot ? '跳到正在工作的页面' : '最近三次 agent 工作'}
+    aria-haspopup="menu" aria-expanded=${!!workAt.value} onClick=${toggleWork}>
+    <${Mark} quiet cls="brand-mark" spin=${hot} />paper2brain</button>`;
+}
+
+function MobileMark() {
+  const hot = workHot(appState.value);
+  return html`<button type="button" class="m-brand" title=${hot ? '跳到正在工作的页面' : '最近三次 agent 工作'} aria-label=${hot ? '正在工作' : '最近的工作'} onClick=${toggleWork}><${Mark} quiet cls="brand-mark" spin=${hot} /></button>`;
+}
+
 function Sidebar() {
   const a = appState.value?.agent;
   return html`<aside id="side">
-    <div class="brand" title=${agentBusy.value || (appState.value?.counts?.running || 0) > 0 ? 'Agent 正在工作' : ''}><${Mark} quiet cls="brand-mark" spin=${agentBusy.value || (appState.value?.counts?.running || 0) > 0} />paper2brain</div>
+    <${Brand} />
     <${PalTrigger} />
     <nav class="nav">
       <${MainNav} />
-      <div class="nav-label">主题<button class="nav-add" title="新建主题" onClick=${() => topicModal()}>+</button></div>
+      <div class="nav-label">主题<button class="nav-add" title="新建主题" aria-label="新建主题" onClick=${() => topicModal()}>+</button></div>
       <${TopicTree} />
       <${NavItem} view="unsorted" label="未归类" n=${appState.value?.counts?.unsorted} />
+      <${NavItem} view="trash" label="最近删除" n=${appState.value?.counts?.trash} />
     </nav>
     <${Heatmap} />
     <div class="agent-status" onClick=${setupModal}>${a?.enabled
@@ -173,11 +278,11 @@ function TopicForm({ path }) {
   };
   return html`<h3>${t ? `改名、移动或删除${kind}` : '新建主题'}</h3>
     <form class="research-create" onSubmit=${submit}>
-      <input name="name" value=${t?.name || ''} placeholder="主题名，比如：模仿学习" maxlength="30" aria-label="主题名" autofocus />
+      <input name="name" defaultValue=${t?.name || ''} placeholder="主题名，比如：模仿学习" maxlength="30" aria-label="主题名" autofocus />
       <label class="hint">放在 <select name="parent" disabled=${!!t?.children?.length} title=${t?.children?.length ? '有子主题的一级主题不能移动' : ''}>
         <option value="">（作为一级主题）</option>${roots.map((r) => html`<option value=${r.path} selected=${r.path === parent}>${r.name}</option>`)}</select> 下面</label>
       ${t ? html`<p class="hint">这个主题下的论文、研究和讨论会跟着一起改名或移动。</p>` : null}
-      <div style="display:flex;gap:8px;justify-content:flex-end">${t ? html`<button type="button" class="btn ghost" style="margin-right:auto"
+      <div style="display:flex;gap:8px;justify-content:flex-end">${t ? html`<button type="button" class="btn ghost danger" style="margin-right:auto"
         disabled=${!!t.children?.length} title=${t.children?.length ? '先删除或移走它下面的子主题' : ''} onClick=${remove}>删除${kind}</button>` : null}
         <button type="button" class="btn" onClick=${closeModal}>取消</button><button class="btn primary">${t ? '保存' : '新建'}</button></div>
     </form>`;
@@ -227,6 +332,38 @@ function Models() {
   })}</div>`;
 }
 
+/** Starts the CLI's own sign-in (browser or link) on this Mac and shows what it printed. */
+function Login({ cli, name }) {
+  const [r, setR] = useState(null), [busy, setBusy] = useState(false);
+  const start = async () => { setBusy(true); try { setR(await post('/api/agent/login', { cli })); } catch (e) { fail(e); } setBusy(false); };
+  return html`<span><button class="btn sm" disabled=${busy} onClick=${start}>${busy ? '启动中…' : r && !r.done ? '看登录进度' : `登录 ${name}`}</button>
+    ${r ? html`<div class="hint">${r.url ? html`<a href=${r.url} target="_blank">在浏览器里完成登录</a>` : null}
+      ${r.output ? html`<pre>${r.output}</pre>` : html`<span>已启动，浏览器没弹出时稍后点“看登录进度”</span>`}${r.done ? html`<b>登录命令已结束。</b>` : null}</div>` : null}</span>`;
+}
+
+/** The OpenAI-compatible API the search bar asks directly for its AI row; the key is never sent back. */
+function SearchApi() {
+  const [d, reload, err] = useLive('/api/agent/search-api', { poll: false });
+  if (err) return html`<p class="hint">读不到搜索接口配置：${err}（刚更新过代码的话，重启 ./p2b serve）</p>`;
+  if (!d) return html`<span class="spin"></span>`;
+  const save = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      await post('/api/agent/search-api', { base_url: f.get('base_url'), model: f.get('model'), api_key: f.get('api_key'), web_model: f.get('web_model') });
+      toast(f.get('base_url') ? '已保存，搜索框的 AI 推荐直接调这个接口' : '已关闭，AI 推荐改用 TCodex');
+      reload(); refresh();
+    } catch (err) { fail(err); }
+  };
+  // defaultValue, not value: the state refresh re-renders this and would put the saved text back over the typing
+  return html`<form class="research-create" key=${d.base_url + d.model + d.web_model} onSubmit=${save}>
+    <input name="base_url" defaultValue=${d.base_url} placeholder="接口地址，比如谷歌官方 https://generativelanguage.googleapis.com/v1beta/openai 或 https://api.zhizengzeng.com/v1（留空关闭）" aria-label="接口地址" />
+    <input name="model" defaultValue=${d.model} placeholder="快速模型：搜索框推荐、快速问、起标题，比如 gemini-3.5-flash-lite" aria-label="快速模型" />
+    <input name="web_model" defaultValue=${d.web_model} placeholder="联网模型：上网找论文、上网查（留空用 gemini-3.5-flash-lite，走 Gemini 谷歌搜索）" aria-label="联网模型" />
+    <input name="api_key" type="password" autocomplete="off" placeholder=${d.has_key ? '已保存 API key，留空不改' : 'API key'} aria-label="API key" />
+    <div style="text-align:right"><button class="btn sm primary">保存</button></div></form>`;
+}
+
 function Setup() {
   const a = appState.value.agent, ok = a.backends || {};
   const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
@@ -237,9 +374,9 @@ function Setup() {
   <p class="hint">Cursor agent：${mark('cursor')} · TCodex（腾讯内网）：${mark('tcodex')} · 选“默认”的模块用
     <select value=${a.backend} onChange=${(e) => switchTo(e.target.value)} aria-label="默认后端">
     <option value="cursor">Cursor</option><option value="tcodex">TCodex</option></select></p>
-  ${ok.tcodex ? null : html`<details open=${a.backend === 'tcodex'}><summary>连接 TCodex</summary><ol>
+  ${ok.tcodex ? html`<p class="hint">TCodex 登录过期或换账号：<${Login} cli="tcodex" name="TCodex" /></p>` : html`<details open=${a.backend === 'tcodex'}><summary>连接 TCodex</summary><ol>
     <li>安装 TCodex：<pre>curl -fsSL https://mirrors.tencent.com/repository/generic/tcodex/tcodex/install.sh | sh</pre></li>
-    <li>登录一次：<pre>tcodex login</pre>（或在启动服务的环境里设置 <code>TCODEX_AUTH_TOKEN</code>）</li>
+    <li>登录一次：<${Login} cli="tcodex" name="TCodex" />（或在启动服务的环境里设置 <code>TCODEX_AUTH_TOKEN</code>）</li>
   </ol></details>`}
   ${ok.cursor ? null : html`<details open=${a.backend === 'cursor'}><summary>连接 Cursor agent</summary><ol>
     <li>安装 Cursor CLI 并登录（只需一次）：<pre>curl https://cursor.com/install -fsS | bash${'\n'}agent login</pre></li>
@@ -252,6 +389,10 @@ function Setup() {
   ${a.enabled ? html`<div class="block-title" style="margin-top:14px">模型<span class="line"></span></div>
     <p class="hint" style="margin-top:0">每个模块可以用不同的模型。研究页的长讨论适合推理和表达强、上下文选 1m 的模型。改了之后，新开的讨论和任务才用新模型；已经在进行的讨论沿用原来的模型，想换就“分出新讨论”（带上下文）或“发起新讨论”（从头开始）。</p>
     <${Models} key=${a.machine} />` : null}
+  <div class="block-title" style="margin-top:14px">快速搜索接口<span class="line"></span></div>
+  <p class="hint" style="margin-top:0">搜索框停顿 1 秒后，第一条的 AI 推荐直接调这个 OpenAI 兼容接口（关闭思考，通常 1–8 秒）；不填就用上面“快速搜索”选的 TCodex 模型（约 4 秒）。
+    ${a.search_ai ? '✓ 已可用' : '未可用'}</p>
+  <${SearchApi} />
   <p class="hint">调优 agent：修改仓库里的 <code>librarian/*.md</code>，再在捕获详情里点“重新整理”。</p>
   <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>知道了</button></div>`;
 }
@@ -329,24 +470,46 @@ async function submitCapture() {
   } catch (e) { cap.value = { text, thought, files }; fail(e); }
 }
 
-const NAV = [['inbox', '收件箱'], ['papers', '论文'], ['discuss', '讨论'], ['research', '研究'], ['unsorted', '未归类']];
+const NAV = [['inbox', '收件箱'], ['papers', '论文'], ['discuss', '讨论'], ['research', '研究'], ['unsorted', '未归类'], ['trash', '最近删除']];
+
+const named = (p) => (p.short_name ? `${p.short_name} · ${p.title}` : p.title);
 
 /** Every row the bar offers for what is typed. nav: a jump or a lookup (the text is done with); the rest consume it. */
-function paletteItems(t, link, files, hits) {
+function paletteItems(t, link, files, hits, ai) {
   const out = [], add = (group, key, icon, label, hint, run, nav) => out.push({ group, key, icon, label, hint, run, nav });
   const s = selected.value, r = route.value;
   const pid = r.view === 'read' ? r.arg?.split('@')[0] : s?.kind === 'paper' ? s.id : null;
   const say = short(t.replace(/\s+/g, ' '), 36);
+  if (ai?.q === t && ai.r && !link && !files.length) {
+    if (ai.r.answer) { add('AI 推荐', 'ai:say', '✦', ai.r.answer, '↵ 接着和 agent 聊', () => ask(t)); out[out.length - 1].wrap = true; }
+    const lib = () => ai.r.papers.forEach((p) => {
+      add('AI 推荐 · 库里', `ai:${p.id}`, '▤', named(p), short(p.tldr || idLabel(p.id), 40), () => openPaper(p.id), true);
+      out[out.length - 1].peek = () => peekPaper(p.id);
+    });
+    const web = () => (ai.r.web || []).forEach((w) => {
+      add('AI 推荐 · 网上', `aiw:${w.url}`, '↗', w.title, `${w.pid ? `${idLabel(w.pid)} · ${w.published}` : new URL(w.url).hostname} · ${short(w.why, 30)}`,
+        () => window.open(w.url, '_blank', 'noopener'), true);
+      if (w.pid) out[out.length - 1].add = () => addAndOpen(w.pid);
+    });
+    // a paper typed by name and found on arXiv is what was asked for: it goes before the library's related ones
+    if (ai.r.named) { web(); lib(); } else { lib(); web(); }
+  }
   if (link || files.length) {
     add('收下', 'cap', '＋', files.length && !t ? `收下 ${files.length} 个文件` : '收下', '找到原论文、写快读卡、归类', submitCapture);
     add('收下', 'res', '☆', '以它开始一个研究', '', startResearch);
   } else if (t) {
-    const find = () => add('用这段话', 'find', '⌕', `找论文：${say}`, 'agent 检索 3–6 篇入库，直接开聊', () => submitFind(t));
+    const find = () => {
+      if (appState.value?.agent?.search_api) add('用这段话', 'web', '⌕', `上网找论文：${say}`, '约 5 秒列出网上的论文，挑了再收下', () => { clearCap(); openWebFind(t, () => submitFind(t)); });
+      add('用这段话', 'find', '⌕', `找论文：${say}`, 'agent 检索 3–6 篇入库，直接开聊', () => submitFind(t));
+    };
     if (FIND_RE.test(t)) find();
     add('库里', 'search', '⌕', `搜索「${say}」`, '全部结果', () => go('search', t), true);
     if (hits?.q === t) {
       const h = hits.r;
-      h.papers.slice(0, 4).forEach((p) => add('库里', `p:${p.id}`, '▤', p.title, idLabel(p.id), () => openPaper(p.id), true));
+      h.papers.slice(0, 4).forEach((p) => {
+        add('库里', `p:${p.id}`, '▤', named(p), idLabel(p.id), () => openPaper(p.id), true);
+        out[out.length - 1].peek = () => peekPaper(p.id);
+      });
       h.threads.slice(0, 3).forEach((x) => add('库里', `t:${x.id}`, '◌', threadName(x), '讨论', () => openThread(x.scope, x.id), true));
       h.research.slice(0, 3).forEach((x) => add('库里', `r:${x.id}`, '☆', x.title, '研究', () => openResearch(x.id), true));
     }
@@ -358,6 +521,7 @@ function paletteItems(t, link, files, hits) {
   }
   if (pid && !link && !files.length) {
     if (r.view !== 'read') add('这篇论文', 'c:read', '↗', '阅读原文', '', () => openReader(pid), true);
+    if (r.view !== 'read') add('这篇论文', 'c:peek', '◫', '速览原文', '悬浮窗，不离开当前页', () => peekPaper(pid), true);
     add('这篇论文', 'c:chat', '◌', '讨论这篇', '', () => openReader(pid, { tab: 'chat' }), true);
     add('这篇论文', 'c:res', '☆', '加入研究', '', () => researchPicker({ heading: '把这篇论文加入研究', links: [{ kind: 'paper', ref: pid }] }), true);
   }
@@ -372,7 +536,7 @@ function paletteItems(t, link, files, hits) {
   return out;
 }
 
-function Palette() {
+function Palette({ leaving }) {
   const { text, thought, files } = cap.value;
   const t = text.trim(), link = /https?:\/\//.test(t);
   const [hits, setHits] = useState(null);
@@ -388,12 +552,28 @@ function Palette() {
     const id = setTimeout(() => get(`/api/search?q=${encodeURIComponent(t)}`).then((r) => setHits({ q: t, r })).catch(() => {}), 160);
     return () => clearTimeout(id);
   }, [t, link]);
-  const items = paletteItems(t, link, files, hits);
+  // Like a search engine's AI answer: once typing pauses, a quick model reads the catalog and its picks go on top.
+  const [ai, setAi] = useState(null), cur = useRef();
+  const aiWanted = t.length >= 2 && !link && !files.length && appState.value?.agent?.search_ai;
+  useEffect(() => {
+    setAi(null);
+    if (!aiWanted) return;
+    const id = setTimeout(() => {
+      setAi({ q: t });
+      get(`/api/search/ai?q=${encodeURIComponent(t)}`).then((r) => {
+        setAi((a) => (a?.q === t ? { q: t, r: r || { answer: '', papers: [] } } : a));
+        setSel((s) => s ?? cur.current);
+      }).catch(() => setAi((a) => (a?.q === t ? null : a)));
+    }, 1000);
+    return () => clearTimeout(id);
+  }, [t, aiWanted]);
+  const items = paletteItems(t, link, files, hits, ai);
   // Selection follows the row, not the index, so results arriving while typing never move it.
   const i = Math.max(0, items.findIndex((x) => x.key === sel));
-  const run = (x) => {
+  cur.current = items[i]?.key;
+  const run = (x, peeking) => {
     if (!x) return;
-    x.run();
+    (peeking && x.peek ? x.peek : x.run)();
     palOpen.value = false;
     if (x.nav) clearCap();
   };
@@ -403,12 +583,12 @@ function Palette() {
       const n = items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length];
       setSel(n?.key);
       setTimeout(() => box.current?.querySelector('.pal-item.on')?.scrollIntoView({ block: 'nearest' }));
-    } else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); run(items[i]); }
+    } else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); run(items[i], e.altKey); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); palOpen.value = false; }
   };
   const set = (k) => (e) => { cap.value = { ...cap.value, [k]: e.target.value }; setSel(null); };
   let group = null;
-  return html`<div class="pal-bg" onMouseDown=${(e) => { if (e.target === e.currentTarget) palOpen.value = false; }}>
+  return html`<div class=${`pal-bg${leaving ? ' leaving' : ''}`} onMouseDown=${(e) => { if (e.target === e.currentTarget) palOpen.value = false; }}>
     <div class="pal" id="palette" role="dialog" aria-label="收下、搜索、找论文">
       <textarea ref=${ta} rows="1" class="pal-input" value=${text} onInput=${set('text')} onKeyDown=${key}
         placeholder="粘贴链接、截图或 PDF 收下；输入文字搜索、找论文、记想法、跳转…" aria-label="收下、搜索、找论文"></textarea>
@@ -417,20 +597,23 @@ function Palette() {
         <button type="button" aria-label="移除" onClick=${() => { cap.value = { ...cap.value, files: files.filter((_, k) => k !== j) }; }}>×</button></div>`)}</div>` : null}
       ${link || files.length ? html`<div class="pal-thought"><span>想法</span><input value=${thought} onInput=${set('thought')} onKeyDown=${key}
         placeholder="顺手记一句为什么收（可选），会开一段讨论" /></div>` : null}
-      <div class="pal-list" ref=${box} role="listbox">${items.map((x, j) => {
+      <div class="pal-list" ref=${box} role="listbox">${ai?.q === t && !ai.r ? html`<div class="pal-group" aria-live="polite">AI 推荐 <span class="spin"></span>${appState.value?.agent?.search_api ? ' 正在库里和网上找…' : ''}</div>` : null}${items.map((x, j) => {
         const head = x.group !== group ? html`<div class="pal-group">${(group = x.group)}</div>` : null;
-        return html`${head}<div key=${x.key} role="option" aria-selected=${j === i} class=${`pal-item ${j === i ? 'on' : ''}`}
+        return html`${head}<div key=${x.key} role="option" aria-selected=${j === i} class=${`pal-item ${j === i ? 'on' : ''}${x.wrap ? ' pal-answer' : ''}`}
             onMouseMove=${() => sel !== x.key && setSel(x.key)} onClick=${() => run(x)}>
           <span class="pal-icon">${x.icon}</span><span class="pal-label">${x.label}</span>${x.hint ? html`<span class="pal-hint">${x.hint}</span>` : null}
+          ${x.peek ? html`<button type="button" class="btn sm ghost pal-peek" title="悬浮窗看原文，不离开当前页（⌥↵）" onClick=${(e) => { e.stopPropagation(); run(x, true); }}>速览</button>` : null}
+          ${x.add ? html`<button type="button" class="btn sm pal-peek" title="加入论文库并打开它的卡片，agent 会写快读卡" onClick=${(e) => { e.stopPropagation(); run({ ...x, run: x.add }); }}>加入论文库</button>` : null}
           ${j === i ? html`<kbd>↵</kbd>` : null}</div>`;
       })}</div>
-      <div class="pal-foot hint"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 执行</span><span><kbd>⇧↵</kbd> 换行</span><span><kbd>Esc</kbd> 关闭，内容会留着</span></div>
+      <div class="pal-foot hint"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>↵</kbd> 执行</span>${items[i]?.peek ? html`<span><kbd>⌥↵</kbd> 速览</span>` : null}<span><kbd>⇧↵</kbd> 换行</span><span><kbd>Esc</kbd> 关闭，内容会留着</span></div>
     </div></div>`;
 }
 
 /** Always mounted: paste or drop anywhere opens the bar with it; dragging files shows where they will go. */
 function PaletteHost() {
   const [drop, setDrop] = useState(false);
+  const [open, leaving] = useLeaving(palOpen.value);
   useEffect(() => {
     let depth = 0;
     const enter = (e) => { if (e.dataTransfer?.types.includes('Files')) { depth++; setDrop(true); } };
@@ -456,12 +639,43 @@ function PaletteHost() {
     document.addEventListener('dragover', over); document.addEventListener('drop', dropped); document.addEventListener('paste', paste);
     return () => { for (const [k, f] of [['dragenter', enter], ['dragleave', leave], ['dragover', over], ['drop', dropped], ['paste', paste]]) document.removeEventListener(k, f); };
   }, []);
-  return html`${drop ? html`<div class="drop-veil"><div>松手就收下：图片、截图或 PDF</div></div>` : null}${palOpen.value ? html`<${Palette} />` : null}`;
+  return html`${drop ? html`<div class="drop-veil"><div>松手就收下：图片、截图或 PDF</div></div>` : null}${open ? html`<${Palette} leaving=${leaving} />` : null}`;
 }
 
 const PalTrigger = ({ cls = '' }) => html`<button class=${`pal-trigger ${cls}`} onClick=${() => openPalette()} title="收下、搜索、找论文、跳转（⌘K 或 /）">
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
   <span>收下、搜索、找论文…</span><kbd>⌘K</kbd></button>`;
+
+// ---------- recently deleted ----------
+
+const TRASH_DAYS = 30;  // store.TRASH_DAYS
+const TRASH_KIND = { paper: '论文', thread: '讨论' };
+
+function TrashView() {
+  const [items, reload] = useLive('/api/trash');
+  const open = (r) => (r.kind === 'paper' ? openPaper(r.ref) : openThread(r.scope, r.ref));
+  const restore = async (x) => {
+    const r = await restoreTrash(x.id);
+    if (r) { toast(`已恢复${TRASH_KIND[x.kind]}「${short(x.title || '', 24)}」`, '查看', () => open(r)); reload(); }
+  };
+  const purge = async (x) => {
+    if (!confirm(`永久删除「${x.title}」？删除后不能再恢复。`)) return;
+    try { await del(`/api/trash/${enc(x.id)}`); refresh(); reload(); } catch (e) { fail(e); }
+  };
+  const left = (x) => Math.max(1, TRASH_DAYS - Math.floor((Date.now() - new Date(x.deleted_at)) / 864e5));
+  return html`<${ListDetail} single detail=${html`<div class="page pad">
+    <h2 class="page-title">最近删除</h2>
+    <p class="hint" style="margin-top:0">删除的论文和讨论会在这里保留 ${TRASH_DAYS} 天，之后自动永久删除。</p>
+    ${!items ? html`<div class="empty"><span class="spin"></span></div>`
+      : !items.length ? html`<div class="empty"><b>没有最近删除的内容</b>删掉的论文和讨论会先来到这里，${TRASH_DAYS} 天内都能恢复。</div>`
+      : html`<div class="trash-list">${items.map((x) => html`<div class="trash-row" key=${x.id}>
+          <span class="chip">${TRASH_KIND[x.kind] || x.kind}</span>
+          <div class="trash-main"><div class=${`trash-title ${x.kind === 'paper' ? 'serif' : ''}`}>${x.title || '（无标题）'}</div>
+            <div class="hint">${ago(x.deleted_at)} 删除${x.detail ? ` · ${x.detail}` : ''} · 还剩 ${left(x)} 天</div></div>
+          <button class="btn sm" onClick=${() => restore(x)}>恢复</button>
+          <button class="btn sm ghost danger" onClick=${() => purge(x)}>永久删除</button></div>`)}</div>`}
+  </div>`} />`;
+}
 
 // ---------- body, overlays ----------
 
@@ -472,14 +686,16 @@ function Body() {
   if (r.view === 'search') return html`<${SearchView} q=${r.arg || ''} />`;
   if (r.view === 'research') return html`<${ResearchView} topic=${r.arg} />`;
   if (r.view === 'discuss') return html`<${DiscussView} threadId=${r.arg} />`;
+  if (r.view === 'trash') return html`<${TrashView} />`;
   go('inbox');
   return null;
 }
 
 function Toast() {
   const t = toastSig.value;
-  return html`<div id="toast" class=${t ? `show${t.isError ? ' error' : ''}` : ''}>${t && html`<span>${t.text}</span>
-    ${t.action ? html`<button onClick=${() => { toastSig.value = null; t.onAction(); }}>${t.action}</button>` : null}`}</div>`;
+  return html`<div id="toast" class=${t ? `show${t.isError ? ' error' : ''}` : ''} role=${t?.isError ? 'alert' : 'status'} aria-live=${t?.isError ? 'assertive' : 'polite'}>${t && html`<span>${t.text}</span>
+    ${t.action ? html`<button onClick=${() => { toastSig.value = null; t.onAction(); }}>${t.action}</button>` : null}
+    ${t.isError ? html`<button class="toast-x" aria-label="关闭" onClick=${() => { toastSig.value = null; }}>×</button>` : null}`}</div>`;
 }
 
 /** Backdrop click and Esc: ask first only if the user actually edited something in the modal. */
@@ -488,15 +704,31 @@ function dismissModal() {
 }
 
 function Modal() {
-  const m = modalSig.value;
+  const [m, leaving] = useLeaving(modalSig.value);
+  const box = useRef(), open = !!modalSig.value;
+  // Focus moves into the dialog (unless its content already focused something) and returns where it came from.
+  useEffect(() => {
+    if (!open) return;
+    const prev = modalSig.value.back;
+    if (!box.current?.contains(document.activeElement)) box.current?.querySelector('input:not([type=hidden]), textarea, select, button, [tabindex]')?.focus({ preventScroll: true });
+    return () => setTimeout(() => { if (!document.activeElement || document.activeElement === document.body || box.current?.contains(document.activeElement)) prev?.focus?.(); });
+  }, [open]);
   if (!m) return null;
   // Preact fills inputs via the value property, so defaultValue can't tell prefilled text from user edits.
-  return html`<div class="modal-bg" onMouseDown=${(e) => { if (e.target === e.currentTarget) dismissModal(); }}>
-    <div class=${`modal ${m.wide ? 'wide' : ''}`} onInput=${() => { m.edited = true; }}>${m.vnode}</div></div>`;
+  return html`<div class=${`modal-bg${leaving ? ' leaving' : ''}`} onMouseDown=${(e) => { if (e.target === e.currentTarget) dismissModal(); }}>
+    <div class=${`modal ${m.wide ? 'wide' : ''}`} ref=${box} role="dialog" aria-modal="true" onInput=${() => { m.edited = true; }}>${m.vnode}</div></div>`;
 }
 
 function App() {
   const reading = route.value.view === 'read';
+  // ponytail: the palette doesn't make the page inert (its actions focus the page before it unmounts), so Tab can leave it.
+  const blocked = !!modalSig.value;
+  const b = baseRoute.value;
+  useEffect(() => {
+    if (reading) return;  // the reader titles the window with its paper
+    const label = { inbox: '收件箱', deep: '稍后深读', archived: '已存档', ignored: '已忽略', papers: '论文', unsorted: '未归类', search: '搜索', research: '研究', discuss: '讨论', trash: '最近删除' }[b.view];
+    document.title = `${b.view === 'topic' ? b.arg : label || ''} · paper2brain`;
+  }, [reading, b.view, b.arg]);
   useEffect(() => {
     loadState();
     const key = (e) => {
@@ -509,16 +741,18 @@ function App() {
     document.addEventListener('keydown', key);
     return () => document.removeEventListener('keydown', key);
   }, []);
-  return html`<div id="app">
+  return html`<div id="app" inert=${blocked}>
       <${Sidebar} />
       <main id="main">
-        <nav id="mnav" aria-label="主导航"><${MainNav} /></nav>
+        <nav id="mnav" aria-label="主导航"><${MobileMark} /><${MainNav} /></nav>
         <${PalTrigger} cls="mpal" />
         <${Body} />
       </main>
     </div>
-    ${reading ? html`<${Reader} />` : null}
+    <${WorkMenuHost} />
+    ${reading ? html`<div inert=${blocked}><${Reader} /></div>` : null}
     <${SelectionPopup} />
+    <${Peek} />
     <${PaletteHost} />
     <${Toast} />
     <${Modal} />`;
@@ -527,8 +761,28 @@ function App() {
 // Every textarea grows with what you type and opens already fitted to prefilled text; ⌘/Ctrl+Enter submits its form.
 document.addEventListener('input', (e) => { if (e.target instanceof HTMLTextAreaElement) fit(e.target); });
 const fitted = new WeakSet();
-new MutationObserver(() => { for (const t of document.getElementsByTagName('textarea')) if (!fitted.has(t) && t.offsetWidth) { fitted.add(t); fit(t); } })
-  .observe(document.body, { childList: true, subtree: true });
+// Segmented controls and tab bars draw their selection as one mark that slides to the chosen button.
+function slideMarks() {
+  for (const bar of document.querySelectorAll('.seg, .tabs, .rtabs')) {
+    const on = bar.querySelector(':scope > .on');
+    const box = on ? [on.offsetLeft, on.offsetTop, on.offsetWidth, on.offsetHeight] : [0, 0, 0, 0];
+    const v = box.map((n) => `${n}px`).join(' ');
+    if (bar.dataset.box === v) continue;
+    bar.dataset.box = v;
+    ['x', 'y', 'w', 'h'].forEach((k, j) => bar.style.setProperty(`--mark-${k}`, `${box[j]}px`));
+    if (!bar.dataset.mark) requestAnimationFrame(() => { bar.dataset.mark = '1'; });
+  }
+}
+new MutationObserver(() => {
+  for (const t of document.getElementsByTagName('textarea')) if (!fitted.has(t) && t.offsetWidth) { fitted.add(t); fit(t); }
+  slideMarks();
+}).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+addEventListener('resize', slideMarks);
+document.fonts?.ready.then(slideMarks);
+// Clickable rows that aren't native buttons (role="link"/"button" + tabIndex) answer Enter and Space like one.
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target instanceof Element && e.target.matches('[role=link][tabindex], [role=button][tabindex]')) { e.preventDefault(); e.target.click(); }
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.defaultPrevented && e.target instanceof HTMLTextAreaElement && e.target.form) { e.preventDefault(); e.target.form.requestSubmit(); }
 });

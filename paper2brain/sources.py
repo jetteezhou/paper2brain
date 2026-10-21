@@ -180,8 +180,32 @@ def _arxiv_query(params):
     return out
 
 
+def _abs_page(arxiv_id):
+    """One paper from its arxiv.org/abs page (citation_* meta tags); None when arXiv has no such paper."""
+    try:
+        _, body, _ = http_get(f"https://arxiv.org/abs/{arxiv_id}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    page = body.decode("utf-8", errors="replace")
+    title = _meta(page, "citation_title")
+    if not title:
+        return None
+    authors = [" ".join(reversed(html.unescape(a).split(", ", 1))) for a in re.findall(r'name="citation_author" content="([^"]*)"', page)]
+    return {"arxiv_id": arxiv_id, "title": clean_title(title), "authors": authors,
+            "abstract": re.sub(r"\s+", " ", _meta(page, "citation_abstract") or "").strip(),
+            "published": (_meta(page, "citation_date") or "").replace("/", "-"), "url": f"https://arxiv.org/abs/{arxiv_id}"}
+
+
 def arxiv_lookup(arxiv_ids):
-    return _arxiv_query({"id_list": ",".join(arxiv_ids), "max_results": len(arxiv_ids)}) if arxiv_ids else []
+    if not arxiv_ids:
+        return []
+    try:
+        return _arxiv_query({"id_list": ",".join(arxiv_ids), "max_results": len(arxiv_ids)})
+    except urllib.error.HTTPError:
+        # export.arxiv.org rate-limits (429) for minutes at a time while arxiv.org/abs still answers
+        return [f for f in map(_abs_page, arxiv_ids) if f]
 
 
 def title_score(a, b):

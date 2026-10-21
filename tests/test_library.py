@@ -1,4 +1,5 @@
 """Write rules and storage, on a temporary data directory. No network."""
+import base64
 import os
 import tempfile
 import unittest
@@ -73,7 +74,19 @@ class Rules(unittest.TestCase):
 
     def test_report_needs_three_citations(self):
         with self.assertRaisesRegex(rules.Rejected, "至少要有 3 条"):
-            rules.validate_report({"sections": [{"heading": "h", "body": "b", "citations": [{"quote": "flow matching action expert", "page": 1}]}]}, PAGES)
+            rules.validate_report({"sections": [{"heading": "h", "points": [{"text": "b[1]", "citations": [{"quote": "flow matching action expert", "page": 1}]}]}]}, PAGES)
+
+    def test_report_every_point_cites_the_pdf(self):
+        cite = lambda q: [{"quote": q, "page": 2}]
+        ok = {"heading": "h", "points": [{"text": "a[1]", "citations": cite("flow matching action expert")},
+                                         {"text": "b[1]", "citations": cite("up to 50 Hz")}, {"text": "c[1]", "citations": cite("laundry folding")}]}
+        self.assertEqual(rules.validate_report({"sections": [ok]}, PAGES)["sections"][0]["points"][0]["citations"][0]["page"], 1)
+        with self.assertRaisesRegex(rules.Rejected, "第 1 节第 4 段：每段至少要有一条原文引用"):
+            rules.validate_report({"sections": [{**ok, "points": ok["points"] + [{"text": "d", "citations": []}]}]}, PAGES)
+        with self.assertRaisesRegex(rules.Rejected, "第 1 节第 4 段太大"):
+            rules.validate_report({"sections": [{**ok, "points": ok["points"] + [{"text": "长" * 301 + "[1]", "citations": cite("laundry folding")}]}]}, PAGES)
+        with self.assertRaisesRegex(rules.Rejected, "第 1 节第 4 段：在依据的那句话后面写"):
+            rules.validate_report({"sections": [{**ok, "points": ok["points"] + [{"text": "d[2]", "citations": cite("laundry folding")}]}]}, PAGES)
 
 
 class Store(unittest.TestCase):
@@ -176,6 +189,63 @@ class Store(unittest.TestCase):
         self.assertEqual([l["kind"] for l in store.get_research(rid)["links"]], ["paper"])
         listed = {p["id"] for p in store.list_papers()}
         self.assertTrue({shared, used} <= listed and only not in listed)
+
+    def test_delete_paper_removes_it_everywhere(self):
+        pid = "arxiv:2601.00099"
+        store.upsert_paper(pid, pid)
+        store.link(self.cid, pid, "rule")
+        rid = store.add_research("用到它", "user", links=[("paper", pid)])
+        aid = store.add_anchor(pid, "card", "flow matching", "user")
+        store.add_message(store.thread_for(f"paper:{pid}")["id"], "user", "讲讲")
+        trash = store.delete_paper(pid)
+        self.assertIsNone(store.get_paper(pid))
+        self.assertIsNone(store.get_anchor(aid))
+        self.assertEqual(store.get_research(rid)["links"], [])
+        self.assertIsNotNone(store.get_capture(self.cid))
+        with self.assertRaises(KeyError):
+            store.delete_paper(pid)
+        self.assertEqual(store.restore_trash(trash)["ref"], pid)
+        self.assertIsNotNone(store.get_paper(pid))
+        self.assertIsNotNone(store.get_anchor(aid))
+        self.assertEqual([l["kind"] for l in store.get_research(rid)["links"]], ["paper"])
+        with self.assertRaises(rules.Rejected):
+            store.restore_trash(trash)
+
+    def test_trash_keeps_every_delete_until_purged(self):
+        a, b = "arxiv:2601.00097", "arxiv:2601.00098"
+        for pid in (a, b):
+            store.upsert_paper(pid, pid)
+        before = store.counts()["trash"]
+        ta, tb = store.delete_paper(a), store.delete_paper(b)
+        self.assertEqual([x["ref"] for x in store.list_trash()][:2], [b, a])
+        self.assertEqual(store.counts()["trash"], before + 2)
+        store.restore_trash(ta)  # the older delete is still restorable
+        self.assertIsNotNone(store.get_paper(a))
+        store.purge_trash(tb)
+        self.assertEqual(store.counts()["trash"], before)
+        with self.assertRaises(rules.Rejected):
+            store.restore_trash(tb)
+
+    def test_delete_thread_and_restore_it_in_place(self):
+        root = store.new_thread("library", text="根")
+        mid = store.new_thread("library", parent_id=root, text="中间")
+        leaf = store.new_thread("library", parent_id=mid, text="分支")
+        store.add_message(mid, "user", "再说一句")
+        rid = store.add_research("用到讨论", "user", links=[("thread", mid)])
+        trash = store.delete_thread(mid)
+        with self.assertRaises(rules.Rejected):
+            store.thread_for(thread_id=mid)
+        self.assertEqual(store.thread_for(thread_id=leaf)["parent_id"], root)  # lifted a level
+        self.assertEqual(store.get_research(rid)["links"], [])
+        self.assertEqual(store.list_trash()[0]["kind"], "thread")
+        back = store.restore_trash(trash)
+        self.assertEqual((back["kind"], back["scope"]), ("thread", "library"))
+        t = store.thread_for(thread_id=mid)
+        self.assertEqual((t["parent_id"], len(t["messages"])), (root, 2))
+        self.assertEqual(store.thread_for(thread_id=leaf)["parent_id"], mid)  # hung back
+        self.assertEqual([l["kind"] for l in store.get_research(rid)["links"]], ["thread"])
+        with self.assertRaises(KeyError):
+            store.delete_thread("no-such-thread")
 
     def test_any_pdf_becomes_a_paper(self):
         import pymupdf
@@ -411,6 +481,9 @@ class Store(unittest.TestCase):
                 store.update_experiment(eid, "agent", base, title="agent 覆盖")
         e = store.get_experiment(eid)
         self.assertEqual((e["title"], e["edited_by"]), ("用户改的标题", "user"))
+        store.update_experiment(eid, "agent", rev, asked=True, conclusion="inconclusive")
+        e = store.get_experiment(eid)
+        self.assertEqual((e["title"], e["conclusion"], e["edited_by"]), ("用户改的标题", "inconclusive", "agent"))
 
     def test_code_map_snippets_are_verbatim(self):
         files = {"src/policy.py": "import torch\n\ndef chunk(actions, horizon=50):\n    return actions.unfold(0, horizon, 1)\n"}
@@ -696,7 +769,7 @@ class Store(unittest.TestCase):
         paper = pipeline.paper_from_pdf(doc.tobytes())
         s = structure.extract(paper["id"])
         self.assertEqual([(f["n"], f["page"]) for f in s["figures"]], [(1, 1), (2, 2)])
-        self.assertLess(s["figures"][1]["h"], (250 - 70 + 20) * 150 / 72)
+        self.assertLess(s["figures"][1]["h"], (250 - 70 + 20) * 200 / 72)
         self.assertTrue((store.paper_dir(paper["id"]) / "figures" / "1.png").exists())
         self.assertEqual(structure.key_figures(s)[0]["n"], 1)
         card = rules.validate_card({**CARD, "results": [{"text": "x", "quote": "discusses the results", "page": 1}],
@@ -736,6 +809,53 @@ class Store(unittest.TestCase):
         self.assertEqual(cap["agent_id"], cap["runs"][0]["agent_id"])
         self.assertIn("flow matching 做动作头", cursor_api.scope_text(f"find:{cap['id']}"))
 
+    def test_clicking_a_citation_takes_an_unlisted_paper_into_the_library_once(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        store.upsert_paper("arxiv:2501.00071", "fetched by the agent, never listed")
+        self.assertFalse(store.get_paper("arxiv:2501.00071")["listed"])
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": False}):
+            first = server.paper_add({}, {}, "arxiv:2501.00071")
+            again = server.paper_add({}, {}, "arxiv:2501.00071")
+        self.assertEqual((first["added"], first["listed"], again["added"]), (True, True, False))
+        self.assertIn("arxiv:2501.00071", [p["id"] for p in store.list_papers()])
+
+    def test_chat_passes_pasted_images_to_the_agent(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        png = base64.b64encode(b"\x89PNG").decode()
+        with mock.patch.object(cursor_api, "discuss", return_value="r1") as d:
+            server.chat({}, {"scope": "library", "images": [{"mime": "image/png", "data": png}, {"mime": "text/html", "data": png}]})
+        self.assertEqual(d.call_args.kwargs["images"], [(b"\x89PNG", "image/png")])
+        self.assertEqual(d.call_args.args[1], "（附了 1 张图）")
+        with self.assertRaisesRegex(rules.Rejected, "不能为空"):
+            server.chat({}, {"scope": "library", "reply": False, "images": [{"mime": "image/png", "data": png}]})
+
+    def test_regenerating_asks_the_last_question_again_of_a_new_agent(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "config", return_value=AGENT_CFG), \
+                mock.patch.object(cursor_api, "_spawn"):
+            r1 = server.chat({}, {"scope": "library", "text": "哪篇值得深读？"})["run_id"]
+            tid = store.thread_for("library")["id"]
+            with self.assertRaisesRegex(rules.Rejected, "还在写"):
+                server.chat({}, {"scope": "library", "thread_id": tid, "redo": True})
+            store.update_run(r1, status="FINISHED")
+            r2 = server.chat({}, {"scope": "library", "thread_id": tid, "redo": True, "model": {"id": "other-model"}})["run_id"]
+        t = store.thread_for(thread_id=tid)
+        self.assertEqual([(m["role"], m["text"]) for m in t["messages"][-2:]], [("user", "哪篇值得深读？"), ("assistant", "")])
+        self.assertEqual(sum(m["text"] == "哪篇值得深读？" for m in t["messages"]), 1)
+        self.assertEqual(t["messages"][-1]["run_id"], r2)
+        self.assertNotEqual(store.get_run(r2)["agent_id"], store.get_run(r1)["agent_id"])
+        self.assertEqual(t["model"], {"id": "other-model"})
+
     def test_finding_from_a_research_uses_its_papers_as_seeds_and_avoids_rejects(self):
         from unittest import mock
 
@@ -760,6 +880,39 @@ class Store(unittest.TestCase):
         self.assertIn("arxiv:2501.00081《seed paper》（用户标为：baseline）", prompt)
         self.assertIn("arxiv:2501.00082《off-track paper》", prompt)
         self.assertIn("要有真机", prompt)
+
+    def test_working_names_the_page_a_run_is_on(self):
+        rid = store.add_research("灵巧手", "user")
+        store.add_run("w-deep", "", "deepread", "arxiv:2410.24164", "", "RUNNING")
+        store.add_run("w-card", "", "card", "arxiv:2410.24164", "", "WAITING")
+        store.add_run("w-write", "", "writing", rid, "", "WAITING")
+        eid = store.add_experiment(rid, "成功率 0.4", "user", title="真机")
+        store.add_run("w-exp", "", "experiment", eid, "", "CREATING")
+        tid = store.thread_for(f"plan:{rid}")["id"]
+        store.add_run("w-chat", "", "chat", tid, "", "RUNNING")
+        store.add_run("w-cap", "", "capture", self.cid, "", "QUEUED")
+        store.add_run("w-done", "", "deepread", "arxiv:2410.24164", "", "FINISHED")
+        aid = store.add_anchor("arxiv:2410.24164", "pdf", "flow matching", "user", page=1)
+        at = store.thread_for(f"anchor:{aid}")["id"]
+        store.add_run("w-anchor", "", "chat", at, "", "RUNNING")
+        by = {x["id"]: x for x in store.working()}
+        self.assertNotIn("w-done", by)
+        self.assertEqual(by["w-deep"]["go"], {"to": "reader", "id": "arxiv:2410.24164", "tab": "report"})
+        self.assertEqual(by["w-deep"]["title"], "pi0")
+        self.assertEqual(by["w-card"]["go"], {"to": "paper", "id": "arxiv:2410.24164"})
+        self.assertEqual(by["w-write"]["go"], {"to": "research", "id": rid, "tab": "writing"})
+        self.assertEqual(by["w-write"]["title"], "灵巧手")
+        self.assertEqual((by["w-exp"]["go"]["id"], by["w-exp"]["go"]["tab"]), (rid, "experiments"))
+        self.assertIn("真机", by["w-exp"]["title"])
+        self.assertEqual(by["w-chat"]["go"], {"to": "research", "id": rid, "tab": "plan", "thread": tid})
+        self.assertEqual(by["w-cap"]["go"], {"to": "capture", "id": self.cid})
+        self.assertEqual(by["w-anchor"]["go"], {"to": "reader", "id": "arxiv:2410.24164", "tab": "anchor", "anchor": aid, "thread": at})
+        ids = [x["id"] for x in store.working() if str(x["id"]).startswith("w-")]
+        self.assertLess(ids.index("w-anchor"), ids.index("w-deep"))
+        store.add_run("w-fin1", "", "card", "arxiv:2410.24164", "", "FINISHED")
+        store.add_run("w-fin2", "", "writing", rid, "", "ERROR")
+        store.add_run("w-odd", "", "nope", "x", "", "FINISHED")
+        self.assertEqual([x["id"] for x in store.recent_work()], ["w-fin2", "w-fin1", "w-done"])
 
     def test_topic_tree_is_seeded(self):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
@@ -802,6 +955,35 @@ class Server(unittest.TestCase):
         self.assertEqual(self.req("DELETE", "/api/anchors/x", Origin="http://evil.example"), 403)
         self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "application/json", "Origin": own}), 200)
         self.assertEqual(sum(t["first"] == "跨站写入" for t in store.recent_threads()), 1)
+
+    def test_tunnel_host_needs_the_password(self):
+        from unittest import mock
+        auth = lambda pw: {"Authorization": "Basic " + base64.b64encode(f"me:{pw}".encode()).decode()}  # noqa: E731
+        tunnel = "x.trycloudflare.com"
+        with mock.patch.dict(os.environ, {"P2B_HOSTS": tunnel, "P2B_PASSWORD": "s3cret"}):
+            self.assertEqual(self.req("GET", "/api/state"), 401)  # loopback too: the tunnel arrives from 127.0.0.1
+            self.assertEqual(self.req("GET", "/api/state", **auth("wrong")), 401)
+            self.assertEqual(self.req("GET", "/api/state", Authorization="Basic !!"), 401)
+            self.assertEqual(self.req("GET", "/api/state", Host=tunnel, **auth("s3cret")), 200)
+            self.assertEqual(self.req("GET", "/api/state", Host="evil.example", **auth("s3cret")), 403)
+            body = '{"scope": "library", "text": "隧道写入"}'.encode()
+            self.assertEqual(self.req("POST", "/api/threads", body, Host=tunnel, **auth("s3cret"),
+                                      **{"Content-Type": "application/json", "Origin": f"https://{tunnel}"}), 200)
+        from paper2brain import server
+        with mock.patch.dict(os.environ, {"P2B_PASSWORD": ""}), self.assertRaises(SystemExit):
+            server.serve("0.0.0.0", 0)
+
+
+class Handoff(unittest.TestCase):
+    def test_paths_from_the_other_mac_point_here(self):
+        moved, _ = store.add_repo("https://x/a.git", "/Users/old/paper2brain-data/repos/x/a")
+        kept, _ = store.add_repo("https://x/b.git", "/opt/elsewhere/b")
+        twin, _ = store.add_repo("https://x/c.git", "/Users/old/paper2brain-data2/repos/c")  # shares the prefix, not the folder
+        self.assertGreaterEqual(store.rehome("/Users/old/paper2brain-data"), 1)
+        self.assertEqual(store.get_repo(moved)["path"], f"{store.home()}/repos/x/a")
+        self.assertEqual(store.get_repo(kept)["path"], "/opt/elsewhere/b")
+        self.assertEqual(store.get_repo(twin)["path"], "/Users/old/paper2brain-data2/repos/c")
+        self.assertEqual(store.rehome(store.home()), 0)
 
 
 class Diagrams(unittest.TestCase):
@@ -927,6 +1109,20 @@ class Agents(AgentHarness):
         with self.assertRaises(rules.Rejected):
             self.api.set_model("nope", None)
 
+    def test_switching_model_moves_the_discussion_to_a_new_agent_with_its_context(self):
+        from unittest import mock
+        with mock.patch.object(self.api, "pump"):
+            first = self.api.discuss("library", "第一问")
+            t = store.thread_for("library")
+            store.update_run(first, status="FINISHED", text="第一答")
+            run = self.api.discuss("library", "第二问", t["id"], model=self.api.clean_model({"id": "gpt-6", "backend": "tcodex", "x": 1}))
+        r, after = store.get_run(run), store.thread_for(thread_id=t["id"])
+        self.assertNotEqual(after["agent_id"], t["agent_id"])
+        self.assertEqual((r["agent_id"], r["launch"]["model"], after["model"]), (after["agent_id"], {"id": "gpt-6", "backend": "tcodex"}, {"id": "gpt-6", "backend": "tcodex"}))
+        self.assertIn("第一答", r["prompt"])
+        with self.assertRaises(rules.Rejected):
+            self.api.clean_model({"id": 1})
+
     def test_new_agent_is_bound_at_once_and_forgotten_if_never_created(self):
         from unittest import mock
         t = store.thread_for("library")
@@ -945,6 +1141,7 @@ class Agents(AgentHarness):
             '#!/bin/sh\necho "$@" >> "$(dirname "$0")/args"\n'
             'echo \'{"type":"thread.started","thread_id":"s-1"}\'\necho "not json"\n'
             'echo \'{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"./p2b papers"}}\'\n'
+            'echo \'{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion)"}\'\n'
             'echo \'{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"答案"}}\'\n')
         (bin_dir / "tcodex").chmod(0o755)
         self.cfg["backend"] = "tcodex"
@@ -1178,8 +1375,205 @@ class Search(unittest.TestCase):
             self.assertIn("laundry folding", hit["hit_text"])
             self.assertEqual(ids("diffusion 动作头", "threads"), [tid])
             self.assertEqual(store.search("灵巧手")["messages"][0]["scope"], "library")
-            self.assertEqual(ids("flow 不存在的词", "papers"), [])
+            self.assertFalse(store.search("flow 50 Hz")["loose"])
+            loose = store.search("flow 不存在的词")  # nothing has every word: any word, flagged
+            self.assertEqual(([p["id"] for p in loose["papers"]], loose["loose"]), (["arxiv:2410.24164"], True))
             self.assertEqual(ids("100%", "papers"), [])
+
+    def test_title_hits_rank_first_and_unspaced_chinese_falls_back_to_pairs(self):
+        with scratch_home():
+            cid = store.new_id()
+            store.add_capture(cid, "x", "web")
+            store.upsert_paper("arxiv:2501.00011", "某个方法", abstract="用灵巧手抓取")
+            store.upsert_paper("arxiv:2501.00012", "灵巧手抓取")
+            for pid in ("arxiv:2501.00011", "arxiv:2501.00012"):
+                store.link(cid, pid, "rule")
+            self.assertEqual([p["id"] for p in store.search("灵巧手")["papers"]], ["arxiv:2501.00012", "arxiv:2501.00011"])
+            r = store.search("灵巧手的抓取")  # typed without spaces, no literal match
+            self.assertEqual((r["loose"], r["papers"][0]["id"]), (True, "arxiv:2501.00012"))
+
+
+class ShortNames(unittest.TestCase):
+    def test_title_rule(self):
+        for title, name in [("Long-WAM: Scaling the Context", "Long-WAM"), ("π0.5: a VLA Model", "π0.5"), ("GR00T N1: An Open Model", "GR00T N1"),
+                            ("World Action Models are Zero-shot Policies", None), ("Back to the Features: DINO", None), ("Learning to Act: x", None)]:
+            self.assertEqual(rules.title_short_name(title), name, title)
+
+    def test_named_from_abstract_by_the_api_user_name_wins_and_search_finds_it(self):
+        from unittest import mock
+        from paper2brain import cursor_api
+        with scratch_home(), mock.patch.object(cursor_api, "_spawn", side_effect=lambda fn, *a: fn(*a)):
+            cid = store.new_id()
+            store.add_capture(cid, "x", "web")
+            store.upsert_paper("arxiv:2609.34981", "What Makes World Action Models Generalize?", abstract="We propose Simple-WAM ...")
+            store.upsert_paper("arxiv:2610.10528", "Long-WAM: Scaling the Context of World-Action Models")
+            for pid in ("arxiv:2609.34981", "arxiv:2610.10528"):
+                store.link(cid, pid, "rule")
+            self.assertEqual([p["id"] for p in store.unnamed_papers()], ["arxiv:2609.34981"])  # the title already named Long-WAM
+            cursor_api.set_search_api("http://x/v1", "m", "k")
+            with mock.patch.object(cursor_api, "_chat", return_value="Simple-WAM\n"):
+                cursor_api.name_pending()
+            self.assertEqual(store.get_paper("arxiv:2609.34981")["short_name"], "Simple-WAM")
+            self.assertEqual([p["id"] for p in store.search("simple-wam")["papers"]], ["arxiv:2609.34981"])
+            store.set_short_name("arxiv:2610.10528", "LongWAM", "user")
+            store.set_short_name("arxiv:2610.10528", "别的", "agent")
+            self.assertEqual(store.get_paper("arxiv:2610.10528")["short_name"], "LongWAM")
+
+
+class SearchApi(unittest.TestCase):
+    def test_key_kept_when_left_empty_and_empty_url_turns_off(self):
+        from paper2brain import cursor_api
+        with scratch_home():
+            with self.assertRaises(rules.Rejected):
+                cursor_api.set_search_api("v2.open.venus.oa.com", "m", "k")
+            cursor_api.set_search_api("http://x/llmproxy/", "deepseek-v4.1-flash", "secret")
+            cursor_api.set_search_api("http://x/llmproxy", "other-model", "")
+            self.assertEqual(cursor_api.search_api(), {"base_url": "http://x/llmproxy", "model": "other-model", "api_key": "secret"})
+            cursor_api.set_search_api("", "", "")
+            self.assertIsNone(cursor_api.search_api())
+
+    @staticmethod
+    def _resp(lines=(), body=None):
+        import json
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def __iter__(self): return iter(lines)
+            def read(self): return json.dumps(body).encode()
+        return Resp()
+
+    def _serve(self, gemini_text, chat_text, chunks=()):
+        def urlopen(req, timeout=None):
+            if "generateContent" in req.full_url:
+                return self._resp(body={"candidates": [{"content": {"parts": [{"text": gemini_text}]}, "groundingMetadata": {"groundingChunks": list(chunks)}}]})
+            return self._resp(body={"choices": [{"message": {"content": chat_text}}]})
+        return urlopen
+
+    def test_quick_question_answers_from_the_page_and_saves_nothing(self):
+        import json
+        from unittest import mock
+        from paper2brain import cursor_api
+        with scratch_home():
+            with self.assertRaises(rules.Rejected):  # no API configured
+                cursor_api.quick_answer("q", "?", pid="arxiv:2410.24164")
+            cursor_api.set_search_api("http://x/v1", "m", "k")
+            store.upsert_paper("arxiv:2410.24164", "π0")
+            store.set_fulltext("arxiv:2410.24164", "/tmp/x.pdf", PAGES)
+            rid = store.add_research("一步动作头", "user")
+            reply = self._resp(body={"choices": [{"message": {"content": "它说 50 Hz"}}]})
+            with mock.patch("urllib.request.urlopen", return_value=reply) as call:
+                self.assertEqual(cursor_api.quick_answer("up to 50 Hz", "", pid="arxiv:2410.24164", page=2, surface="pdf"), {"text": "它说 50 Hz"})
+                self.assertIn("laundry folding", json.loads(call.call_args[0][0].data)["messages"][0]["content"])  # the page around it
+                cursor_api.quick_answer("主结果", "这说明什么", scope=f"experiment:{rid}")
+                self.assertIn("一步动作头", json.loads(call.call_args[0][0].data)["messages"][0]["content"])
+            self.assertEqual((store.unfinished_runs(), store.anchors_for("arxiv:2410.24164")), ([], []))
+
+    def test_web_find_keeps_only_papers_arxiv_confirms(self):
+        import json
+        from unittest import mock
+        from paper2brain import cursor_api, sources
+        said = json.dumps({"papers": [{"arxiv": "2610.12026", "why": "人形 WAM"}, {"arxiv": "2610.99999", "why": "编的"}]})
+        gemini = self._resp(body={"candidates": [{"content": {"parts": [{"text": said}]},
+                                                  "groundingMetadata": {"groundingChunks": [{"web": {"title": "arxiv.org", "uri": "https://x"}}]}}]})
+        meta = [{"arxiv_id": "2610.12026", "title": "HWAM", "authors": ["A", "B", "C", "D"], "published": "2026-10-08", "url": "https://arxiv.org/abs/2610.12026"}]
+        with scratch_home():
+            cursor_api.set_search_api("https://api.zhizengzeng.com/v1", "m", "k")
+            store.upsert_paper("arxiv:2410.24164", "π0")
+            with mock.patch("urllib.request.urlopen", return_value=gemini) as call, \
+                    mock.patch.object(sources, "arxiv_lookup", return_value=meta) as lookup:
+                got = cursor_api.web_find("人形机器人世界动作模型")
+                self.assertTrue(call.call_args[0][0].full_url.startswith("https://api.zhizengzeng.com/google/v1beta/models/gemini-3.5-flash-lite:generateContent?key=k"))
+                self.assertEqual(lookup.call_args[0][0], ["2610.12026", "2610.99999"])
+                self.assertEqual(cursor_api.quick_answer("WAM", "后来有人改进吗", pid="arxiv:2410.24164", web=True)["sources"],
+                                 [{"title": "arxiv.org", "url": "https://x"}])
+        self.assertEqual(got["papers"], [{"pid": "arxiv:2610.12026", "title": "HWAM", "authors": ["A", "B", "C"], "published": "2026-10-08",
+                                          "url": "https://arxiv.org/abs/2610.12026", "why": "人形 WAM", "in_library": False}])
+
+    def test_google_itself_as_the_search_api(self):
+        import json
+        from unittest import mock
+        from paper2brain import cursor_api
+        with scratch_home():
+            cursor_api.set_search_api("https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash-lite", "AQ.k")
+            api = cursor_api.search_api()
+            with mock.patch("urllib.request.urlopen", return_value=self._resp(body={"choices": [{"message": {"content": "好"}}]})) as call:
+                cursor_api._chat(api, "hi")
+                self.assertNotIn("thinking", json.loads(call.call_args[0][0].data))
+            with mock.patch("urllib.request.urlopen", return_value=self._resp(body={"candidates": [{"content": {"parts": [{"text": "x"}]}}]})) as call:
+                cursor_api._web(api, "hi")
+                self.assertEqual(call.call_args[0][0].full_url,
+                                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=AQ.k")
+
+    def test_arxiv_lookup_falls_back_to_abs_pages_when_rate_limited(self):
+        import urllib.error
+        from unittest import mock
+        from paper2brain import sources
+        page = ('<meta name="citation_title" content="RT-Trajectory: Hindsight Sketches" /><meta name="citation_author" content="Gu, Jiayuan" />'
+                '<meta name="citation_date" content="2023/11/03" />').encode()
+
+        def get(url, timeout=25):
+            if "export.arxiv.org" in url:
+                raise urllib.error.HTTPError(url, 429, "", {}, None)
+            if url.endswith("2311.01977"):
+                return url, page, "text/html"
+            raise urllib.error.HTTPError(url, 404, "", {}, None)
+        with mock.patch.object(sources, "http_get", side_effect=get), mock.patch.object(sources, "_last_call", [0.0]):
+            got = sources.arxiv_lookup(["2311.01977", "2311.99999"])
+        self.assertEqual([(f["title"], f["authors"], f["published"]) for f in got], [("RT-Trajectory: Hindsight Sketches", ["Jiayuan Gu"], "2023-11-03")])
+
+    def test_search_overview_checks_web_results(self):
+        import json
+        from unittest import mock
+        from paper2brain import cursor_api, sources
+        web = [{"title": "Latent Action Pretraining", "url": "https://arxiv.org/abs/2410.11758", "why": "对"},
+               {"title": "完全不同的标题", "url": "https://arxiv.org/abs/2312.13139", "why": "标题对不上"},
+               {"title": "编的", "url": "https://arxiv.org/abs/2604.xxxxx", "why": "编号是假的"},
+               {"title": "库里已有", "url": "https://arxiv.org/abs/2410.24164", "why": "重复"},
+               {"title": "Robot Flow", "url": "https://openreview.net/forum?id=abc", "why": "搜索去过这个站"},
+               {"title": "博客", "url": "https://blog.example.com/x", "why": "搜索没去过"}]
+        said = json.dumps({"answer": "看视频学动作", "web": web}, ensure_ascii=False)
+        gemini = self._serve(said, json.dumps({"ids": ["2410.24164"]}), [{"web": {"title": "openreview.net", "uri": "https://r"}}])
+        meta = [{"arxiv_id": "2410.11758", "title": "Latent Action Pretraining from Videos", "authors": [], "published": "2024-10-15", "url": "https://arxiv.org/abs/2410.11758"},
+                {"arxiv_id": "2312.13139", "title": "Unleashing Large-Scale Video Generative Pre-training", "authors": [], "published": "2023-12-20", "url": "https://arxiv.org/abs/2312.13139"}]
+        with scratch_home():
+            cursor_api.set_search_api("https://api.zhizengzeng.com/v1", "m", "k")
+            cid = store.new_id()
+            store.add_capture(cid, "x", "web")
+            store.upsert_paper("arxiv:2410.24164", "π0")
+            store.link(cid, "arxiv:2410.24164", "rule")
+            with mock.patch("urllib.request.urlopen", side_effect=gemini), mock.patch.object(sources, "arxiv_lookup", return_value=meta):
+                r = cursor_api.ai_search("让机器人看视频学操作")
+        self.assertEqual((r["answer"], [p["id"] for p in r["papers"]]), ("看视频学动作", ["arxiv:2410.24164"]))
+        self.assertEqual([(w["title"], w["url"]) for w in r["web"]], [("Latent Action Pretraining from Videos", "https://arxiv.org/abs/2410.11758"),
+                                                                     ("Robot Flow", "https://openreview.net/forum?id=abc")])
+
+    def test_papers_called_by_name_are_looked_up_on_arxiv_first(self):
+        import json
+        from unittest import mock
+        from paper2brain import cursor_api, sources
+        long_wam = {"arxiv_id": "2610.10528", "pid": "arxiv:2610.10528", "title": "Long-WAM: Scaling the Context of World-Action Models",
+                    "published": "2026-10-07", "url": "https://arxiv.org/abs/2610.10528", "authors": []}
+        said = json.dumps({"answer": "两篇都是 WAM", "web": [{"title": "Long-WAM", "url": "https://arxiv.org/abs/2610.10528"}]})
+        gemini = self._serve(said, json.dumps({"ids": []}))
+        with scratch_home():
+            cursor_api.set_search_api("https://api.zhizengzeng.com/v1", "m", "k")
+            with mock.patch("urllib.request.urlopen", side_effect=gemini), \
+                    mock.patch.object(sources, "keyword_search", side_effect=lambda t: [long_wam] if t == ["Long-WAM"] else []) as ks, \
+                    mock.patch.object(sources, "arxiv_lookup", return_value=[]):
+                r = cursor_api.ai_search("simple-WAM和Long-WAM")
+        self.assertEqual(ks.call_args_list, [mock.call(["simple-WAM"]), mock.call(["Long-WAM"])])
+        self.assertEqual(([w["pid"] for w in r["web"]], r["named"]), (["arxiv:2610.10528"], True))
+
+    def test_discussions_are_titled_through_the_api(self):
+        from unittest import mock
+        from paper2brain import cursor_api
+        with scratch_home(), mock.patch.object(cursor_api, "_spawn", side_effect=lambda fn, *a: fn(*a)):
+            cursor_api.set_search_api("http://x/v1", "m", "k")
+            tid = store.new_thread("library", text="和 DP 比一下")
+            with mock.patch("urllib.request.urlopen", return_value=self._resp(body={"choices": [{"message": {"content": "「flow matching 和 DP 的区别」\n"}}]})):
+                cursor_api.distill_pending()
+            self.assertEqual(store.thread_for(thread_id=tid)["title"], "flow matching 和 DP 的区别")
 
 
 class Migrations(unittest.TestCase):

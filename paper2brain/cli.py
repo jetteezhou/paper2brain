@@ -133,7 +133,7 @@ def run(args):
             return e
         body = (store.get_research(e["research_id"]) or {}).get("body") or {}
         draft = rules.validate_experiment(_read_json(args.file), e["raw"], "\n".join(filter(None, body.values())))
-        rev = store.update_experiment(args.id, "agent", args.base_rev, **draft)
+        rev = store.update_experiment(args.id, "agent", args.base_rev, args.asked, **draft)
         return {"accepted": True, "revision": rev}
     if cmd == "writing":
         if args.action == "show":
@@ -337,6 +337,7 @@ def parser():
     s.add_argument("--title")
     s.add_argument("--file")
     s.add_argument("--base-rev", type=int)
+    s.add_argument("--asked", action="store_true", help="用户在讨论里确认了这次修改，可以改他手动改过的记录")
     s = sub.add_parser("writing", help="研究的摘要与引言草稿：show / propose 提交修改稿待用户确认")
     s.add_argument("action", choices=["show", "propose"])
     s.add_argument("id", help="研究 id")

@@ -47,7 +47,7 @@
    - 讨论全文 `./p2b thread show <id>`；附件全文 `./p2b doc <doc id>`（图片附件随提示词发给你）。
    - 论文的 `role` 是用户标的用途：`baseline` / `reproduce` 是验证方案的对比对象，`method` 是方法的来源，`support` / `counter` 用来支撑或追问研究问题。角色只由用户标，你不改。
 3. 读论文：`./p2b show paper <id>` 看快读卡，`./p2b text <id> --pages ...` 读关键页，引用要落到页码。
-4. 找相关工作：`./p2b search "关键词"`、`./p2b papers --topic "VLA"`。最接近的那篇工作库里没有时，先 `./p2b fetch` 入库再引用；来不及就标"（库外，未核对）"，且不能写进带引用的三要素里。
+4. 找相关工作：`./p2b search "关键词"`、`./p2b papers --topic "VLA"`。要提到的工作库里没有时，先 `./p2b fetch` 入库再引用（见 `librarian/README.md` 铁律 7）；入不了库才标"（库外，未核对）"，且不能写进三要素里。
 
 ## 研究讨论（研究页上的对话）
 

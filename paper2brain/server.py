@@ -1,7 +1,9 @@
 """Local web server: JSON API for the web UI plus static files. Same store and rules as the CLI."""
 import base64
+import hmac
 import json
 import mimetypes
+import os
 import re
 import threading
 import time
@@ -40,7 +42,7 @@ class Reply:
 def state(q, body):
     agent = {**cursor_api.status(), "home": str(store.home()), "repo_dir": str(WEB.parent)}
     return {"counts": store.counts(), "topics": store.topic_tree(), "topic_proposals": store.topic_proposals(), "agent": agent,
-            "activity": store.activity()}
+            "activity": store.activity(), "working": store.working(), "recent": store.recent_work()}
 
 
 @route("POST", "/api/topics")
@@ -73,6 +75,11 @@ def activity_day(q, body, day):
 @route("GET", "/api/search")
 def search(q, body):
     return store.search(q.get("q", ""))
+
+
+@route("GET", "/api/search/ai")
+def search_ai(q, body):
+    return cursor_api.ai_search(q.get("q", "").strip()) if q.get("q", "").strip() else None
 
 
 # ---------- captures ----------
@@ -212,6 +219,58 @@ def paper_get(q, body, pid):
     s = structure.get(pid)
     return {**p, "figures": s["figures"], "key_figures": structure.key_figures(s, p["card"]), "outline": s["outline"],
             "key_sections": s["key"]}
+
+
+@route("POST", "/api/papers/([^/]+)/add")
+def paper_add(q, body, pid):
+    """A citation the user clicked: a paper the library doesn't list yet goes in as if its link had been pasted."""
+    p = store.get_paper(pid, with_anchors=False) or pipeline.resolve_paper(pid)
+    if p["listed"]:
+        return {**p, "added": False}
+    cap, _ = store.add_capture(str(uuid.uuid4()), rules.id_label(p["id"]), "web")
+    store.link(cap["id"], p["id"], "user", evidence="用户点开了引用")
+    store.update_capture(cap["id"], status="mapped")
+    if cursor_api.status()["enabled"] and not p.get("card"):
+        bg(cursor_api.process_capture, cap["id"])
+    return {**store.get_paper(p["id"], with_anchors=False), "added": True}
+
+
+@route("POST", "/api/papers/([^/]+)/name")
+def paper_name(q, body, pid):
+    store.set_short_name(pid, body.get("name"), "user")
+    return {"ok": True}
+
+
+@route("DELETE", "/api/papers/([^/]+)")
+def paper_delete(q, body, pid):
+    try:
+        return {"trash_id": store.delete_paper(pid)}
+    except KeyError:
+        raise rules.Rejected("这篇论文不存在或已删除")
+
+
+@route("DELETE", "/api/threads/([^/]+)")
+def thread_delete(q, body, tid):
+    try:
+        return {"trash_id": store.delete_thread(tid)}
+    except KeyError:
+        raise rules.Rejected("这段讨论不存在或已删除")
+
+
+@route("GET", "/api/trash")
+def trash_list(q, body):
+    return store.list_trash()
+
+
+@route("POST", "/api/trash/([^/]+)/restore")
+def trash_restore(q, body, tid):
+    return store.restore_trash(tid)
+
+
+@route("DELETE", "/api/trash/([^/]+)")
+def trash_purge(q, body, tid):
+    store.purge_trash(tid)
+    return {"ok": True}
 
 
 @route("GET", r"/api/papers/([^/]+)/figures/(\d+)")
@@ -672,6 +731,23 @@ def agent_model_set(q, body):
     return {"ok": True}
 
 
+@route("GET", "/api/agent/search-api")
+def search_api_get(q, body):
+    api = cursor_api.search_api() or {}
+    return {"base_url": api.get("base_url", ""), "model": api.get("model", ""), "web_model": api.get("web_model", ""), "has_key": bool(api.get("api_key"))}
+
+
+@route("POST", "/api/agent/search-api")
+def search_api_set(q, body):
+    cursor_api.set_search_api(body.get("base_url"), body.get("model"), body.get("api_key"), body.get("web_model"))
+    return {"ok": True}
+
+
+@route("POST", "/api/agent/login")
+def agent_login(q, body):
+    return cursor_api.login(body.get("cli"))
+
+
 @route("POST", "/api/agent/backend")
 def agent_backend_set(q, body):
     cursor_api.set_backend(body.get("backend"))
@@ -701,13 +777,32 @@ def thread_edit(q, body, tid):
 
 @route("POST", "/api/chat")
 def chat(q, body):
-    """reply: false writes the line into the discussion without asking the agent (also works with no agent)."""
+    """reply: false writes the line into the discussion without asking the agent (also works with no agent).
+    redo: true replaces the last answer: its question is asked again, on the given model if any."""
     text = (body.get("text") or "").strip()
-    if not text:
+    model = body.get("model") and cursor_api.clean_model(body["model"])
+    if body.get("redo") is True:
+        return {"run_id": cursor_api.discuss(body["scope"], "", body.get("thread_id"), model=model, redo=True)}
+    images = [(base64.b64decode(i["data"]), i["mime"]) for i in body.get("images") or []
+              if i.get("mime") in ("image/png", "image/jpeg", "image/gif", "image/webp")][:5]
+    if not text and not (images and body.get("reply") is not False):
         raise rules.Rejected("问题不能为空")
     if body.get("reply") is False:
         return {"message_id": store.add_message(store.thread_for(body["scope"], body.get("thread_id"))["id"], "user", text)}
-    return {"run_id": cursor_api.discuss(body["scope"], text, body.get("thread_id"))}
+    if images:
+        text = f"{text}\n\n（附了 {len(images)} 张图）".strip()
+    return {"run_id": cursor_api.discuss(body["scope"], text, body.get("thread_id"), images=images, model=model)}
+
+
+@route("POST", "/api/quick")
+def quick(q, body):
+    return cursor_api.quick_answer(body.get("quote"), body.get("question"), body.get("scope"), body.get("pid"), body.get("page"),
+                                   body.get("surface"), web=body.get("web") is True)
+
+
+@route("POST", "/api/find/web")
+def find_web(q, body):
+    return cursor_api.web_find(body.get("text"))
 
 
 @route("GET", "/api/runs/([^/]+)")
@@ -751,14 +846,26 @@ class Handler(BaseHTTPRequestHandler):
     def _refuse(self, method):
         """Any web page the user has open can send requests to 127.0.0.1. Host must name this server (DNS rebinding);
         writes must come from our own page (Origin) as JSON, which a cross-site form or no-cors fetch cannot send.
-        Clients that send no Origin at all (curl) are not browsers and are let through."""
+        Clients that send no Origin at all (curl) are not browsers and are let through. P2B_HOSTS adds names reached
+        from elsewhere (a LAN IP, a tunnel domain); P2B_PASSWORD then guards every request, loopback included,
+        since a tunnel reaches us from 127.0.0.1."""
         host, port = self.headers.get("Host", ""), self.server.server_address[1]
-        if host not in {f"{h}:{port}" for h in ("127.0.0.1", "localhost", self.server.server_address[0])}:
-            return 403, "Host 不对：只接受 127.0.0.1 或 localhost 上的访问"
+        extra = _hosts()
+        if host not in {f"{h}:{port}" for h in ("127.0.0.1", "localhost", self.server.server_address[0], *extra)} | set(extra):
+            return 403, "Host 不对：只接受 127.0.0.1、localhost 或 P2B_HOSTS 里的地址"
+        password = _password()
+        if password:
+            kind, _, cred = self.headers.get("Authorization", "").partition(" ")
+            try:
+                given = base64.b64decode(cred).decode().partition(":")[2] if kind == "Basic" else ""
+            except ValueError:
+                given = ""
+            if not hmac.compare_digest(given.encode(), password.encode()):
+                return 401, "需要访问口令"
         if method == "GET":
             return None
         origin = self.headers.get("Origin")
-        if origin is not None and origin != f"http://{host}":
+        if origin is not None and origin not in (f"http://{host}", f"https://{host}"):
             return 403, "跨站请求被拒绝"
         if method == "POST" and self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return 415, "请求体必须是 application/json"
@@ -766,6 +873,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method):
         refused = self._refuse(method)
+        if refused and refused[0] == 401:
+            data = json.dumps({"error": refused[1]}, ensure_ascii=False).encode()
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="paper2brain", charset="UTF-8"')
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return self.wfile.write(data)
         if refused:
             return self._json(refused[0], {"error": refused[1]})
         url = urllib.parse.urlsplit(self.path)
@@ -809,7 +924,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def _poll_inbox():
     while True:
-        for job in (store.backup, cursor_api.expire_stale, inbox.drain, cursor_api.distill_pending, cursor_api.deepread_pending,
+        for job in (store.backup, cursor_api.expire_stale, inbox.drain, cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending,
                     cursor_api.card_pending, structure.backfill):
             try:
                 job()
@@ -818,7 +933,23 @@ def _poll_inbox():
         time.sleep(20)
 
 
+def _config():
+    path = store.home() / "config.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _password():
+    return os.environ.get("P2B_PASSWORD") or _config().get("password")
+
+
+def _hosts():
+    """P2B_HOSTS (comma-separated) and config.json "hosts", read on every request so a new tunnel domain needs no restart."""
+    return [h.strip() for h in os.environ.get("P2B_HOSTS", "").split(",") + list(_config().get("hosts") or []) if h.strip()]
+
+
 def serve(host="127.0.0.1", port=8765):
+    if (host not in ("127.0.0.1", "localhost") or _hosts()) and not _password():
+        raise SystemExit("对本机以外开放（--host 或 P2B_HOSTS）时必须设置 P2B_PASSWORD：这个服务能让 agent 在本机执行命令")
     store.counts()
     cursor_api.resume_watchers()
     bg(_poll_inbox)

@@ -7,7 +7,7 @@ import pymupdf
 
 from . import store
 
-VERSION = 2
+VERSION = 3  # 3: figures cropped at 200 dpi (was 150), so the card's images stay sharp on retina screens
 CAPTION = re.compile(r"^\s*(?:Figure|Fig\.)\s*(\d+)\s*[:.|]", re.I)
 _TABLE = re.compile(r"^\s*Table\s*\d+", re.I)
 _HEADING = re.compile(r"^(\d+(?:\.\d+)*)\.?\s+([A-Z][^\n]{2,80})$")
@@ -119,7 +119,7 @@ def extract(pid):
                         if n in seen:
                             continue
                         seen.add(n)
-                        pix = page.get_pixmap(clip=box, dpi=150)
+                        pix = page.get_pixmap(clip=box, dpi=200)
                         pix.save(figdir / f"{n}.png")
                         out["figures"].append({"n": n, "page": number, "caption": caption[:600], "w": pix.width, "h": pix.height})
                 out["outline"] = _outline(doc)

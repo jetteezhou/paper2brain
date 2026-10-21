@@ -4,9 +4,9 @@
 // with tributaries inline where they fork — or the delta, a living canvas of the whole tree (zoom, pan, drag to move).
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, ago, short, plain, threadName, live, Md, firstSentence, enc, fit, touch, Mark } from './lib.js';
+import { html, get, post, del, ago, short, plain, threadName, live, Md, firstSentence, enc, fit, touch, Mark, readBase64 } from './lib.js';
 import {
-  appState, agentOn, useLive, refresh, toast, fail, openThread, openReader, openCapture, openResearch, highlight, go, quoting,
+  appState, agentOn, useLive, refresh, toast, fail, restoreTrash, openThread, openReader, openCapture, openResearch, highlight, go, quoting,
 } from './state.js';
 import { researchPicker, openComposer, ResearchChip } from './research.js';
 import { PaperChip } from './papers.js';
@@ -173,17 +173,52 @@ function TitleLine({ t: thread }) {
 /** The input every discussion ends in: Enter sends to the agent, ⌥Enter (or the button) only jots it down. */
 export function Composer({ t, reload, draft, setDraft, input }) {
   const on = agentOn.value;
+  const [imgs, setImgs] = useState([]);
+  const [models] = useLive(on ? '/api/agent/models' : null, { poll: false });
+  const [chosen, setChosen] = useState(null);
+  useEffect(() => setChosen(null), [t.id]);
+  // a model is picked by backend and id together: both backends can offer the same id
+  const key = (m) => m && `${m.backend || 'cursor'}:${m.id}`;
+  const switchTo = chosen && chosen !== key(t.model) ? models?.models.find((m) => key(m) === chosen) : null;
+  const addImgs = async (fs) => {
+    fs = fs.filter((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
+    if (!fs.length) return false;
+    const got = await Promise.all(fs.map(async (f) => ({ mime: f.type, data: await readBase64(f) })));
+    setImgs((xs) => [...xs, ...got].slice(0, 5));
+    return true;
+  };
   const send = async (reply) => {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft('');
-    try { await post('/api/chat', { scope: t.scope, text, thread_id: t.id, ...(reply ? {} : { reply: false }) }); reload(); refresh(); } catch (e) { setDraft(text); fail(e); }
+    const text = draft.trim(), images = reply ? imgs : [];
+    if (!text && !images.length) return;
+    setDraft(''); if (images.length) setImgs([]);
+    const model = reply && switchTo ? { id: switchTo.id, backend: switchTo.backend } : undefined;
+    try { await post('/api/chat', { scope: t.scope, text, thread_id: t.id, model, ...(reply ? { images } : { reply: false }) }); if (model) setChosen(null); reload(); refresh(); } catch (e) { setDraft(text); setImgs(images); fail(e); }
+  };
+  const last = t.messages[t.messages.length - 1];
+  const canRedo = on && last?.role === 'assistant' && !live(last.run_status);
+  const redo = async () => {
+    const model = switchTo ? { id: switchTo.id, backend: switchTo.backend } : undefined;
+    try { await post('/api/chat', { scope: t.scope, thread_id: t.id, model, redo: true }); setChosen(null); reload(); refresh(); } catch (e) { fail(e); }
   };
   useEffect(() => fit(input.current), [draft]);
-  return html`<form class="chat-input" onSubmit=${(e) => { e.preventDefault(); send(on); }}>
+  const pick = (e) => { addImgs([...e.target.files]); e.target.value = ''; };
+  return html`<form class="chat-input" onSubmit=${(e) => { e.preventDefault(); send(on); }}
+    onDragOver=${(e) => on && e.preventDefault()}
+    onDrop=${(e) => { if (on && [...e.dataTransfer.files].some((f) => f.type.startsWith('image/'))) { e.preventDefault(); addImgs([...e.dataTransfer.files]); } }}>
+    ${imgs.length ? html`<div class="chat-imgs">${imgs.map((f, j) => html`<div class="thumb"><img src=${`data:${f.mime};base64,${f.data}`} alt="" />
+      <button type="button" aria-label="移除" onClick=${() => setImgs(imgs.filter((_, k) => k !== j))}>×</button></div>`)}</div>` : null}
+    ${on ? html`<label class="btn ghost chat-attach" title="附图片（也可以直接粘贴或拖进来），最多 5 张">＋<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange=${pick} /></label>` : null}
     <textarea rows="1" ref=${input} value=${draft} onInput=${(e) => setDraft(e.target.value)}
+      onPaste=${(e) => { const fs = [...(e.clipboardData?.files || [])]; if (on && fs.length) { e.preventDefault(); e.stopPropagation(); addImgs(fs); } }}
       onKeyDown=${(e) => { if (e.key === 'Enter' && !e.isComposing && (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch))) { e.preventDefault(); send(on && !e.altKey); } }}
       placeholder=${touch ? (on ? '问点什么…' : 'Agent 未连接：先记下，连上后再接着聊') : on ? '问点什么… 回车发送，⌥回车只记下，Shift+回车换行' : 'Agent 未连接：回车只记下，连上后再接着聊'}></textarea>
+    ${on && models ? html`<select class="chat-model" value=${chosen || key(t.model) || ''} onChange=${(e) => setChosen(e.target.value)}
+        title=${switchTo ? '下一句会换到这个模型：新开一个 agent，带上前面说过的' : '这段讨论用的模型'}>
+      ${t.model ? null : html`<option value="">默认模型</option>`}
+      ${t.model && !models.models.some((m) => key(m) === key(t.model)) ? html`<option value=${key(t.model)}>${t.model.id}</option>` : null}
+      ${models.models.map((m) => html`<option value=${key(m)}>${m.displayName || m.id}</option>`)}</select>` : null}
+    ${canRedo ? html`<button type="button" class="btn ghost" onClick=${redo}
+      title=${switchTo ? `用 ${switchTo.displayName || switchTo.id} 重新回答上一个问题，替换掉现在的回答` : '重新回答上一个问题，替换掉现在的回答（可以先在左边换个模型）'}>重新生成</button>` : null}
     ${on ? html`<button type="button" class="btn ghost" title="只记下，不叫 agent 回答" onClick=${() => send(false)}>记下</button>` : null}
     <button class="btn primary">${on ? '发送' : '记下'}</button></form>`;
 }
@@ -194,6 +229,17 @@ function EmptyChat({ t, setDraft, input }) {
   return html`<div class="chat-empty"><b>讨论${scopeLabel(t.scope, t.scope_title)}</b><p class="hint">回答会引用原文页码；值得留下的结论可以存成笔记。</p>
     <div class="sugs">${(SUGGEST[kindOf(t.scope)] || SUGGEST.library).map((s) => html`<button class="sug" disabled=${!on} onClick=${() => { setDraft(s); setTimeout(() => input.current?.focus()); }}>${s}</button>`)}</div></div>`;
 }
+
+/** Delete a discussion into the trash: then() moves off it, undo restores it and back() returns to it. */
+async function removeThread(t, then, back) {
+  let r;
+  try { r = await del(`/api/threads/${enc(t.id)}`); } catch (e) { fail(e); return; }
+  then();
+  refresh();
+  const name = t.title || t.messages.find((m) => m.role === 'user' && m.text)?.text || threadName(t);
+  toast(`已删除讨论「${short(name, 24)}」，可在“最近删除”找回`, '撤销', async () => { if (await restoreTrash(r.trash_id)) back(); }, false, 10000);
+}
+const DeleteThread = ({ onClick }) => html`<button class="btn sm ghost danger" onClick=${onClick} title="移到“最近删除”，30 天内可以恢复">删除</button>`;
 
 export function Chat({ scope, threadId, onThread, inWorkbench }) {
   const [tid, setTid] = useState(threadId || null);
@@ -242,7 +288,8 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
       ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${() => branch(null)} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
-      ${n || t.path.length ? html`<button class="btn sm ghost" onClick=${() => branch(null, true)} title="同一范围，不带前面的上下文，从头开始">发起新讨论</button>` : null}</div>
+      ${n || t.path.length ? html`<button class="btn sm ghost" onClick=${() => branch(null, true)} title="同一范围，不带前面的上下文，从头开始">发起新讨论</button>` : null}
+      ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => switchTo(t.parent_id || sib.find((s) => s.id !== t.id)?.id || null), () => switchTo(t.id))} />` : null}</div>
     ${n || t.path.length ? html`<div class="tree-bar">
       ${t.path.length ? html`<div class="crumbs">${t.path.map((s) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(s.id); }}>${short(threadName(s), 24)}</a><span>›</span>`)}</div>` : null}
       <${TitleLine} t=${t} />
@@ -324,7 +371,8 @@ function River({ t, reload }) {
       <${ScopeOpen} scope=${t.scope} />
       ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
-      ${n ? html`<button class="btn sm ghost" onClick=${branch} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}</div>
+      ${n ? html`<button class="btn sm ghost" onClick=${branch} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
+      ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => go('discuss', t.parent_id || undefined), () => go('discuss', t.id))} />` : null}</div>
     ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
     <div class="river-flow" ref=${box}>
       ${chain.map((seg, i) => i < chain.length - 1
@@ -358,14 +406,15 @@ const setFold = (id, on) => {
 const zoom = signal(null);
 const pane = signal('river');
 
-/** Nodes keyed by id with children in a stable order: newest root first, each node's branches oldest first. */
+/** Nodes keyed by id: newest activity first at every level, so the latest discussion sits at the top. */
 function buildTree(list) {
   const byId = Object.fromEntries(list.map((t) => [t.id, { ...t, kids: [] }]));
   const roots = [];
   for (const t of Object.values(byId)) (byId[t.parent_id] ? byId[t.parent_id].kids : roots).push(t);
-  const asc = (a, b) => (a.created_at < b.created_at ? -1 : 1);
-  for (const t of Object.values(byId)) t.kids.sort(asc);
-  roots.sort((a, b) => -asc(a, b));
+  const when = (t) => t.last_at || t.created_at;
+  const desc = (a, b) => (when(a) < when(b) ? 1 : when(a) > when(b) ? -1 : 0);
+  for (const t of Object.values(byId)) t.kids.sort(desc);
+  roots.sort(desc);
   return { byId, roots };
 }
 const under = (byId, id, ancestor) => { for (let u = byId[id]?.parent_id; u; u = byId[u]?.parent_id) if (u === ancestor) return true; return false; };

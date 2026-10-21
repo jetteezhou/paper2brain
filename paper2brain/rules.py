@@ -59,6 +59,13 @@ def paper_id(arxiv_id):
     return "arxiv:" + arxiv_id
 
 
+def title_short_name(title):
+    """The name a title opens with ("Long-WAM: Scaling ..." -> "Long-WAM"): at most 3 words, each capitalized."""
+    head, sep, _ = (title or "").partition(":")
+    words = head.split()
+    return head.strip() if sep and 1 <= len(words) <= 3 and len(head) <= 30 and all(re.match(r"[A-Z0-9π]", w) for w in words) else None
+
+
 def id_label(pid):
     kind, _, ref = pid.partition(":")
     return {"arxiv": f"arXiv {ref}", "doi": f"DOI {ref}", "openreview": f"OpenReview {ref}"}.get(kind, "PDF")
@@ -158,7 +165,7 @@ def validate_card(card, pages, figures=()):
 
 def validate_report(report, pages):
     if not isinstance(report, dict) or not isinstance(report.get("sections"), list) or not report["sections"]:
-        raise Rejected("深读报告必须是 {sections: [{heading, body, citations}]}")
+        raise Rejected("深读报告必须是 {sections: [{heading, points: [{text, citations}]}]}")
     if not pages:
         raise Rejected("这篇论文还没有全文（./p2b fetch 没拿到 PDF）。请在回复里请用户上传 PDF，或用 ./p2b fetch <PDF 链接> 补上")
     errors, sections, total = [], [], 0
@@ -166,11 +173,29 @@ def validate_report(report, pages):
         if not isinstance(s, dict):
             errors.append(f"第 {i} 节必须是对象")
             continue
-        heading, body = _text(s, "heading", errors), _text(s, "body", errors)
-        fixed, cite_errors = verify_citations(s.get("citations") or [], pages)
-        errors += [f"第 {i} 节：{e}" for e in cite_errors]
-        total += len(fixed)
-        sections.append({"heading": heading, "body": body, "citations": fixed})
+        heading, points = _text(s, "heading", errors), s.get("points")
+        if not isinstance(points, list) or not points:
+            errors.append(f"第 {i} 节：points 至少要有一段，每段为 {{text, citations}}")
+            points = []
+        out = []
+        for j, pt in enumerate(points, 1):
+            where = f"第 {i} 节第 {j} 段"
+            if not isinstance(pt, dict) or not _text(pt, "text", [], True):
+                errors.append(f"{where}缺少 text")
+                continue
+            fixed, cite_errors = verify_citations(pt.get("citations") or [], pages)
+            errors += [f"{where}：{e}" for e in cite_errors]
+            if not pt.get("citations"):
+                errors.append(f"{where}：每段至少要有一条原文引用，写明它是从哪句话读出来的")
+            n = len(pt.get("citations") or [])
+            if {int(k) for k in re.findall(r"\[(\d+)\]", pt["text"])} != set(range(1, n + 1)):
+                errors.append(f"{where}：在依据的那句话后面写 [1]、[2]… 标出它对应第几条引用；每条引用都要标，不能标不存在的编号")
+            if len(pt["text"].strip()) > 300 or n > 3:
+                errors.append(f"{where}太大（{len(pt['text'].strip())} 字、{len(pt.get('citations') or [])} 条引用，上限 300 字、3 条）："
+                              "一段只讲一个要点，拆成几段，各自挂上依据的原句")
+            total += len(fixed)
+            out.append({"text": pt["text"].strip(), "citations": fixed})
+        sections.append({"heading": heading, "points": out})
     if total < 3:
         errors.append("全文至少要有 3 条可核对的引用")
     if errors:

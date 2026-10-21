@@ -1,7 +1,7 @@
 // App-wide state as signals, the hash router, and the few cross-view moves (open a paper, a thread, a research).
 import { signal, computed } from '@preact/signals';
 import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
-import { get, enc } from './lib.js';
+import { get, post, enc } from './lib.js';
 
 // ---------- routing: #/view/arg ; #/read/<pid>@<page> opens the reader over the last view ----------
 
@@ -70,16 +70,20 @@ export function useLive(url, { poll = true } = {}) {
 
 export const toastSig = signal(null);
 let toastTimer;
-export function toast(text, action, onAction, isError) {
+export function toast(text, action, onAction, isError, ms) {
   toastSig.value = { text, action, onAction, isError };
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toastSig.value = null), action ? 6000 : 3000);
+  toastTimer = setTimeout(() => (toastSig.value = null), ms || (isError ? 10000 : action ? 6000 : 3000));
 }
 export const fail = (e) => toast(e?.message || String(e), null, null, true);
+/** Put a recently deleted paper or discussion back; resolves to { kind, ref, scope }, or null when it failed. */
+export async function restoreTrash(id) {
+  try { const r = await post(`/api/trash/${enc(id)}/restore`); toast('已恢复'); refresh(); return r; } catch (e) { fail(e); return null; }
+}
 
-/** A vnode shown in the modal; wide: the large composer layout. */
+/** A vnode shown in the modal; wide: the large composer layout; back: where focus returns on close. */
 export const modalSig = signal(null);
-export const openModal = (vnode, wide = false) => { modalSig.value = { vnode, wide }; };
+export const openModal = (vnode, wide = false) => { modalSig.value = { vnode, wide, back: modalSig.value?.back || document.activeElement }; };
 export const closeModal = () => { modalSig.value = null; };
 
 // ---------- actions inside agent-written HTML (Markdown citations), handled by one click delegate ----------
@@ -99,6 +103,9 @@ export function openReader(pid, intent = {}) {
   readerIntent.value = intent;
   location.hash = `#/read/${enc(pid)}${intent.page ? '@' + intent.page : ''}`;
 }
+/** A paper's PDF in a floating window over whatever is open: { pid, page, q }. */
+export const peek = signal(null);
+export const peekPaper = (pid, page, q) => { peek.value = { pid, page, q }; };
 /** The message to flash once a discussion is on screen. */
 export const highlight = signal(null);
 /** A passage selected on a page, waiting to be quoted into that scope's discussion input: { scope, text }. */
@@ -114,9 +121,18 @@ export async function openThread(scope, threadId, mid) {
   selected.value = { kind: 'thread', id: threadId };
   go('discuss', threadId);
 }
-export const openPaper = (pid) => openItem('paper', pid, 'papers');
+/** A cited paper the library doesn't list yet is taken in first (like pasting its link); returns its stored paper. */
+export async function addPaper(pid) {
+  const p = await post(`/api/papers/${enc(pid)}/add`);
+  if (p.added) { toast(`已收下《${p.title}》到论文库`); refresh(); }
+  return p;
+}
+export async function openPaper(pid) {
+  try { openItem('paper', (await addPaper(pid)).id, 'papers'); } catch (e) { fail(e); }
+}
 export const openResearch = (id) => openItem('research', id, 'research');
 export const openCapture = (id) => openItem('capture', id, 'inbox');
 
-registerAction('open-paper', (el) => openPaper(el.dataset.pid));
+// on a research page a citation is checked in place: the peek window, which can still open the reader
+registerAction('open-paper', (el) => (route.value.view === 'research' ? peekPaper(el.dataset.pid) : openPaper(el.dataset.pid)));
 registerAction('cite', (el) => openReader(el.dataset.pid, { page: +el.dataset.page, q: el.getAttribute('title') }));

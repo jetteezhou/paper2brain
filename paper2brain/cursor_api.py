@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -68,7 +69,8 @@ def status():
     cfg, ready = config(), [b for b in BACKENDS if not _missing(b)]
     names = {"cursor": cfg["machine"], "tcodex": "TCodex"}
     return {"enabled": bool(ready), "missing": [] if ready else _missing(cfg["backend"]), "machine": " + ".join(names[b] for b in ready),
-            "auto_agent": cfg["auto_agent"], "backend": cfg["backend"], "backends": {b: b in ready for b in BACKENDS}}
+            "auto_agent": cfg["auto_agent"], "backend": cfg["backend"], "backends": {b: b in ready for b in BACKENDS},
+            "search_ai": search_ai_ready(), "search_api": bool(search_api())}
 
 
 def _backend_of(model=None, agent_id=None):
@@ -89,6 +91,7 @@ MODULES = {
     "capture": "收下：整理收下的内容、写快读卡",
     "deepread": "深读报告",
     "distill": "给讨论起标题",
+    "search": "快速搜索：没配下面的搜索接口时，搜索框第一条的 AI 推荐用的模型（只能用 TCodex 模型；默认 deepseek-v4.1-flash）",
 }
 KIND_MODULE = {"draft": "research", "writing": "research", "plan": "research", "related": "research", "codemap": "research", "experiment": "research",
                "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill"}
@@ -102,17 +105,22 @@ def model_for(module):
     return cfg["models"].get(module) or (module == "diagram" and cfg["models"].get("research")) or ({"id": cfg["model"]} if cfg["model"] and cfg["backend"] == "cursor" else None)
 
 
+def clean_model(model):
+    """A model sent from the web, checked and kept to the fields an agent is created with."""
+    if not (isinstance(model, dict) and isinstance(model.get("id"), str) and model.get("backend", "cursor") in BACKENDS
+            and all(isinstance(p.get("id"), str) and isinstance(p.get("value"), str) for p in model.get("params") or [])):
+        raise rules.Rejected("模型格式不对")
+    return {"id": model["id"], **({"params": model["params"]} if model.get("params") else {}),
+            **({"backend": "tcodex"} if model.get("backend") == "tcodex" else {})}
+
+
 def set_model(module, model):
     if module not in MODULES:
         raise rules.Rejected(f"没有这个模块：{module}")
-    if model is not None and not (isinstance(model.get("id"), str) and model.get("backend", "cursor") in BACKENDS
-                                  and all(isinstance(p.get("id"), str) and isinstance(p.get("value"), str) for p in model.get("params") or [])):
-        raise rules.Rejected("模型格式不对")
     path = store.home() / "config.json"
     models = (json.loads(path.read_text()) if path.exists() else {}).get("models") or {}
-    if model:
-        models[module] = {"id": model["id"], **({"params": model["params"]} if model.get("params") else {}),
-                          **({"backend": "tcodex"} if model.get("backend") == "tcodex" else {})}
+    if model is not None:
+        models[module] = clean_model(model)
     else:
         models.pop(module, None)
     _config_write(models=models)
@@ -193,14 +201,14 @@ def _bind(kind, ref, agent_id):
         store.kv_set(DISTILL_AGENT, agent_id)
 
 
-def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, module=None):
+def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, module=None, model=None):
     """Queue a run and return its placeholder id at once; the UI shows it as waiting / starting. Follows up on
     agent_id when given, otherwise creates a new agent on this Mac (about a minute) on the module's model; a
     follow-up keeps the model its agent was created with. The new agent's id is chosen here and stored with the
     placeholder, so a restart mid-create can still find it. prepare(placeholder) runs before anything is sent
     (e.g. to add the chat messages)."""
     placeholder, new = f"pending-{uuid.uuid4()}", not agent_id
-    model = model_for(module or KIND_MODULE.get(kind, "discuss")) if new else None
+    model = (model or model_for(module or KIND_MODULE.get(kind, "discuss"))) if new else None
     backend = _backend_of(model, agent_id)
     if _missing(backend):
         raise AgentError(f"{'TCodex' if backend == 'tcodex' else 'Cursor'} 后端未配置：缺 " + "、".join(_missing(backend)))
@@ -422,7 +430,7 @@ def _codex_args(session, text, images, model):
 def _codex(agent_id, run_id, text, images, model):
     """One Codex turn. Our agent id maps to Codex's session id (kv), so a follow-up resumes the same conversation."""
     key, started = f"codex:{agent_id}", time.time()
-    out, tools, error = "", {}, None
+    out, tools, error, notice = "", {}, None, None
     with tempfile.TemporaryDirectory() as tmp:
         paths = []
         for i, (data, mime) in enumerate(images):
@@ -443,8 +451,8 @@ def _codex(agent_id, run_id, text, images, model):
                     store.kv_set(key, ev["thread_id"])
                 elif kind == "turn.failed":
                     error = (ev.get("error") or {}).get("message")
-                elif kind == "error":
-                    error = ev.get("message")
+                elif kind == "error":  # also "Reconnecting... 2/5" mid-turn: fatal only if the turn fails or the process exits non-zero
+                    notice = ev.get("message")
                 elif item.get("type") == "agent_message":
                     out = item.get("text") or out
                 elif item.get("type") in ("command_execution", "file_change", "mcp_tool_call", "web_search"):
@@ -456,7 +464,7 @@ def _codex(agent_id, run_id, text, images, model):
             p.wait()
             err.seek(0)
             if p.returncode and not error:
-                error = err.read()[-300:].strip() or f"tcodex 退出码 {p.returncode}"
+                error = notice or err.read()[-300:].strip() or f"tcodex 退出码 {p.returncode}"
     if (store.get_run(run_id) or {}).get("status") not in LIVE:
         return  # cancelled or expired here
     if error and not out:
@@ -464,6 +472,279 @@ def _codex(agent_id, run_id, text, images, model):
         store.kv_set(key, "")
     store.update_run(run_id, status="ERROR" if error else "FINISHED", error=error, text=out, tools=list(tools.values()),
                      duration_ms=int((time.time() - started) * 1000))
+
+
+SEARCH_MODEL = {"id": "deepseek-v4.1-flash", "backend": "tcodex", "params": [{"id": "effort", "value": "low"}]}
+
+
+def search_api():
+    """The OpenAI-compatible chat API the search bar calls directly (config.json "search_api"), or None."""
+    path = store.home() / "config.json"
+    api = (json.loads(path.read_text()) if path.exists() else {}).get("search_api") or {}
+    return api if api.get("base_url") and api.get("api_key") and api.get("model") else None
+
+
+def set_search_api(base_url, model, api_key=None, web_model=None):
+    """Empty base_url turns it off; an empty api_key keeps the saved one; an empty web_model means WEB_MODEL."""
+    base_url, model = (base_url or "").strip().rstrip("/"), (model or "").strip()
+    if base_url and not re.match(r"https?://", base_url):
+        raise rules.Rejected("接口地址要以 http:// 或 https:// 开头")
+    path = store.home() / "config.json"
+    old = (json.loads(path.read_text()) if path.exists() else {}).get("search_api") or {}
+    _config_write(search_api={"base_url": base_url, "model": model, "api_key": (api_key or "").strip() or old.get("api_key", ""),
+                              **({"web_model": web_model.strip()} if (web_model or "").strip() else {})} if base_url else {})
+
+
+WEB_MODEL = "gemini-3.5-flash-lite"
+
+
+def _google(api):
+    return urllib.parse.urlparse(api["base_url"]).hostname == "generativelanguage.googleapis.com"
+
+
+def _web(api, prompt, timeout=60):
+    """One Gemini turn grounded in Google Search (about 4 s): (text, [{title, url}] of the pages it used)."""
+    # ponytail: Google itself, or zhizengzeng's <host>/google/v1beta; another provider needs its own path here.
+    root = "https://generativelanguage.googleapis.com" if _google(api) else re.sub(r"/v1/?$", "", api["base_url"]) + "/google"
+    url = root + f"/v1beta/models/{api.get('web_model') or WEB_MODEL}:generateContent?" + urllib.parse.urlencode({"key": api["api_key"]})
+    req = urllib.request.Request(url, method="POST", headers={"Content-Type": "application/json"}, data=json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}], "tools": [{"google_search": {}}]}).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            c = (json.loads(r.read()).get("candidates") or [{}])[0]
+    except urllib.error.HTTPError as e:
+        raise AgentError(f"联网模型 {e.code}：{e.read().decode(errors='replace')[:200]}") from None
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise AgentError(f"连不上联网模型：{e}") from None
+    text = "".join(p.get("text", "") for p in (c.get("content") or {}).get("parts") or [])
+    pages = [ch["web"] for ch in (c.get("groundingMetadata") or {}).get("groundingChunks") or [] if ch.get("web")]
+    return text, [{"title": w.get("title") or "", "url": w.get("uri") or ""} for w in pages][:8]
+
+
+def web_find(text):
+    """"上网找论文": the web model searches, arXiv confirms each paper it names (made-up ids drop out), and the user
+    picks which to take in."""
+    from . import sources
+    api = search_api()
+    if not api:
+        raise rules.Rejected("上网找要先在设置里配置快速搜索接口")
+    said, _ = _web(api, f"今天是 {datetime.now():%Y-%m-%d}。用户想找论文：「{(text or '')[:500]}」\n上网搜索，找出最对口的论文，最多 8 篇，只要 arXiv 上有的。"
+                        "只输出一行 JSON：{\"papers\":[{\"arxiv\":\"arXiv 编号，如 2610.12026\",\"why\":\"为什么对口，一句中文\"}]}")
+    m = re.search(r"\{.*\}", said, re.S)
+    try:
+        got = json.loads(m.group(0)).get("papers") if m else None
+    except ValueError:
+        got = None
+    why = {}
+    for p in got if isinstance(got, list) else [{"arxiv": i} for i in re.findall(r"\d{4}\.\d{4,5}", said)]:
+        pid = rules.parse_pid(str(p.get("arxiv") or "")) if isinstance(p, dict) else None
+        if pid and pid.startswith("arxiv:"):
+            why.setdefault(pid, str(p.get("why") or "")[:120])
+    have = store.paper_ids()
+    found = {"arxiv:" + f["arxiv_id"]: f for f in sources.arxiv_lookup([pid[6:] for pid in list(why)[:8]])}
+    return {"papers": [{"pid": pid, "title": f["title"], "authors": f["authors"][:3], "published": f["published"], "url": f["url"],
+                        "why": why[pid], "in_library": pid in have} for pid, f in found.items()]}
+
+
+def search_ai_ready():
+    return bool(search_api()) or ((config()["models"].get("search") or SEARCH_MODEL).get("backend") == "tcodex" and bool(_tcodex_bin()))
+
+
+def _chat(api, prompt):
+    req = urllib.request.Request(api["base_url"] + "/chat/completions", method="POST", headers={
+        "Authorization": f"Bearer {api['api_key']}", "Content-Type": "application/json"}, data=json.dumps({
+            "model": api["model"], "messages": [{"role": "user", "content": prompt}],
+            **({} if _google(api) else {"thinking": {"type": "disabled"}})}).encode())  # Google rejects the unknown field
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())["choices"][0]["message"]["content"] or ""
+    except urllib.error.HTTPError as e:
+        raise AgentError(f"搜索接口 {e.code}：{e.read().decode(errors='replace')[:200]}") from None
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise AgentError(f"连不上搜索接口：{e}") from None
+
+
+def ai_search(q):
+    """The search bar's AI overview, like a search engine's: an answer, the library's papers that fit (even in other
+    words) and results from the web. With the chat API, three things at once (about 5-7 s): the fast model picks from
+    the library's catalog, the web model searches and answers, and names typed (Long-WAM) are looked up on arXiv.
+    Without the API, one tool-less TCodex turn over the catalog (about 4 s); None when neither is there."""
+    api, model = search_api(), config()["models"].get("search") or SEARCH_MODEL
+    if not api and (model.get("backend") != "tcodex" or not _tcodex_bin()):
+        return None
+    papers = store.list_papers()
+    # ponytail: the whole catalog goes in the prompt; past ~1000 papers pre-filter with store.search first.
+    catalog = "\n".join(f"{p['id']}\t{p['short_name'] + ' · ' if p.get('short_name') else ''}{p['title']}\t{(p['tldr'] or '')[:80]}" for p in papers[:1000])
+    head = f"论文库目录（id\\t缩写 · 标题\\t一句话）：\n{catalog}\n\n用户在论文库搜索框输入：「{q[:300]}」\n"
+    pick = head + ("不要调用任何工具。只输出一行 JSON：{\"answer\":\"一句话回答或指路（中文，40 字内）\",\"ids\":[库里最相关的 id，最多 5 个；"
+                   "用户点名的论文库里没有时，不要拿别的论文冒充它们，没有对口的就留空]}")
+    if not api:
+        return _overview(_json_obj(_tcodex_once(model, pick)), {}, [], [], papers)
+    lib, named = {}, []
+
+    def pick_from_library():
+        try:
+            lib.update(_json_obj(_chat(api, pick)))
+        except Exception:
+            pass  # the web answer still comes, without library picks
+
+    jobs = [threading.Thread(target=pick_from_library, daemon=True),
+            threading.Thread(target=lambda: named.extend(_named_papers(q)), daemon=True)]
+    for j in jobs:
+        j.start()
+    try:
+        said, sites = _web(api, f"用户在论文库的搜索框输入：「{q[:300]}」\n像搜索引擎的 AI 摘要那样上网搜索并回答。用户点名了具体论文或方法（如 Long-WAM）时，"
+                                "先找到并讲清这些论文本身：各自做了什么、关键结果、彼此的区别；否则直接回答问题、点出关键结论。只输出一行 JSON："
+                                "{\"answer\":\"回答（中文，150 字内，纯文本，信息要具体）\",\"web\":[{\"title\":\"网上结果的标题\","
+                                "\"url\":\"链接，论文给 arxiv.org/abs 链接\",\"why\":\"一句话\"}]（最多 5 个，点名的论文排最前）}", timeout=20)
+        web = _json_obj(said)
+    except AgentError:
+        web, sites = {}, []
+    for j in jobs:
+        j.join(15)
+    return _overview(lib, web, sites, list(named), papers)
+
+
+def _json_obj(said):
+    m = re.search(r"\{.*\}", said or "", re.S)
+    try:
+        got = json.loads(m.group(0)) if m else {}
+    except (ValueError, TypeError):
+        got = {}
+    return got if isinstance(got, dict) else {}
+
+
+def _overview(lib, web, sites, named, papers):
+    # some models drop the "arxiv:" prefix
+    known = {**{p["id"].partition(":")[2]: p for p in papers if ":" in p["id"]}, **{p["id"]: p for p in papers}}
+    ids = [known[i.strip()]["id"] for i in lib.get("ids") if isinstance(i, str) and i.strip() in known] if isinstance(lib.get("ids"), list) else []
+    named = [n for n in named if n["pid"] not in known]
+    seen = {n["pid"] for n in named}
+    return {"answer": str(web.get("answer") or lib.get("answer") or "").strip()[:400], "papers": [known[i] for i in dict.fromkeys(ids)][:5],
+            "web": (named + [w for w in _checked_web(web.get("web"), sites, known, seen) if w.get("pid") not in seen])[:6], "named": bool(named)}
+
+
+def _named_papers(q):
+    """arXiv papers that introduce what the user typed by name (each name searched on its own): the title names it,
+    or else the abstract does (Simple-WAM is proposed in "What Makes World Action Models Generalize?")."""
+    from . import sources
+    out = []
+    for name in [t for t in sources.name_terms(q) if sources.distinctive(t)][:2]:
+        try:
+            found = sources.keyword_search([name])
+        except Exception:
+            continue  # arXiv unreachable: the web results still come
+        said = lambda text: re.search(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])", text or "", re.I)
+        hit = next((r for r in found if sources.names_itself(r["title"], name)), None) or next((r for r in found if said(r.get("abstract"))), None)
+        if hit:
+            out.append({"title": hit["title"], "url": hit["url"], "pid": hit["pid"], "published": hit["published"],
+                        "why": f"标题就是 {name}" if sources.names_itself(hit["title"], name) else f"摘要里提出了 {name}"})
+    return out
+
+
+def _checked_web(items, sites, known, skip=()):
+    """Web results the model named, kept only when checkable: an arXiv paper whose real title matches what the model
+    said (it is shown with arXiv's title), or a page on a site the search actually visited. skip: already confirmed."""
+    from . import sources
+    items = [w for w in items if isinstance(w, dict) and isinstance(w.get("url"), str)][:5] if isinstance(items, list) else []
+    arxiv = {w["url"]: rules.parse_pid(w["url"]) for w in items}
+    arxiv = {u: p for u, p in arxiv.items() if p and p.startswith("arxiv:") and p not in skip}
+    items = [w for w in items if rules.parse_pid(w["url"]) not in skip]
+    try:
+        real = {"arxiv:" + f["arxiv_id"]: f for f in sources.arxiv_lookup(sorted({p[6:] for p in arxiv.values()}))}
+    except Exception:
+        real = {}  # arXiv unreachable: its papers can't be checked, so none are shown
+    visited = {s["title"].lower() for s in sites if s["title"]}
+    out = []
+    for w in items:
+        pid, why = arxiv.get(w["url"]), str(w.get("why") or "")[:120]
+        if pid:
+            f = real.get(pid)
+            if f and pid not in known and sources.title_score(str(w.get("title") or f["title"]), f["title"]) >= 0.6:
+                out.append({"title": f["title"], "url": f["url"], "pid": pid, "published": f["published"], "why": why})
+        elif (host := (urllib.parse.urlparse(w["url"]).hostname or "").lower()) and not host.endswith("arxiv.org") \
+                and any(host == v or host.endswith("." + v) for v in visited):
+            out.append({"title": str(w.get("title") or host)[:120], "url": w["url"], "why": why})
+    return out
+
+
+_PAGE_PARTS = {"research": ("body",), "experiment": ("figures", "experiments"), "plan": ("plan",), "related": ("related",),
+               "code": ("repos", "code_maps"), "writing": ("writing",)}
+
+
+def quick_answer(quote, question, scope=None, pid=None, page=None, surface=None, web=False):
+    """"快速问" on a highlighted passage: one chat API call over what is on that page (the paper's pages around it and
+    its card, or the research tab), answered in the popup. Nothing is saved and no discussion sees it. web=True ("上网查")
+    lets the web model search too, and returns the pages it used."""
+    api = search_api()
+    if not api:
+        raise rules.Rejected("快速问要先在设置里配置快速搜索接口")
+    quote, question = (quote or "")[:2000], (question or "").strip()[:500] or "这段是什么意思？"
+    dump = lambda v, n: json.dumps(v, ensure_ascii=False, default=str)[:n]
+    kind, _, rid = (scope or "").partition(":")
+    if kind in _PAGE_PARTS:
+        x = store.get_research(rid) or {}
+        context = (f"研究《{x.get('title', '')}》：{x.get('summary') or ''}\n三要素：{dump(x.get('body'), 4000)}\n"
+                   + "".join(f"\n{k}：{dump(x.get(k), 12000)}\n" for k in _PAGE_PARTS[kind] if k != "body"))
+        rule, where = "数字只能出自上面的记录。", "研究页上"
+    else:
+        p = (store.get_paper(pid, with_anchors=False) or {}) if pid else {}
+        if not p:
+            raise rules.Rejected("找不到这篇论文")
+        texts, page = store.pages(pid), page if isinstance(page, int) else None
+        near = range(max(1, page - 1), min(len(texts), page + 1) + 1) if page else range(0)
+        ctx = "\n\n".join(f"[第 {i} 页]\n{texts[i - 1]}" for i in near)[:15000]
+        context = (f"论文 {pid}《{p['title']}》。\n" + (f"快读卡：{dump(p['card'], 3000)}\n" if p.get("card") else "")
+                   + (f"\n原文（选中处前后几页）：\n{ctx}\n" if ctx else ""))
+        rule = f"引用原文写成 [{pid} p.页码]。"
+        where = {"card": "快读卡", "report": "深读报告", "pdf": "原文"}.get(surface, "") + (f"第 {page} 页" if page else "")
+    ask = f"{context}\n用户在{where}选中了这段：「{quote}」\n用户的问题：{question}\n\n围绕选中的这段回答。用中文，短（300 字内），可以用 Markdown。{rule}"
+    if web:
+        text, pages = _web(api, ask + "上面的内容不够时上网搜索补充，网上来的说法写明出处。")
+        return {"text": text, "sources": pages}
+    return {"text": _chat(api, ask + "只依据上面给出的内容，给出的内容不够就直说。")}
+
+
+def _tcodex_once(model, prompt):
+    effort = [a for p in model.get("params") or [] if p["id"] == "effort" for a in ("-c", f"model_reasoning_effort={p['value']}")]
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            out = subprocess.run([_tcodex_bin(), "exec", "--json", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-C", tmp,
+                                  "-m", model["id"], *effort, prompt], capture_output=True, text=True, timeout=40, stdin=subprocess.DEVNULL,
+                                 env={**os.environ, "PATH": _PATH}).stdout
+        except subprocess.TimeoutExpired:
+            return None
+    said = ""
+    for line in out.splitlines():
+        try:
+            item = json.loads(line).get("item") or {}
+        except ValueError:
+            continue
+        if item.get("type") == "agent_message":
+            said = item.get("text") or said
+    return said
+
+
+_logins = {}
+
+
+def login(cli):
+    """Start `tcodex login` for the user (it opens the browser or prints a link), and return what it printed so far.
+    The process keeps running until the user finishes signing in."""
+    cmds = {"tcodex": [_tcodex_bin(), "login"]}
+    if cli not in cmds:
+        raise rules.Rejected(f"不支持登录：{cli}")
+    if not cmds[cli][0]:
+        raise rules.Rejected(f"没有找到 {cli} 命令，先按说明安装")
+    old = _logins.get(cli)
+    if not old or old["proc"].poll() is not None:
+        p = subprocess.Popen(cmds[cli], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                             env={**os.environ, "PATH": _PATH}, start_new_session=True)
+        _logins[cli] = old = {"proc": p, "out": []}
+        _spawn(lambda: [old["out"].append(line) for line in p.stdout])
+        time.sleep(3)
+    out = "".join(old["out"])[-2000:]
+    return {"output": out, "url": (re.findall(r"https?://\S+", out) or [None])[-1], "done": old["proc"].poll() is not None}
 
 
 def cancel(agent_id, run_id):
@@ -598,7 +879,8 @@ def scope_text(scope):
         return (
             f"研究《{x['title'] if x else ''}》（{ref}）的**实验讨论**：这里只围绕实验——设计预期图表和下一个实验、解读结果、判断它支持还是反驳三要素。"
             f"再读 librarian/experiment.md，先运行 `./p2b research show {ref}` 看三要素、预期图表（`figures`）和已有实验记录；用户贴来新结果时按其中步骤用 "
-            f"`./p2b experiment add` 记下、整理并填进预期图表的格子；要增删改预期图表时用 `./p2b figures-plan propose` 提交修改稿。"
+            f"`./p2b experiment add` 记下、整理并填进预期图表的格子；要增删改预期图表时用 `./p2b figures-plan propose` 提交修改稿，"
+            f"用户划词或点名某张图表、某条实验时只改那一处（见“改单个内容块”“改单条实验”）。"
             f"数字只能出自原始结果。不要提交三要素、计划或写作的修改稿；结论动摇了三要素，指出来，请用户到研究的概览讨论里调整。"
         )
     return "整个论文库。用 `./p2b search` 和 `./p2b papers` 检索。"
@@ -611,11 +893,26 @@ WEB_MARK = "（网页讨论）"
 LAND_SPECS = ("research", "writing", "related", "plan", "experiment")
 
 
-def discuss(scope, text, thread_id=None, start=False, images=()):
+def discuss(scope, text, thread_id=None, start=False, images=(), model=None, redo=False):
     """Continue the scope's latest discussion, or an older one the user jumped back to. start=True opens a new
-    research: the agent first reads what the user brought and drafts, instead of just answering."""
+    research: the agent first reads what the user brought and drafts, instead of just answering. A model switches
+    the discussion to a new agent on it, told what was said so far (an agent keeps the model it was created with).
+    redo=True drops the last question and its answer and asks it again of a new agent, which never saw that answer."""
     thread = store.thread_for(scope, thread_id)
-    if not thread["agent_id"] and scope.startswith("paper:") and model_for("capture") == model_for("discuss"):
+    if redo:
+        last = thread["messages"][-2:]
+        if [m["role"] for m in last] != ["user", "assistant"]:
+            raise rules.Rejected("最后一条不是 agent 的回答，没什么可重新生成的")
+        q, a = last
+        if a["run_status"] in LIVE + ("WAITING",):
+            raise rules.Rejected("这一轮还在写，先停止再重新生成")
+        if q["forks"] or a["forks"] or q["research"] or a["research"]:
+            raise rules.Rejected("这一问一答已经分出了讨论或加入了研究，换个方式：从上一条分叉再问")
+        store.drop_messages([q["id"], a["id"]])
+        thread["messages"], text = thread["messages"][:-2], q["text"]
+    if model or redo:
+        thread["agent_id"] = None
+    elif not thread["agent_id"] and scope.startswith("paper:") and model_for("capture") == model_for("discuss"):
         # the agent that took this paper's capture (from the phone, too) already knows it, and what was asked there
         agent = next((c["agent_id"] for c in reversed(store.get_paper(scope[6:], with_anchors=False)["captures"])
                       if c.get("agent_id")), None)
@@ -645,7 +942,7 @@ def discuss(scope, text, thread_id=None, start=False, images=()):
         store.add_message(thread["id"], "user", text)
         store.add_message(thread["id"], "assistant", "", placeholder)
 
-    return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare,
+    return start_async("chat", thread["id"], prompt, images, name=name, agent_id=thread["agent_id"], prepare=prepare, model=model,
                        module="research" if scope.startswith(("research:", "writing:", "related:", "plan:", "code:", "experiment:")) else "discuss")
 
 
@@ -697,7 +994,12 @@ DISTILL_AGENT, DISTILL_TRIED = "distill_agent", "distill_tried"
 
 def distill_pending():
     """Name untitled discussions in batches through one long-lived agent: a follow-up starts in seconds, while a new
-    agent on this machine takes about a minute. Each discussion is tried at most twice."""
+    agent on this machine takes about a minute. With the chat API configured, it names them directly in seconds.
+    Each discussion is tried at most twice."""
+    if search_api():
+        if _distill_lock.acquire(blocking=False):
+            _spawn(_distill_api)
+        return
     if not status()["enabled"] or any(r["kind"] == "distill" for r in store.unfinished_runs()):
         return
     tried = json.loads(store.kv_get(DISTILL_TRIED) or "{}")
@@ -710,6 +1012,71 @@ def distill_pending():
     store.kv_set(DISTILL_TRIED, json.dumps({**tried, **{i: tried.get(i, 0) + 1 for i in ids}}))
     text = f"先读 librarian/README.md 和 librarian/discuss.md，按“给讨论起标题”一节处理这些讨论：{' '.join(ids)}"
     start_async("distill", "threads", text, name="给讨论起标题", agent_id=store.kv_get(DISTILL_AGENT) or None)
+
+
+_distill_lock = threading.Lock()
+
+
+def _scope_label(scope):
+    kind, _, ref = scope.partition(":")
+    a = store.get_anchor(ref) or {} if kind == "anchor" else {}
+    pid = ref if kind == "paper" else a.get("paper_id")
+    if pid:
+        title = (store.get_paper(pid, with_anchors=False) or {}).get("title", "")
+        return f"论文《{title}》" + (f"里划选的一段：「{a.get('quote', '')[:200]}」" if a else "")
+    if kind == "research":
+        return f"研究《{(store.get_research(ref) or {}).get('title', '')}》"
+    return {"library": "整个论文库"}.get(kind, scope)
+
+
+def _distill_api():
+    try:
+        api, tried = search_api(), json.loads(store.kv_get(DISTILL_TRIED) or "{}")
+        ids = [i for i in store.pending_titles() if tried.get(i, 0) < 2]
+        store.kv_set(DISTILL_TRIED, json.dumps({**tried, **{i: tried.get(i, 0) + 1 for i in ids}}))
+        for tid in ids:
+            t = store.thread_for(thread_id=tid)
+            said = "\n".join(f"{'用户' if m['role'] == 'user' else 'agent'}：{(m['run_text'] or m['text'] or '')[:400]}" for m in t["messages"][:6])
+            title = _chat(api, (
+                f"给一段讨论起标题。讨论范围：{_scope_label(t['scope'])}\n讨论内容：\n{said}\n\n"
+                "写一句中文标题（≤50 字），让几周后的用户一眼看懂当时在想什么：补全指代（说清“这个”“它”指哪篇论文、哪个方法）；"
+                "点出用户真正关心的问题、主张、比较或实验；不添加用户没表达的观点，不评价对错；开头那句已经清楚时就把它写完整。"
+                "例：开头是“和 diffusion policy 对比一下”，论文是 π0 → π0 的 flow matching 动作头和 Diffusion Policy 的去噪生成，差别在哪\n"
+                "只输出标题本身，纯文本，不用 LaTeX、Markdown 或引号。"))
+            title = (title.strip().splitlines() or [""])[0].strip(" \"'“”「」#*")[:50]
+            try:
+                store.set_thread_title(tid, title, "agent")
+            except rules.Rejected:
+                pass  # the user named it meanwhile, or the model returned nothing
+    except AgentError:
+        pass  # the API is down: these stay untitled and are tried once more on a later tick
+    finally:
+        _distill_lock.release()
+
+
+_name_lock = threading.Lock()
+
+
+def name_pending():
+    """Papers whose title doesn't open with their name (Simple-WAM, DreamZero) get it from their abstract through the
+    fast model; '' when the paper names nothing, so each is asked once."""
+    if search_api() and store.unnamed_papers(1) and _name_lock.acquire(blocking=False):
+        _spawn(_name_api)
+
+
+def _name_api():
+    try:
+        api = search_api()
+        for p in store.unnamed_papers():
+            said = _chat(api, f"论文标题：{p['title']}\n摘要：{(p['abstract'] or '')[:2500]}\n\n这篇论文给自己提出的方法、模型、系统或基准起的名字或缩写是什么"
+                              "（如 Simple-WAM、DreamZero、SayCan、LingBot-VA）？只输出一个最常用的短名字，纯文本，不加括号、斜杠或 LaTeX；论文没起名字就只输出：无")
+            name = (said.strip().splitlines() or [""])[0].strip(" \"'“”「」*`。.")
+            name = re.sub(r"\$\^?\{?([^${}]*)\}?\$", r"\1", name).replace("$", "")  # R$^2$-WAM -> R2-WAM
+            store.set_short_name(p["id"], "" if name in ("", "无") or len(name) > 30 or " / " in name else name, "agent")
+    except AgentError:
+        pass  # the API is down: these stay unnamed and are asked on a later tick
+    finally:
+        _name_lock.release()
 
 
 DEEP_TRIED = "deepread_tried"

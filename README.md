@@ -31,6 +31,22 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 数据默认存放在 `~/paper2brain-data`（SQLite、PDF、截图），不进仓库；可以用 `P2B_HOME` 指定其他目录。
 
+**换一台 Mac 用**：一次只在一台 Mac 上用，通过 iCloud 云盘交接（活的数据库不放 iCloud，iCloud 里只放快照）：
+
+```sh
+.venv/bin/python ops/handoff.py push   # 要离开的 Mac：把数据库快照、PDF、仓库和 config.json 放进 iCloud 云盘/paper2brain-handoff
+.venv/bin/python ops/handoff.py pull   # 要接手的 Mac：等 iCloud 同步完再运行；会先备份本机旧库，再接手并重启服务
+```
+
+新 Mac 第一次用：克隆代码、`ops/setup.sh`（或手动安装）、`ops/install.sh`，在本机 `config.json` 里设好自己的 `machine`（pull 会保留它），再 pull。
+
+**从别的设备访问**：默认只接受本机。要对外开放，必须设访问口令：`config.json` 的 `password`，或环境变量 `P2B_PASSWORD`（浏览器会弹登录框，用户名随便填；设了之后本机访问也要输），并在 `config.json` 的 `hosts`（或环境变量 `P2B_HOSTS`，逗号隔开）里列出别的设备用来访问的地址：
+
+```sh
+# 公司内网：手机和别的电脑打开 http://10.43.38.194:8765
+P2B_HOSTS=10.43.38.194 ./p2b serve --host 0.0.0.0
+```
+
 **升级与备份**：数据库带版本号（`PRAGMA user_version`）。新版本第一次打开旧数据库时（`./p2b serve` 或任何一条 `./p2b` 命令），先把原库完整复制到 `~/paper2brain-data/backups/p2b-before-v<N>-<时间>.sqlite`，再按顺序补上缺的表、列和索引，原有数据不删不改。例外是两次结构调整：只写了一句想法、没有任何内容的旧捕获，变成一条独立想法（v4）；每条想法变成一段讨论，原话是第一条消息、提炼成为标题，它原来那段讨论和研究素材并进来，之后删掉想法表（v7）。服务运行时每天另存一份 `backups/p2b-YYYYMMDD.sqlite`，保留最近 7 份。要回退，停掉服务后把备份复制回 `p2b.sqlite` 即可。
 
 没连接 agent 时，Web 界面照样可以收下内容、确认是哪篇论文、阅读 PDF、调整主题、记想法（开一段讨论，等连上 agent 再接着聊）；快读卡、深读报告和讨论里的回答需要连接 agent。

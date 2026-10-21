@@ -3,12 +3,13 @@
 // figure lightbox, which open from anywhere a card is shown.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, del, enc, short, idLabel, href, Md, citeHtml, Mark } from './lib.js';
+import { html, get, post, del, enc, short, idLabel, href, mdHtml, citeHtml, Mark, Md, workHot, openWork } from './lib.js';
 import {
-  route, baseRoute, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, registerAction, openReader, quoting,
+  route, baseRoute, appState, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, registerAction, openReader, quoting, peek, peekPaper, addPaper,
 } from './state.js';
 import { PaperCard, PaperNotes, PdfButton, RunCard, reportState } from './papers.js';
 import { Chat } from './discuss.js';
+import { showResearch } from './research.js';
 
 // ---------- marking passages ----------
 
@@ -21,9 +22,10 @@ function markText(container, quote, data, cls = 'anchor-mark', wantFirst = false
   let text = '';
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     nodes.push(n);
-    [...n.data].forEach((ch, i) => { if (!/\s/.test(ch)) { text += ch.toLowerCase(); owner.push([nodes.length - 1, i]); } });
+    // hyphens dropped and ligatures unfolded: PDF line breaks split words as "rep-" + "resentation"
+    [...n.data].forEach((ch, i) => { for (const c of ch.normalize('NFKC').toLowerCase()) if (!/[\s\-\u00ad]/.test(c)) { text += c; owner.push([nodes.length - 1, i]); } });
   }
-  const q = quote.replace(/\s+/g, '').toLowerCase();
+  const q = quote.normalize('NFKC').toLowerCase().replace(/[\s\-\u00ad]/g, '');
   const at = q ? text.indexOf(q) : -1;
   if (at < 0) return null;
   const [sn, so] = owner[at], [en, eo] = owner[at + q.length - 1];
@@ -116,9 +118,9 @@ function renderPage(n) {
   return div.rendering;
 }
 
-async function drawPage(div, n) {
-  const page = await PDFV.doc.getPage(n);
-  const vp = page.getViewport({ scale: PDFV.scale });
+async function drawPage(div, n, doc = PDFV.doc, scale = PDFV.scale) {
+  const page = await doc.getPage(n);
+  const vp = page.getViewport({ scale });
   div.style.width = `${vp.width}px`;
   div.style.height = `${vp.height}px`;
   const dpr = window.devicePixelRatio || 1, canvas = document.createElement('canvas');
@@ -130,7 +132,7 @@ async function drawPage(div, n) {
   layer.className = 'textLayer';
   div.append(layer);
   await new (await pdfLib()).TextLayer({ textContentSource: page.streamTextContent(), container: layer, viewport: vp }).render();
-  markPage(n);
+  if (doc === PDFV.doc) markPage(n);
 }
 
 function jumpPdf(page, quote) {
@@ -144,8 +146,10 @@ function jumpPdf(page, quote) {
 function markPage(n) {
   const div = pageDiv(n), layer = div?.querySelector('.textLayer'), p = PDFV.paper;
   if (!layer || !p) return;
-  unmark(layer, 'mark.anchor-hl');
+  unmark(layer, 'mark.anchor-hl, mark.rp-hl');
   div.querySelectorAll('.anchor-bubble').forEach((b) => b.remove());
+  (p.report?.sections || []).forEach((s, i) => points(s).forEach((pt, j) => pt.citations.filter((c) => c.page === n)
+    .forEach((c) => markText(layer, c.quote, { action: 'open-point', pt: `${i}.${j}`, pid: p.id }, `rp-hl rc${i % 6}`))));
   const top = div.getBoundingClientRect().top;
   for (const a of p.anchors.filter((x) => x.surface === 'pdf' && x.page === n)) {
     const first = markText(layer, a.quote, { action: 'open-anchor', id: a.id, pid: p.id }, 'anchor-hl', true);
@@ -179,7 +183,23 @@ function PdfView({ pid, page, wide }) {
 
 // ---------- panel tabs ----------
 
-function Report({ p, section }) {
+/** A report section's paragraphs, each with the sentences it was read from (older reports: one body per section). */
+const points = (s) => s.points || [{ text: s.body, citations: s.citations }];
+/** The paragraph with its [k] markers turned into page buttons; citations it never marks (older reports) go at the end. */
+function pointHtml(pid, pt) {
+  const used = new Set();
+  const body = mdHtml(pt.text).replace(/\[(\d+)\]/g, (m, k) => {
+    const c = pt.citations[k - 1];
+    if (!c) return m;
+    used.add(c);
+    return citeHtml(pid, c.page, c.quote);
+  });
+  const rest = pt.citations.filter((c) => !used.has(c));
+  return body + (rest.length ? `<div class="cites">${rest.map((c) => citeHtml(pid, c.page, c.quote)).join('')}</div>` : '');
+}
+const hoverPoint = (pt, on) => PDFV.host?.querySelectorAll(`mark.rp-hl[data-pt="${pt}"]`).forEach((m) => m.classList.toggle('on', on));
+
+function Report({ p, section, point }) {
   const ref = useRef();
   useAnchorMarks(ref, p);
   useEffect(() => {
@@ -187,6 +207,14 @@ function Report({ p, section }) {
     const target = [...(ref.current?.querySelectorAll('.section') || [])].find((s) => s.dataset.section === section);
     if (target) { target.scrollIntoView({ block: 'start' }); target.classList.add('flash'); }
   }, [section, !!p.report]);
+  useEffect(() => {
+    const el = point && ref.current?.querySelector(`.rpoint[data-pt="${point.pt}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center' });
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+  }, [point, !!p.report]);
   const run = p.runs.find((x) => x.kind === 'deepread' && (x.status === 'WAITING' || x.status === 'CREATING' || x.status === 'RUNNING' || x.status === 'QUEUED'));
   if (run) {
     return html`<div class="card-wait"><${Mark} spin />Agent 正在写深读报告，通常需要几分钟。可以先读左边的原文，写好后会自动出现在这里。</div>
@@ -200,9 +228,10 @@ function Report({ p, section }) {
       ${agentOn.value ? null : html`<p class="hint">需要先连接 agent</p>`}${last ? html`<${RunCard} r=${last} label="上次深读" />` : null}</div>`;
   }
   const toSection = (h) => { const t = [...ref.current.querySelectorAll('.section')].find((s) => s.dataset.section === h); t?.scrollIntoView({ block: 'start' }); };
-  return html`<div ref=${ref}><div class="rtoc">${p.report.sections.map((s) => html`<button class="jump go" title=${s.heading} onClick=${() => toSection(s.heading)}>${short(s.heading, 14)}</button>`)}</div>
-    ${p.report.sections.map((s) => html`<div class="section" data-anchor-surface="report" data-pid=${p.id} data-section=${s.heading}><h3>${s.heading}</h3><${Md} text=${s.body} />
-      ${s.citations.length ? html`<div class="cites" dangerouslySetInnerHTML=${{ __html: s.citations.map((c) => citeHtml(p.id, c.page, c.quote)).join('') }} />` : null}</div>`)}
+  return html`<div ref=${ref}><div class="rtoc">${p.report.sections.map((s, i) => html`<button class=${`jump go rc${i % 6}`} title=${s.heading} onClick=${() => toSection(s.heading)}>${short(s.heading, 14)}</button>`)}</div>
+    ${p.report.sections.map((s, i) => html`<div class=${`section rc${i % 6}`} data-anchor-surface="report" data-pid=${p.id} data-section=${s.heading}><h3>${s.heading}</h3>
+      ${points(s).map((pt, j) => html`<div class="rpoint" data-pt=${`${i}.${j}`} onMouseEnter=${() => hoverPoint(`${i}.${j}`, true)} onMouseLeave=${() => hoverPoint(`${i}.${j}`, false)}>
+        <div class="md" dangerouslySetInnerHTML=${{ __html: pointHtml(p.id, pt) }} /></div>`)}</div>`)}
     <div style="margin-top:20px"><button class="btn sm ghost" disabled=${!agentOn.value} onClick=${async () => { try { await post(`/api/papers/${enc(p.id)}/deepread`); refresh(); } catch (e) { fail(e); } }}>重新生成</button></div></div>`;
 }
 
@@ -217,7 +246,7 @@ function Anchors({ p, open }) {
     <span class="source-label">「${short(a.quote, 90)}」<div class="hint">${a.message_count ? `${a.message_count} 条 · ${short(a.last_text || '', 60)}` : '还没开始聊'}</div></span></div>`)}`;
 }
 
-function AnchorPanel({ p, id, back, locate }) {
+function AnchorPanel({ p, id, back, locate, threadId }) {
   const a = p.anchors.find((x) => x.id === id);
   if (!a) return html`<div class="chat-empty">这段划词讨论已删除</div>`;
   const remove = async () => {
@@ -227,9 +256,15 @@ function AnchorPanel({ p, id, back, locate }) {
     refresh();
   };
   return html`<div class="anchor-head"><button class="btn sm ghost" onClick=${back}>← 全部划词</button><span class="chip">${anchorWhere(a)}</span><span class="grow"></span>
-      <button class="btn sm ghost" onClick=${() => locate(a)}>定位到原处</button><button class="btn sm ghost" onClick=${remove}>删除</button></div>
+      <button class="btn sm ghost" onClick=${() => locate(a)}>定位到原处</button><button class="btn sm ghost danger" onClick=${remove}>删除</button></div>
     <blockquote class="anchor-quote">${a.quote}</blockquote>
-    <div class="anchor-chat"><${Chat} scope=${`anchor:${a.id}`} /></div>`;
+    <div class="anchor-chat"><${Chat} key=${threadId || a.id} scope=${`anchor:${a.id}`} threadId=${threadId} /></div>`;
+}
+
+/** Same corner logo as the sidebar: the reader covers that one, so the menu stays reachable while reading. */
+function WorkLogo() {
+  const hot = workHot(appState.value);
+  return html`<button type="button" class="reader-brand" title=${hot ? '跳到正在工作的页面' : '最近三次 agent 工作'} aria-label=${hot ? '正在工作' : '最近的工作'} onClick=${(e) => openWork.fn?.(e)}><${Mark} quiet cls="brand-mark" spin=${hot} /></button>`;
 }
 
 // ---------- the reader ----------
@@ -243,6 +278,7 @@ export function Reader() {
   const [view, setView] = useState({});
   const prevReport = useRef(null);
   useEffect(() => { if (pid) post(`/api/papers/${enc(pid)}/read`).catch(() => {}); }, [pid]);
+  useEffect(() => { if (p) document.title = `${p.short_name || short(p.title, 40)} · paper2brain`; }, [p?.title, p?.short_name]);
   // the intent from whoever opened the reader (or asked again while it is open): tab, page, section, anchor, thread
   useEffect(() => {
     const it = readerIntent.value;
@@ -258,7 +294,7 @@ export function Reader() {
     if (prevReport.current === 'running' && state === 'done' && view.tab !== 'report') toast('深读报告写好了', '去看', () => setView((v) => ({ ...v, tab: 'report' })));
     prevReport.current = state;
   }, [p]);
-  if (!p) return html`<div id="reader"><div class="reader-top"><button class="btn sm ghost" onClick=${closeReader}>← 返回</button><div class="title"><span class="spin"></span></div></div></div>`;
+  if (!p) return html`<div id="reader"><div class="reader-top"><${WorkLogo} /><button class="btn sm ghost" onClick=${closeReader}>← 返回</button><div class="title"><span class="spin"></span></div></div></div>`;
   const tab = view.tab || (reportState(p) ? 'report' : 'card');
   const setTab = (t, extra = {}) => setView((v) => ({ ...v, tab: t, ...extra }));
   const locate = (a) => {
@@ -270,13 +306,14 @@ export function Reader() {
   const chatty = tab === 'chat' || tab === 'anchor';
   let body;
   if (tab === 'card') body = html`<${PaperCard} paper=${p} inReader />`;
-  else if (tab === 'report') body = html`<${Report} p=${p} section=${view.section} />`;
+  else if (tab === 'report') body = html`<${Report} p=${p} section=${view.section} point=${view.point} />`;
   else if (tab === 'chat') body = html`<${Chat} key=${`c-${view.threadId || ''}`} scope=${`paper:${p.id}`} threadId=${view.threadId} />`;
   else if (tab === 'anchors') body = html`<${Anchors} p=${p} open=${(id) => setTab('anchor', { anchor: id })} />`;
-  else if (tab === 'anchor') body = html`<${AnchorPanel} key=${view.anchor} p=${p} id=${view.anchor} back=${() => setTab('anchors')} locate=${locate} />`;
+  else if (tab === 'anchor') body = html`<${AnchorPanel} key=${view.anchor} p=${p} id=${view.anchor} back=${() => setTab('anchors')} locate=${locate} threadId=${view.threadId} />`;
   else body = html`<${PaperNotes} p=${p} flush />`;
   return html`<div id="reader">
     <div class="reader-top">
+      <${WorkLogo} />
       <button class="btn sm ghost" onClick=${closeReader}>← 返回</button>
       <div class="title">${p.title}</div>
       ${p.pdf_path && p.outline?.length ? html`<select class="toc" title="跳到原文的某一节" onChange=${(e) => { const [pg, ...t] = e.target.value.split('|'); e.target.value = ''; if (pg) jumpPdf(+pg, t.join('|')); }}>
@@ -297,11 +334,105 @@ function openAnchor(id, pid) {
   openReader(pid || route.value.arg?.split('@')[0], { tab: 'anchor', anchor: id });
 }
 registerAction('open-anchor', (el) => { if (!window.getSelection().toString().trim()) openAnchor(el.dataset.id, el.dataset.pid); });
+registerAction('open-point', (el) => { if (!window.getSelection().toString().trim()) readerIntent.value = { tab: 'report', point: { pt: el.dataset.pt } }; });
 registerAction('cite', (el) => {
-  const pid = el.dataset.pid, page = +el.dataset.page, q = el.getAttribute('title');
+  const pid = el.dataset.pid, page = +el.dataset.page, q = el.title === '跳到原文' ? null : el.title;
   if (route.value.view === 'read' && route.value.arg?.split('@')[0] === pid && PDFV.pid === pid) jumpPdf(page, q);
-  else openReader(pid, { tab: 'card', page, q });
+  else peekPaper(pid, page, q);
 });
+
+// ---------- peek: the PDF in a floating window, to check a detail without leaving the page ----------
+
+/** Its own PDF.js document and pages, so it never disturbs the reader's; the quoted line flashes once its page draws.
+ * Pages follow the window's width: stretched at once while resizing, redrawn sharp once it settles. */
+function PeekPdf({ pid, page, q }) {
+  const host = useRef();
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let doc, io, ro, timer, dead = false, flashed = !q;
+    (async () => {
+      doc = await (await pdfLib()).getDocument(`/api/papers/${enc(pid)}/pdf`).promise;
+      const base = (await doc.getPage(1)).getViewport({ scale: 1 }), el = host.current;
+      const fitScale = () => Math.max(0.5, (el.clientWidth - 24) / base.width);
+      let scale = fitScale();
+      if (dead) return;
+      // each drawing goes into its own box, so a redraw can drop a stale one even while it is still rendering
+      const size = (div) => {
+        const w = `${base.width * scale}px`, h = `${base.height * scale}px`;
+        Object.assign(div.style, { width: w, height: h });
+        div.style.setProperty('--scale-factor', scale);
+        if (div.firstChild) Object.assign(div.firstChild.style, { width: w, height: h });
+      };
+      io = new IntersectionObserver((es) => es.forEach((e) => {
+        const div = e.target, n = +div.dataset.page;
+        if (!e.isIntersecting || div.firstChild) return;
+        const box = div.appendChild(Object.assign(document.createElement('div'), { className: 'peek-box' }));
+        drawPage(box, n, doc, scale).then(() => {
+          const m = !flashed && n === page && markText(box.querySelector('.textLayer'), q, {}, 'flash-hl', true);
+          if (m) { flashed = true; m.scrollIntoView({ block: 'center' }); setTimeout(() => unmark(box, 'mark.flash-hl'), 2600); }
+        });
+      }), { root: el, rootMargin: '600px 0px' });
+      el.innerHTML = '';
+      const divs = [];
+      for (let n = 1; n <= doc.numPages; n++) {
+        const div = Object.assign(document.createElement('div'), { className: 'pdf-page' });
+        div.dataset.page = n;
+        size(div);
+        el.append(div);
+        divs.push(div);
+        io.observe(div);
+      }
+      el.querySelector(`.pdf-page[data-page="${page || 1}"]`)?.scrollIntoView({ block: 'start' });
+      ro = new ResizeObserver(() => {
+        const s = fitScale();
+        if (Math.abs(s - scale) < 0.005) return;
+        const at = el.scrollTop / el.scrollHeight;
+        scale = s;
+        divs.forEach(size);
+        el.scrollTop = at * el.scrollHeight;
+        clearTimeout(timer);
+        timer = setTimeout(() => divs.forEach((d) => { if (d.firstChild) { d.firstChild.remove(); io.unobserve(d); io.observe(d); } }), 250);
+      });
+      ro.observe(el);
+    })().catch((e) => !dead && setError(e.message));
+    return () => { dead = true; clearTimeout(timer); ro?.disconnect(); io?.disconnect(); doc?.destroy(); };
+  }, [pid, page, q]);
+  if (error) return html`<div class="pdf-missing">PDF 打不开：${error}</div>`;
+  return html`<div class="peek-pdf" ref=${host}><div class="pdf-loading"><span class="spin"></span>正在打开 PDF…</div></div>`;
+}
+
+export function Peek() {
+  const pk = peek.value;
+  const [p, reload, err] = useLive(pk ? `/api/papers/${enc(pk.pid)}` : null, { poll: false });
+  const [pos, setPos] = useState(null);
+  const [drag, setDrag] = useState(null);
+  const [adding, setAdding] = useState(null);
+  const mine = adding && adding.pid === pk?.pid ? adding : null;
+  useEffect(() => {
+    if (!pk || mine || !(err || p?.listed === false)) return;
+    setAdding({ pid: pk.pid });
+    addPaper(pk.pid).then((np) => { if (np.id !== pk.pid) peek.value = { ...pk, pid: np.id }; else reload(); })
+      .catch((e) => setAdding({ pid: pk.pid, error: e.message }));
+  }, [pk?.pid, err, p?.listed]);
+  if (!pk) return null;
+  const down = (e) => {
+    if (e.target.closest('button')) return;
+    const r = e.currentTarget.parentElement.getBoundingClientRect();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDrag({ dx: e.clientX - r.left, dy: e.clientY - r.top });
+  };
+  const move = (e) => drag && setPos({ x: Math.max(0, e.clientX - drag.dx), y: Math.max(0, e.clientY - drag.dy) });
+  const full = () => { peek.value = null; openReader(pk.pid, { tab: 'card', page: pk.page, q: pk.q }); };
+  return html`<div class="peek" role="dialog" aria-label="速览论文" style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : null}>
+    <div class="peek-top" onPointerDown=${down} onPointerMove=${move} onPointerUp=${() => setDrag(null)}>
+      <b title=${p?.title}>${p ? short(p.title, 60) : '…'}</b>${pk.page ? html`<span class="hint">p.${pk.page}</span>` : null}<span class="grow"></span>
+      <button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => { peek.value = null; }}>×</button></div>
+    ${pk.q ? html`<div class="peek-q hint" title=${pk.q}>找这句：${short(pk.q, 90)}</div>` : null}
+    ${mine?.error && !p ? html`<div class="pdf-missing"><div style="text-align:center">收不下这篇论文：${mine.error}<br />${pk.pid.startsWith('arxiv:') ? html`<a class="btn sm ghost" href=${`https://arxiv.org/abs/${pk.pid.slice(6)}`} target="_blank" rel="noopener">在 arXiv 打开</a>` : null}</div></div>`
+      : !p ? html`<div class="pdf-loading"><span class="spin"></span>${mine ? '这篇不在论文库里，正在收下（拉取元数据和 PDF）…' : ''}</div>`
+      : p.pdf_path ? html`<${PeekPdf} pid=${pk.pid} page=${pk.page} q=${pk.q} />`
+      : html`<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br /><${PdfButton} paper=${p.id} /></div></div>`}</div>`;
+}
 
 // ---------- selection popover ----------
 
@@ -317,7 +448,9 @@ function wholeWords(range, text) {
 export function SelectionPopup() {
   const [ctx, setCtx] = useState(null);
   const [v, setV] = useState('');
-  const box = useRef(), input = useRef();
+  const [ans, setAns] = useState(null);
+  const box = useRef(), input = useRef(), cur = useRef();
+  cur.current = ctx;
   useEffect(() => {
     const up = (e) => {
       if (box.current?.contains(e.target)) return;
@@ -332,10 +465,10 @@ export function SelectionPopup() {
         const editing = document.activeElement?.matches('input, textarea') && into?.contains(document.activeElement);
         if (!host && !into || editing) return;
         const pg = node.closest('.pdf-page'), rect = range.getBoundingClientRect(), at = { top: rect.top, bottom: rect.bottom, left: rect.left };
-        setV('');
-        if (into) return setCtx({ scope: into.dataset.quoteScope, quote: text.slice(0, 2000), rect: at });
-        setCtx({ pid: host.dataset.pid, surface: host.dataset.anchorSurface, quote: text.slice(0, 2000), page: pg ? +pg.dataset.page : null,
-          section: host.dataset.section || null, rect: at });
+        setV(''); setAns(null);
+        const base = { quote: text.slice(0, 2000), rect: at, range: range.cloneRange() };
+        if (into) return setCtx({ ...base, scope: into.dataset.quoteScope });
+        setCtx({ ...base, pid: host.dataset.pid, surface: host.dataset.anchorSurface, page: pg ? +pg.dataset.page : null, section: host.dataset.section || null });
       }, 0);
     };
     const down = (e) => { if (!box.current?.contains(e.target)) setCtx(null); };
@@ -343,22 +476,59 @@ export function SelectionPopup() {
     document.addEventListener('mousedown', down);
     return () => { document.removeEventListener('mouseup', up); document.removeEventListener('mousedown', down); };
   }, []);
+  // Our own highlight of the passage: the native selection goes away as soon as the question box takes focus.
+  useEffect(() => {
+    if (!ctx || !window.CSS?.highlights) return;
+    CSS.highlights.set('selpop', new Highlight(ctx.range));
+    return () => CSS.highlights.delete('selpop');
+  }, [ctx]);
   useEffect(() => {
     const el = box.current;
     if (!ctx || !el) return;
-    const top = ctx.rect.top > 150 ? ctx.rect.top - el.offsetHeight - 8 : ctx.rect.bottom + 8;
-    el.style.top = `${Math.max(8, top)}px`;
+    const top = ctx.rect.top > 150 && ctx.rect.top - el.offsetHeight - 8 >= 8 ? ctx.rect.top - el.offsetHeight - 8 : ctx.rect.bottom + 8;
+    el.style.top = `${Math.max(8, Math.min(top, innerHeight - el.offsetHeight - 8))}px`;
     el.style.left = `${Math.min(innerWidth - el.offsetWidth - 8, Math.max(8, ctx.rect.left))}px`;
-  }, [ctx]);
+  }, [ctx, ans]);
   if (!ctx) return null;
   const done = () => { setCtx(null); window.getSelection().removeAllRanges(); };
+  const question = () => ans?.q || v.trim();
+  // "快速问": answered here from what is on this page; nothing is saved and no discussion sees it.
+  const quick = async (web) => {
+    const c = ctx, q = v.trim() || '这段是什么意思？';
+    setAns({ q, web });
+    try {
+      const r = await post('/api/quick', { ...(c.scope ? { scope: c.scope } : { pid: c.pid, page: c.page, surface: c.surface }), quote: c.quote, question: q, web });
+      if (cur.current === c) setAns({ q, web, text: r.text, sources: r.sources || [] });
+    } catch (e) { if (cur.current === c) setAns({ q, web, error: e.message }); }
+  };
+  const answer = ans ? html`<div class="selpop-ans">${ans.text ? html`<${Md} text=${ans.text} />
+      ${ans.sources?.length ? html`<div class="hint">网上来源：${ans.sources.map((x) => html`<a href=${x.url} target="_blank">${short(x.title || x.url, 30)}</a>　`)}</div>` : null}`
+    : ans.error ? html`<span class="hint" style="color:var(--red)">${ans.error}</span>` : html`<span class="spin"></span> <span class="hint">${ans.web ? '在网上查…' : '几秒内回答…'}</span>`}</div>` : null;
+  const keep = (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); };
+  const field = (ph) => html`<form onSubmit=${(e) => { e.preventDefault(); quick(false); }}><input ref=${input} value=${v} onInput=${(e) => setV(e.target.value)} placeholder=${ph} /></form>`;
+  const quickBtn = html`<button class="btn sm primary" title="几秒内在这里回答，只看这一页附近的内容，不保存" onClick=${() => quick(false)}>快速问</button>
+    ${appState.value?.agent?.search_api ? html`<button class="btn sm" title="可以上网搜索补充，答案带网上来源，不保存（约 5 秒）" onClick=${() => quick(true)}>上网查</button>` : null}`;
   if (ctx.scope) {
-    return html`<div id="selpop" ref=${box} onMouseDown=${(e) => e.preventDefault()}>
-      <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>
-      <div class="selpop-acts"><button class="btn sm primary" title="把这段引用放进右侧讨论的输入框，接着写想怎么改" onClick=${() => { quoting.value = { scope: ctx.scope, text: ctx.quote }; done(); }}>加入讨论</button></div></div>`;
+    // A new discussion for the agent, so it never lands in the middle of the one in progress.
+    const deepen = async () => {
+      const c = ctx, q = question() || '这段是什么意思？';
+      done();
+      try {
+        const t = await post('/api/threads', { scope: c.scope });
+        await post('/api/chat', { scope: c.scope, thread_id: t.id, text: `「${c.quote}」\n${q}` });
+        const k = c.scope.split(':')[0];
+        showResearch(c.scope.slice(k.length + 1), { research: 'overview', related: 'materials', experiment: 'experiments' }[k] || k, t.id);
+        refresh();
+      } catch (e) { fail(e); }
+    };
+    return html`<div id="selpop" ref=${box} onMouseDown=${keep}>
+      <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>${field('问点什么，回车快速回答')}${answer}
+      <div class="selpop-acts">${quickBtn}
+        ${agentOn.value ? html`<button class="btn sm" title="新开一段讨论，让 agent 查这个研究的全部资料来回答" onClick=${deepen}>${ans ? '让 agent 深入' : '新开讨论问 agent'}</button>` : null}
+        <button class="btn sm ghost" title="把这段引用放进右侧讨论的输入框，接着写想怎么改" onClick=${() => { quoting.value = { scope: ctx.scope, text: ctx.quote }; done(); }}>加入讨论</button></div></div>`;
   }
   const discuss = async () => {
-    const c = ctx, text = v.trim();
+    const c = ctx, text = question();
     done();
     try {
       const { anchor, error } = await post(`/api/papers/${enc(c.pid)}/anchors`, { pid: c.pid, surface: c.surface, quote: c.quote, page: c.page, section: c.section, text });
@@ -373,10 +543,10 @@ export function SelectionPopup() {
     done();
     try { await post('/api/threads', { scope: `paper:${c.pid}`, text: `关于「${short(c.quote, 120)}」：${note}` }); toast('已记下，开了一段关于这篇的讨论'); refresh(); } catch (e) { fail(e); }
   };
-  return html`<div id="selpop" ref=${box} onMouseDown=${(e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); }}>
-    <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>
-    <form onSubmit=${(e) => { e.preventDefault(); discuss(); }}><input ref=${input} value=${v} onInput=${(e) => setV(e.target.value)} placeholder="围绕这段问点什么，回车发起讨论" /></form>
-    <div class="selpop-acts"><button class="btn sm primary" onClick=${discuss}>讨论这段</button><button class="btn sm" title="只记下，不叫 agent 回答" onClick=${jot}>记下来</button></div></div>`;
+  return html`<div id="selpop" ref=${box} onMouseDown=${keep}>
+    <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>${field('围绕这段问点什么，回车快速回答')}${answer}
+    <div class="selpop-acts">${quickBtn}<button class="btn sm" title="新开一段关于这段的讨论，让 agent 翻全文、查库里别的论文来回答" onClick=${discuss}>${ans ? '让 agent 深入' : '讨论这段'}</button>
+      <button class="btn sm ghost" title="只记下，不叫 agent 回答" onClick=${jot}>记下来</button></div></div>`;
 }
 
 // ---------- figure lightbox ----------

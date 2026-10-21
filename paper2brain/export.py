@@ -60,7 +60,8 @@ def to_latex(md, keys):
                 env = want
             out.append(f"  \\item {_inline(m.group(2))}")
         elif re.match(r"^#{1,4}\s", line):
-            out.append(f"\\paragraph{{{_inline(re.sub(r'^#+\\s*', '', line))}}}")
+            heading = re.sub(r"^#+\s*", "", line)  # no backslash inside f-string expressions before Python 3.12
+            out.append(f"\\paragraph{{{_inline(heading)}}}")
         else:
             out.append(_inline(line))
     if env:

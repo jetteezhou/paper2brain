@@ -30,6 +30,31 @@ export function fit(el) {
 /** Phones have no Shift key handy: there Enter is a newline and the button sends. */
 export const touch = matchMedia('(pointer: coarse)').matches;
 
+// The discussion dock's width, shared by every page that has one; dragged or arrowed, double-click resets.
+const setDockW = (w) => {
+  if (w) document.documentElement.style.setProperty('--dock-w', `${w}px`);
+  else document.documentElement.style.removeProperty('--dock-w');
+  w ? localStorage.setItem('p2b.dockW', w) : localStorage.removeItem('p2b.dockW');
+};
+setDockW(+localStorage.getItem('p2b.dockW') || 0);
+/** Placed inside the dock; the dock's parent is the split it resizes. */
+export function DockGrip() {
+  const clamp = (el, w) => Math.round(Math.min(Math.max(w, 280), el.parentElement.parentElement.clientWidth - 360));
+  const down = (e) => {
+    const el = e.currentTarget, right = el.parentElement.parentElement.getBoundingClientRect().right;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('on');
+    el.onpointermove = (m) => setDockW(clamp(el, right - m.clientX));
+    el.onpointerup = el.onpointercancel = () => { el.onpointermove = el.onpointerup = el.onpointercancel = null; el.classList.remove('on'); };
+  };
+  const key = (e) => {
+    const d = { ArrowLeft: 24, ArrowRight: -24 }[e.key];
+    if (d) { e.preventDefault(); setDockW(clamp(e.currentTarget, e.currentTarget.parentElement.offsetWidth + d)); }
+  };
+  return html`<div class="dock-grip" role="separator" aria-orientation="vertical" aria-label="拖动调整讨论栏宽度" tabIndex="0" title="拖动调整宽度，双击恢复默认"
+    onPointerDown=${down} onKeyDown=${key} onDblClick=${() => setDockW(0)}></div>`;
+}
+
 // ---------- formatting ----------
 
 export function ago(iso) {
@@ -56,6 +81,10 @@ export const live = (status) => ['WAITING', 'CREATING', 'RUNNING', 'QUEUED'].inc
 
 /** True while some on-screen mark is spinning, so the corner logo can follow without a fresh /api/state. */
 export const agentBusy = signal(false);
+/** Corner logo spins while a mark on screen is spinning, or a run is still unfinished. */
+export const workHot = (state) => agentBusy.value || (state?.working?.length || 0) > 0 || (state?.counts?.running || 0) > 0;
+/** The shell assigns `fn`: clicking the corner logo opens pages still working, or the three most recent ones. */
+export const openWork = { fn: null };
 const _busy = { n: 0 };
 const holdBusy = () => {
   agentBusy.value = true;
@@ -157,6 +186,7 @@ const ICON = {
   discuss: '<path d="M4 5h16v11H9l-5 4z"/>',
   research: '<path d="M12 3l2.2 5.6L20 9.3l-4.5 3.8 1.4 5.9L12 15.9 7.1 19l1.4-5.9L4 9.3l5.8-.7z"/>',
   unsorted: '<path d="M4 7h16M4 12h10M4 17h6"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13M9 7V4h6v3"/>',
 };
 export const Icon = ({ k }) => html`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
   stroke-linecap="round" stroke-linejoin="round" dangerouslySetInnerHTML=${{ __html: ICON[k] || '' }} />`;
