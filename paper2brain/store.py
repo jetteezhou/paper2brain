@@ -506,7 +506,6 @@ def copy_research(rid, dst):
         c.execute("UPDATE threads SET fork_message_id=NULL WHERE fork_message_id NOT IN (SELECT id FROM messages)")
         c.execute("UPDATE notes SET paper_id=NULL WHERE paper_id NOT IN (SELECT id FROM papers)")
         c.execute("UPDATE notes SET thread_id=NULL WHERE thread_id NOT IN (SELECT id FROM threads)")
-        c.execute("UPDATE writing SET overleaf=NULL WHERE research_id=?", (rid,))  # its checkout and credentials stay behind
         old, new = str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/"
         for t, col in (("papers", "pdf_path"), ("repos", "path"), ("research_docs", "path")):
             c.execute(f"UPDATE {t} SET {col} = ? || substr({col}, ?) WHERE substr({col}, 1, ?) = ?", (new, len(old) + 1, len(old), old))
@@ -2046,6 +2045,12 @@ def get_writing(rid):
         w = _row(c.execute("SELECT * FROM writing WHERE research_id=?", (rid,)).fetchone())
     return w or {"research_id": rid, "abstract": None, "introduction": None, "proposal": None, "revision": 0,
                  "updated_at": None, "edited_by": None, "overleaf": None}
+
+
+def overleaf_researches(project):
+    """The researches of this library written in this Overleaf project (they share its checkout)."""
+    with tx() as c:
+        return [r[0] for r in c.execute("SELECT research_id FROM writing WHERE overleaf=?", (project,))]
 
 
 def set_overleaf(rid, project):

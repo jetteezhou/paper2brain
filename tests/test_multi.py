@@ -14,7 +14,7 @@ from unittest import mock
 
 os.environ.setdefault("P2B_HOME", tempfile.mkdtemp(prefix="p2b-test-"))
 
-from paper2brain import accounts, cursor_api, repos, rules, server, sources, store  # noqa: E402
+from paper2brain import accounts, cursor_api, overleaf, repos, rules, server, sources, store  # noqa: E402
 
 
 class Multi(unittest.TestCase):
@@ -115,17 +115,28 @@ class Multi(unittest.TestCase):
         a, ta = self.user("甲")
         b, tb = self.user("乙")
         rid, tid, _ = self.research_with_material(a["library"])
+        pid = "0123456789abcdef01234567"
         with store.at_home(store.library_home(a["library"])):
             mine = store.new_thread("library", text="别的讨论")
             store.set_thread_agent(mine, "bc-mine")
             other = store.add_research("别的研究", "user")
+            store.set_overleaf(rid, pid)
+            overleaf.local_dir(pid).mkdir(parents=True)
+            (overleaf.local_dir(pid) / "main.tex").write_text("还没推送的改动")
+            accounts.write_config(a["library"], overleaf_token="olp_x")
             space = accounts.create_space(a, "组会", rid)
+            self.assertFalse(overleaf.local_dir(pid).exists())  # moved, not left behind to drift
+        with store.at_home(store.library_home(space)):
+            self.assertEqual(store.get_writing(rid)["overleaf"], pid)
+            self.assertEqual((overleaf.local_dir(pid) / "main.tex").read_text(), "还没推送的改动")
+            self.assertEqual(overleaf._token(), "olp_x")
         accounts.redeem(accounts.invite("join", space, "editor"), user=b)
         home_list = self.call("/api/research?shared=1", cookie=f"p2b_session={ta}")[1]
         self.assertEqual({(x["title"], (x.get("space") or {}).get("name")) for x in home_list}, {("别的研究", None), ("共享的研究", "组会")})
         self.assertEqual([x["title"] for x in self.call("/api/research", cookie=f"p2b_session={ta}")[1]], ["别的研究"])  # pickers: own only
         with store.at_home(store.library_home(space)):
             store.add_message(tid, "user", "在空间里加的")
+            (overleaf.local_dir(pid) / "main.tex").write_text("空间里又改的")
         editor = f"p2b_session={tb}; p2b_lib={space}"
         self.assertEqual(self.call(f"/api/research/{rid}/move-home", {}, cookie=editor)[0], 400)  # only the owner
         code, got, headers = self.call(f"/api/research/{rid}/move-home", {}, cookie=f"p2b_session={ta}; p2b_lib={space}")
@@ -135,9 +146,25 @@ class Multi(unittest.TestCase):
             self.assertEqual(store.thread_for(thread_id=tid)["messages"][-1]["text"], "在空间里加的")
             self.assertEqual(store.thread_for(thread_id=mine)["agent_id"], "bc-mine")  # the rest of the library untouched
             self.assertTrue(store.get_research(other))
+            self.assertEqual(store.get_writing(rid)["overleaf"], pid)
+            self.assertEqual((overleaf.local_dir(pid) / "main.tex").read_text(), "空间里又改的")
         self.assertIsNone(accounts.role(b["id"], space))  # the empty space is archived
         self.assertTrue((accounts.root() / "archive" / space / "p2b.sqlite").is_file())
         self.assertNotIn(space, accounts.all_libraries())
+
+    def test_a_checkout_two_researches_share_is_copied_not_moved(self):
+        a, _ = self.user("甲")
+        pid = "0123456789abcdef01234567"
+        with store.at_home(store.library_home(a["library"])):
+            one, two = store.add_research("一", "user"), store.add_research("二", "user")
+            store.set_overleaf(one, pid)
+            store.set_overleaf(two, pid)
+            overleaf.local_dir(pid).mkdir(parents=True)
+            (overleaf.local_dir(pid) / "main.tex").write_text("x")
+            space = accounts.create_space(a, "组会", one)
+            self.assertTrue((overleaf.local_dir(pid) / "main.tex").is_file())  # "二" still writes here
+        with store.at_home(store.library_home(space)):
+            self.assertTrue((overleaf.local_dir(pid) / "main.tex").is_file())
 
     def test_http_sign_in_isolation_and_roles(self):
         self.url = self.serve()

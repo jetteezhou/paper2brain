@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import rules, store
+from . import overleaf, rules, store
 
 ROLES = ("viewer", "editor", "owner")
 INVITE_DAYS = 7
@@ -185,6 +185,26 @@ def _backup(why, rid):
     store.backup(f"p2b-before-{why}-{rid[:8]}-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
 
 
+def _carry_overleaf(rid, dst):
+    """A moving research takes its Overleaf checkout (unpushed edits included) and, where dst has none, the token
+    along. The checkout moves unless another research here uses it too (then it is copied); one already at dst stays."""
+    pid = store.get_writing(rid)["overleaf"]
+    if not pid:
+        return
+    here = overleaf.local_dir(pid)
+    with store.at_home(dst):
+        there = overleaf.local_dir(pid)
+    if here.is_dir() and not there.exists():
+        there.parent.mkdir(parents=True, exist_ok=True)
+        if set(store.overleaf_researches(pid)) - {rid}:
+            shutil.copytree(here, there, symlinks=True)
+        else:
+            shutil.move(str(here), str(there))
+    token = overleaf._token()
+    if token and not store.config_of(dst.name).get("overleaf_token"):
+        write_config(dst.name, overleaf_token=token)
+
+
 def create_space(user, name, research_id):
     """Move a research from the library in use into a new space owned by user (from a personal library it leaves,
     after a backup; its papers and discussions stay); the space's agents run on user's key and worker."""
@@ -200,6 +220,7 @@ def create_space(user, name, research_id):
     write_config(lib, agent_library=user["library"])
     if store.home() == store.library_home(user["library"]):
         _backup("share", research_id)
+        _carry_overleaf(research_id, store.library_home(lib))
         store.delete_research(research_id)
     return lib
 
@@ -214,6 +235,7 @@ def move_home(user, space, research_id):
             store.delete_research(research_id)
     store.copy_research(research_id, home)
     _backup("move-home", research_id)
+    _carry_overleaf(research_id, home)
     store.delete_research(research_id)
     if not store.list_research():
         with _db() as c:
