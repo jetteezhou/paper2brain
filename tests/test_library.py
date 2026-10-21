@@ -1096,6 +1096,9 @@ class Sync(unittest.TestCase):
             self.handoff._pushed = 0.0
             self.handoff.auto_push()
             self.assertEqual(self.handoff.meta()["owner"], "mac-b")  # B took the library: A leaves its snapshot alone
+            self.assertFalse(self.handoff.holder())  # nor does A take the inbox or start background agents
+        with self.on(self.b):
+            self.assertTrue(self.handoff.holder())
 
 
 class Diagrams(unittest.TestCase):

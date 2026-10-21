@@ -46,6 +46,16 @@ def _snapshot(owner):
                                                    "at": datetime.now().isoformat(timespec="seconds")}))
 
 
+def holder():
+    """True on the Mac holding the library: no handoff yet, or this Mac pulled it last. Only it takes the iCloud inbox
+    and starts background agents, since what they write (captures, papers, cards) does not sync to the other Mac."""
+    try:
+        m = meta()
+    except (OSError, ValueError):
+        return True  # iCloud unreadable or mid-write: keep working as a single Mac would
+    return not m or m.get("owner") in (None, ME)
+
+
 _pushed = 0.0
 
 
@@ -56,8 +66,7 @@ def auto_push():
     if time.time() - _pushed < AUTO_EVERY or not DROP.exists():
         return
     _pushed = time.time()
-    m = meta()
-    if m and m.get("owner") not in (None, ME):
+    if not holder():
         return
     # ponytail: the other Mac can pull between this check and the write below; then run pull there once more
     _snapshot(owner=ME)

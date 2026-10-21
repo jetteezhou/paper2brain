@@ -927,8 +927,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def _poll_inbox():
     while True:
-        for job in (store.backup, cursor_api.expire_stale, inbox.drain, cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending,
-                    cursor_api.card_pending, structure.backfill, sync.run, lambda: bg(handoff.auto_push)):
+        held = handoff.holder()
+        for job in (store.backup, cursor_api.expire_stale, structure.backfill, sync.run, lambda: bg(handoff.auto_push),
+                    *((inbox.drain, cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending,
+                       cursor_api.card_pending) if held else ())):
             try:
                 job()
             except Exception:
