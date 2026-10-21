@@ -145,6 +145,17 @@ def space_create(q, body):
     return {"library": lib, "_cookies": {"p2b_lib": lib}}
 
 
+@route("POST", "/api/research/([^/]+)/move-home")
+def research_move_home(q, body, rid):
+    """The space's owner takes this research back into their own library."""
+    _owner()
+    me = _me()
+    if me["library"] == me["user"]["library"]:
+        raise rules.Rejected("它已经在你的个人库里了")
+    lib = accounts.move_home(me["user"], me["library"], rid)
+    return {"library": lib, "_cookies": {"p2b_lib": lib}}
+
+
 @route("POST", "/api/members/invite")
 def member_invite(q, body):
     _owner()
@@ -500,7 +511,15 @@ def message_get(q, body, mid):
 
 @route("GET", "/api/research")
 def research_list(q, body):
-    return store.list_research("" if q.get("unsorted") else q.get("topic"))
+    """shared=1 in a personal library on the shared server: also the researches of the spaces the user is in."""
+    out = store.list_research("" if q.get("unsorted") else q.get("topic"))
+    me = _me()
+    if q.get("shared") and store.multi() and me["library"] == me["user"]["library"]:
+        for lib in accounts.libraries(me["user"]["id"]):
+            if lib["kind"] == "space":
+                with store.at_home(store.library_home(lib["id"])):
+                    out += [{**x, "space": {"id": lib["id"], "name": lib["name"], "role": lib["role"]}} for x in store.list_research()]
+    return out
 
 
 @route("POST", "/api/research")

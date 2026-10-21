@@ -451,7 +451,7 @@ function Account() {
       <button class="btn sm" onClick=${() => call('invite', '/api/members/invite', { role: 'viewer' })}>生成只读的邀请链接</button></p>
       ${got.invite ? html`<p class="hint">一次有效，7 天内用：</p><${Copyable} text=${joinLink(got.invite.code)} />` : null}`
       : html`<p><button class="btn sm ghost danger" onClick=${leave}>离开这个空间</button></p>`}`
-  : html`<p class="hint" style="margin-top:0">把一个研究连同它用到的论文、讨论、附件、代码仓库和图复制到一个新的共享空间，再邀请别人；个人库里的原研究保留不动，之后在空间里一起改。</p>
+  : html`<p class="hint" style="margin-top:0">把一个研究移到一个新的共享空间（它用到的论文、讨论、附件、代码仓库和图一起带过去；个人库里的论文和讨论都还在），再邀请别人一起改。个人库的研究列表里仍能看到它（标着“共享”），点开就进入空间；你作为所有者随时可以在研究页上把它移回个人库。</p>
     <form class="research-create" onSubmit=${share}>
       <select name="research_id" aria-label="要共享的研究"><option value="">选一个研究…</option>${(researches || []).map((x) => html`<option value=${x.id}>${x.title}</option>`)}</select>
       <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />
@@ -465,6 +465,9 @@ function Setup() {
   const a = appState.value.agent, ok = a.backends || {};
   if (appState.value.account) return html`<h3>账号、agent 与共享</h3><${Account} />
     ${a.enabled && appState.value.account.role === 'owner' ? html`<div class="block-title" style="margin-top:14px">模型<span class="line"></span></div><${Models} key=${a.machine} />` : null}
+    ${appState.value.account.role === 'owner' ? html`<div class="block-title" style="margin-top:14px">快速搜索接口<span class="line"></span></div>
+      <p class="hint" style="margin-top:0">搜索框的 AI 推荐、快速问、起标题、上网找论文直接调这个 OpenAI 兼容接口（Gemini 用 https://generativelanguage.googleapis.com/v1beta/openai）。存在服务器上${appState.value.account.library === appState.value.account.libraries.find((l) => l.kind === 'personal')?.id ? '你的论文库里' : '这个空间里；不填就用负责 agent 的成员的'}，key 不会再发回网页。${a.search_ai ? '✓ 已可用' : '未可用'}</p>
+      <${SearchApi} />` : null}
     <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>关闭</button></div>`;
   const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
   const mark = (b) => (ok[b] ? '✓ 已连接' : '未连接');

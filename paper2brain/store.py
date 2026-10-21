@@ -488,27 +488,30 @@ _COPY = (
 
 def copy_research(rid, dst):
     """Copy a research and what it uses (papers with their files, linked discussions, docs, repos, code maps, diagrams)
-    into the library at dst, under the same ids. The original stays as it is."""
+    into the library at dst, under the same ids; dst may already hold other things (moving a research back home),
+    which stay as they are, as does the original."""
     src = home()
     if not get_research(rid):
         raise rules.Rejected("这个研究不存在或已删除")
+    where = dict(_COPY)
     with at_home(dst), tx() as c:
         c.execute("PRAGMA foreign_keys=OFF")  # what was left behind is unlinked below instead
         c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
-        for t, where in _COPY:
+        for t, cond in _COPY:
             cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({t})"))
-            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE {where}", {"r": rid})
-        c.execute("UPDATE threads SET agent_id=NULL")  # the space starts its own agents
+            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE {cond}", {"r": rid})
+        r = {"r": rid}
+        c.execute(f"UPDATE threads SET agent_id=NULL WHERE {where['threads']}", r)  # the other library starts its own agents
         c.execute("UPDATE threads SET parent_id=NULL WHERE parent_id NOT IN (SELECT id FROM threads)")
         c.execute("UPDATE threads SET fork_message_id=NULL WHERE fork_message_id NOT IN (SELECT id FROM messages)")
         c.execute("UPDATE notes SET paper_id=NULL WHERE paper_id NOT IN (SELECT id FROM papers)")
         c.execute("UPDATE notes SET thread_id=NULL WHERE thread_id NOT IN (SELECT id FROM threads)")
-        c.execute("UPDATE writing SET overleaf=NULL")  # its checkout and credentials belong to the owner
+        c.execute("UPDATE writing SET overleaf=NULL WHERE research_id=?", (rid,))  # its checkout and credentials stay behind
         old, new = str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/"
         for t, col in (("papers", "pdf_path"), ("repos", "path"), ("research_docs", "path")):
             c.execute(f"UPDATE {t} SET {col} = ? || substr({col}, ?) WHERE substr({col}, 1, ?) = ?", (new, len(old) + 1, len(old), old))
-        folders = [Path("papers") / p["id"].replace(":", "_").replace("/", "_") for p in c.execute("SELECT id FROM papers")]
-        folders += [Path(r["path"][len(new):]) for r in c.execute("SELECT path FROM repos") if r["path"].startswith(new)]
+        folders = [Path("papers") / p["id"].replace(":", "_").replace("/", "_") for p in c.execute(f"SELECT id FROM s.papers WHERE {where['papers']}", r)]
+        folders += [Path(p["path"][len(old):]) for p in c.execute(f"SELECT path FROM s.repos WHERE {where['repos']}", r) if p["path"].startswith(old)]
         c.commit()
         c.execute("DETACH DATABASE s")
     for f in folders + [Path("diagrams") / rid, Path("assets") / "research" / rid]:

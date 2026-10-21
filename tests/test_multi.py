@@ -97,7 +97,10 @@ class Multi(unittest.TestCase):
             with self.assertRaises(Exception):
                 store.thread_for(thread_id=private)
         with store.at_home(store.library_home(a["library"])):
-            self.assertTrue(store.get_research(rid))  # the original stays
+            self.assertIsNone(store.get_research(rid))  # moved: one copy to work on
+            self.assertTrue(store.get_paper("arxiv:2410.24164"))  # its materials stay
+            self.assertTrue(store.thread_for(thread_id=tid))
+            self.assertTrue(list((store.home() / "backups").glob("p2b-before-share-*.sqlite")))
         self.assertIsNone(accounts.role(b["id"], space))
         accounts.redeem(accounts.invite("join", space, "viewer"), user=b)
         self.assertEqual(accounts.role(b["id"], space), "viewer")
@@ -106,6 +109,35 @@ class Multi(unittest.TestCase):
             accounts.set_agent(space, b["id"])  # a viewer cannot run the space's agents
         with self.assertRaises(rules.Rejected):
             accounts.set_role(space, a["id"], "editor")  # the last owner stays
+
+    def test_shared_research_shows_at_home_and_the_owner_moves_it_back(self):
+        self.url = self.serve()
+        a, ta = self.user("甲")
+        b, tb = self.user("乙")
+        rid, tid, _ = self.research_with_material(a["library"])
+        with store.at_home(store.library_home(a["library"])):
+            mine = store.new_thread("library", text="别的讨论")
+            store.set_thread_agent(mine, "bc-mine")
+            other = store.add_research("别的研究", "user")
+            space = accounts.create_space(a, "组会", rid)
+        accounts.redeem(accounts.invite("join", space, "editor"), user=b)
+        home_list = self.call("/api/research?shared=1", cookie=f"p2b_session={ta}")[1]
+        self.assertEqual({(x["title"], (x.get("space") or {}).get("name")) for x in home_list}, {("别的研究", None), ("共享的研究", "组会")})
+        self.assertEqual([x["title"] for x in self.call("/api/research", cookie=f"p2b_session={ta}")[1]], ["别的研究"])  # pickers: own only
+        with store.at_home(store.library_home(space)):
+            store.add_message(tid, "user", "在空间里加的")
+        editor = f"p2b_session={tb}; p2b_lib={space}"
+        self.assertEqual(self.call(f"/api/research/{rid}/move-home", {}, cookie=editor)[0], 400)  # only the owner
+        code, got, headers = self.call(f"/api/research/{rid}/move-home", {}, cookie=f"p2b_session={ta}; p2b_lib={space}")
+        self.assertEqual((code, got["library"]), (200, a["library"]))
+        with store.at_home(store.library_home(a["library"])):
+            self.assertEqual(store.get_research(rid)["title"], "共享的研究")
+            self.assertEqual(store.thread_for(thread_id=tid)["messages"][-1]["text"], "在空间里加的")
+            self.assertEqual(store.thread_for(thread_id=mine)["agent_id"], "bc-mine")  # the rest of the library untouched
+            self.assertTrue(store.get_research(other))
+        self.assertIsNone(accounts.role(b["id"], space))  # the empty space is archived
+        self.assertTrue((accounts.root() / "archive" / space / "p2b.sqlite").is_file())
+        self.assertNotIn(space, accounts.all_libraries())
 
     def test_http_sign_in_isolation_and_roles(self):
         self.url = self.serve()

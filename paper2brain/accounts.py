@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -127,7 +128,7 @@ def redeem(code, name=None, user=None):
             lib = _new_library(c, f"{name} 的论文库", "personal", uid)
             c.execute("UPDATE users SET library=? WHERE id=?", (lib, uid))
             user, fresh = dict(id=uid, name=name, library=lib), True
-        if inv["kind"] == "join" and inv["library"]:
+        if inv["kind"] == "join" and inv["library"] and c.execute("SELECT 1 FROM libraries WHERE id=?", (inv["library"],)).fetchone():
             c.execute("INSERT OR IGNORE INTO members VALUES (?,?,?)", (inv["library"], user["id"], inv["role"]))
     return user, issue(user["id"], "web") if fresh else None, (inv["library"] if inv["kind"] == "join" else None) or user["library"]
 
@@ -180,8 +181,13 @@ def set_role(library, user_id, new_role):
         set_agent(library, next(m["id"] for m in members(library) if m["role"] == "owner"))
 
 
+def _backup(why, rid):
+    store.backup(f"p2b-before-{why}-{rid[:8]}-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
+
+
 def create_space(user, name, research_id):
-    """Copy a research from the library in use into a new space owned by user; its agents run on user's key and worker."""
+    """Move a research from the library in use into a new space owned by user (from a personal library it leaves,
+    after a backup; its papers and discussions stay); the space's agents run on user's key and worker."""
     name = (name or "").strip()[:60] or "共享空间"
     with _db() as c:
         lib = _new_library(c, name, "space", user["id"])
@@ -192,7 +198,29 @@ def create_space(user, name, research_id):
             c.execute("DELETE FROM libraries WHERE id=?", (lib,))
         raise
     write_config(lib, agent_library=user["library"])
+    if store.home() == store.library_home(user["library"]):
+        _backup("share", research_id)
+        store.delete_research(research_id)
     return lib
+
+
+def move_home(user, space, research_id):
+    """A space's owner takes one of its researches back into their own library (replacing an older copy there); a
+    space left with no research is archived on the server (root/archive), not deleted. Runs in the space."""
+    home = store.library_home(user["library"])
+    with store.at_home(home):
+        _backup("move-home", research_id)
+        if store.get_research(research_id):
+            store.delete_research(research_id)
+    store.copy_research(research_id, home)
+    _backup("move-home", research_id)
+    store.delete_research(research_id)
+    if not store.list_research():
+        with _db() as c:
+            c.execute("DELETE FROM libraries WHERE id=?", (space,))
+        (root() / "archive").mkdir(exist_ok=True)
+        shutil.move(str(store.library_home(space)), str(root() / "archive" / space))
+    return user["library"]
 
 
 def agent_member(library):

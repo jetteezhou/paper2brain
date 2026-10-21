@@ -763,6 +763,15 @@ function ResearchDetail({ id }) {
     toast('已删除');
     refresh();
   };
+  const acc = appState.value?.account;
+  const inSpace = acc && acc.libraries.find((l) => l.id === acc.library)?.kind === 'space';
+  const moveHome = async () => {
+    if (!confirm('把这个研究移回你的个人库？\n\n它现在的样子（连同用到的论文、讨论、附件）会复制回个人库，然后从这个空间移走，其他成员就看不到了。空间里没有别的研究时，空间会归档。')) return;
+    try { await post(`/api/research/${enc(x.id)}/move-home`); } catch (e) { return fail(e); }
+    sessionStorage.setItem(OPEN_AFTER_SWITCH, x.id);
+    location.hash = '#/research';
+    location.reload();
+  };
   const head = html`<div class="src-bar"><button class="btn sm ghost wide-only" title="研究列表" onClick=${() => setList(!listOn.value)}>${listOn.value ? '‹ 收起列表' : '› 研究列表'}</button><${StageChip} stage=${x.stage} /><${ElementsChip} n=${x.elements_done} />
       ${exps.length ? html`<span class="chip" title="实验记录">实验 ${exps.length}（支持 ${by('supports')} · 反驳 ${by('refutes')}）</span>` : null}
       ${x.repos.length ? html`<span class="chip">仓库 ${x.repos.length}</span>` : null}${x.writing.abstract || x.writing.introduction ? html`<span class="chip">有草稿</span>` : null}
@@ -772,6 +781,7 @@ function ResearchDetail({ id }) {
       ${x.figures.proposal ? html`<a href="#" class="chip violet" onClick=${toTab('experiments')}>实验设计修改稿待确认</a>` : null}
       ${x.overleaf_changed ? html`<a href="#" class="chip violet" title="agent 改了论文，去写作页查看并推送" onClick=${toTab('writing')}>Overleaf 改动待推送 ${x.overleaf_changed}</a>` : null}
       <span>${x.stage === 'established' ? `${ago(x.established_at)}确立` : `更新于 ${ago(x.updated_at)}`}</span><span class="grow"></span>
+      ${inSpace && acc.role === 'owner' ? html`<button class="btn sm ghost" title="只有空间的所有者能移回" onClick=${moveHome}>移回个人库</button>` : null}
       <button class="btn sm ghost danger" onClick=${remove}>删除</button></div>`;
   const scope = `${{ overview: 'research', materials: 'related', experiments: 'experiment' }[tab] || tab}:${x.id}`;
   const tid = focus?.id === id && focus.tab === tab ? focus.thread : null;
@@ -790,20 +800,33 @@ function ResearchDetail({ id }) {
     ${body}`);
 }
 
+// a research of a shared space, listed in the personal library: opening it switches the page to that space
+const OPEN_AFTER_SWITCH = 'p2b.openResearch';
+async function openShared(x) {
+  try { await post('/api/libraries/switch', { library: x.space.id }); } catch (e) { return fail(e); }
+  sessionStorage.setItem(OPEN_AFTER_SWITCH, x.id);
+  location.hash = '#/research';
+  location.reload();
+}
+
 function ResearchItem({ x, on }) {
-  return html`<div class=${`item ${on ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${on ? 'true' : null} onClick=${() => (selected.value = { kind: 'research', id: x.id })}>
-    <div class="item-meta"><${StageChip} stage=${x.stage} /><${ElementsChip} n=${x.elements_done} />${x.has_proposal ? html`<span class="chip violet">修改稿待确认</span>` : null}<time>${ago(x.updated_at)}</time></div>
+  return html`<div class=${`item ${on ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${on ? 'true' : null} onClick=${() => (x.space ? openShared(x) : (selected.value = { kind: 'research', id: x.id }))}>
+    <div class="item-meta"><${StageChip} stage=${x.stage} /><${ElementsChip} n=${x.elements_done} />${x.space ? html`<span class="chip" title="在共享空间里，点开进入那个空间">共享 · ${x.space.name}</span>` : null}${x.has_proposal ? html`<span class="chip violet">修改稿待确认</span>` : null}<time>${ago(x.updated_at)}</time></div>
     <div class="item-title">${x.title}</div>${x.summary ? html`<div class="item-tldr">${x.summary}</div>` : null}
     <div class="item-tags">${x.topics.map((t) => html`<span class="chip topic">${t}</span>`)}${x.link_count ? html`<span class="chip">${x.link_count} 份素材</span>` : null}
       ${x.exp_count ? html`<span class="chip">实验 ${x.exp_count}</span>` : null}${x.repo_count ? html`<span class="chip">仓库 ${x.repo_count}</span>` : null}</div></div>`;
 }
 
 export function ResearchView({ topic }) {
-  const [list] = useLive('/api/research' + (topic ? `?topic=${enc(topic)}` : ''));
+  const [list] = useLive('/api/research' + (topic ? `?topic=${enc(topic)}` : '?shared=1'));
   const [papers] = useLive(topic ? `/api/papers?topic=${enc(topic)}` : null);
   const [name, setName] = useState('');
   const s = selected.value, sel = s?.kind === 'research' ? s.id : null;
-  useEffect(() => { if (list?.length && (!sel || !list.some((x) => x.id === sel)) && innerWidth > 900) selected.value = { kind: 'research', id: list[0].id }; }, [list, sel]);
+  useEffect(() => {
+    const own = (list || []).filter((x) => !x.space), want = sessionStorage.getItem(OPEN_AFTER_SWITCH);
+    if (want && own.some((x) => x.id === want)) { sessionStorage.removeItem(OPEN_AFTER_SWITCH); selected.value = { kind: 'research', id: want }; return; }
+    if (own.length && (!sel || !own.some((x) => x.id === sel)) && innerWidth > 900) selected.value = { kind: 'research', id: own[0].id };
+  }, [list, sel]);
   const create = async (e) => {
     e.preventDefault();
     if (!name.trim()) return;
