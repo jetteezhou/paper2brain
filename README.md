@@ -45,7 +45,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 前提：新 Mac 登录了同一个 Apple ID 并打开了 iCloud 云盘；能用 SSH 访问 GitHub。
 
-1. 在已经在用的那台 Mac 上确认 iCloud 云盘里有 `paper2brain-handoff`（持有者每半小时自动放一份快照；还没有的话在仓库目录运行一次 `.venv/bin/python ops/handoff.py push`，它会停掉那台的服务，之后接手完再在那台上 `launchctl kickstart gui/$(id -u)/com.paper2brain.server` 和 `...worker` 启动回来）。在访达里看着它上传完（云朵图标不再转）。
+1. 在已经在用的那台 Mac 上确认 iCloud 云盘里有 `paper2brain-handoff`（持有者每半小时自动放一份快照；还没有的话在仓库目录运行一次 `.venv/bin/python ops/handoff.py push`，它会停掉那台的服务，新 Mac 接手完再在那台上运行 `ops/install.sh` 启动回来）。在访达里看着它上传完（云朵图标不再转）。
 2. 在新 Mac 上装代码和环境（仓库别放进 iCloud 云盘，macOS 不让后台服务读那里的文件）：
 
    ```sh
@@ -88,12 +88,19 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 **调优 agent**：修改 `librarian/capture.md`、`discuss.md`（回答、整理讨论树、起标题）、`deepread.md`，然后在捕获详情里点"重新整理"。每次运行的提示词、调用了哪些工具、最终回复，都能在"处理记录"里看到。
 
-## 开机自启（可选）
+## 启动与停止
+
+`ops/setup.sh` 已经把网页服务（`com.paper2brain.server`）和 Cursor worker（`com.paper2brain.worker`）装成开机自启、退出后自动重启的后台服务，平时不用管。手动操作（在仓库目录）：
 
 ```sh
-sed "s#REPO#$PWD#g" ops/com.paper2brain.server.plist > ~/Library/LaunchAgents/com.paper2brain.server.plist
-launchctl load ~/Library/LaunchAgents/com.paper2brain.server.plist
+ops/install.sh                                                     # 装上并启动（也用于 push 或 bootout 之后启动回来）
+launchctl kickstart -k gui/$(id -u)/com.paper2brain.server         # 重启网页服务（改了代码或 config.json 之后）；worker 同理
+launchctl bootout gui/$(id -u)/com.paper2brain.server              # 停掉，开机也不再自启，直到再运行 ops/install.sh
+launchctl print gui/$(id -u)/com.paper2brain.server | grep state   # 看是否在运行
+tail -f /tmp/paper2brain.log /tmp/paper2brain-worker.log           # 日志；启动行里有本机和内网地址
 ```
+
+不想装后台服务时，在终端前台运行 `ops/run.sh`（网页服务和 worker 一起，Ctrl-C 停），或只开网页服务 `./p2b serve`。
 
 服务每 30 秒检查一次 iCloud 收件箱（iPhone 快捷指令写入的捕获），见 `shortcuts/README.md`。
 
