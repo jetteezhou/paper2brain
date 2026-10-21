@@ -202,7 +202,7 @@ class Multi(unittest.TestCase):
             t = store.thread_for("library")
             cursor_api.start_async("chat", t["id"], "你好", model=tc)
             for _ in range(50):
-                if store.last_run("chat")["id"].startswith("tc-"):  # queued under its own id, not the placeholder
+                if any(r["id"].startswith("tc-") and r["status"] == "CREATING" for r in store.unfinished_runs()):  # queued under its own id
                     break
                 threading.Event().wait(0.1)
         job = self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"]
@@ -216,7 +216,7 @@ class Multi(unittest.TestCase):
             self.assertEqual(store.kv_get(f"codex:{job['agent_id']}"), "s-1")
             cursor_api.start_async("chat", t["id"], "接着说", agent_id=store.thread_for(thread_id=t["id"])["agent_id"])
             for _ in range(50):
-                if store.last_run("chat")["id"].startswith("tc-"):  # queued under its own id, not the placeholder
+                if any(r["id"].startswith("tc-") and r["status"] == "CREATING" for r in store.unfinished_runs()):  # queued under its own id
                     break
                 threading.Event().wait(0.1)
         job2 = self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"]
