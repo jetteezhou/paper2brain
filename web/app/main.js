@@ -228,6 +228,7 @@ function Sidebar() {
   return html`<aside id="side">
     <${Brand} />
     <${PalTrigger} />
+    <${Libraries} />
     <nav class="nav">
       <${MainNav} />
       <div class="nav-label">主题<button class="nav-add" title="新建主题" aria-label="新建主题" onClick=${() => topicModal()}>+</button></div>
@@ -396,8 +397,73 @@ function Handoff() {
     ${s && d.holder && s.owner === d.me ? html`<p class="hint">这台就是持有者，不用接手。</p>` : null}`;
 }
 
+// ---------- the shared server: libraries, the agent on the user's own Mac, sharing a research ----------
+
+/** Which library the page shows (the user's own or a shared space); switching reloads everything. */
+function Libraries() {
+  const acc = appState.value?.account;
+  if (!acc) return null;
+  const pick = async (e) => {
+    try { await post('/api/libraries/switch', { library: e.target.value }); } catch (err) { return fail(err); }
+    location.hash = '';
+    location.reload();
+  };
+  return html`<select class="lib-pick" value=${acc.library} onChange=${pick} aria-label="切换论文库" style="margin:4px 12px 8px;max-width:calc(100% - 24px)">
+    ${acc.libraries.map((l) => html`<option value=${l.id}>${l.kind === 'space' ? '共享 · ' : ''}${l.name}${l.role === 'viewer' ? '（只读）' : ''}</option>`)}</select>`;
+}
+
+const joinLink = (code) => `${location.origin}/join.html#${code}`;
+const Copyable = ({ text }) => html`<pre style="user-select:all;white-space:pre-wrap;word-break:break-all">${text}</pre>`;
+
+function Account() {
+  const acc = appState.value.account, a = appState.value.agent;
+  const [got, setGot] = useState({});
+  const [researches] = useLive('/api/research', { poll: false });
+  const personal = acc.libraries.find((l) => l.kind === 'personal')?.id, space = acc.library !== personal, owner = acc.role === 'owner';
+  const call = async (key, url, body, after) => {
+    try { const r = await post(url, body); setGot((g) => ({ ...g, [key]: r })); if (after) after(r); } catch (e) { fail(e); }
+  };
+  const reload = () => { location.hash = ''; location.reload(); };
+  const share = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    if (!f.get('research_id')) return fail('先选一个研究');
+    call('space', '/api/spaces', { research_id: f.get('research_id'), name: f.get('name') }, () => { toast('已共享到新空间，正在打开'); setTimeout(reload, 600); });
+  };
+  const setRole = (m, role) => call('role', `/api/members/${m.id}`, { role }, () => { toast(role ? '已修改' : '已移出'); refresh(); });
+  const leave = () => confirm('离开这个空间？之后要别人重新邀请才能回来。') && call('leave', `/api/members/${acc.user.id}`, { role: null }, reload);
+  return html`<div class="block-title" style="margin-top:0">本机 agent<span class="line"></span></div>
+  <p class="hint" style="margin-top:0">${acc.user.name}，你的 agent 在你自己的 Mac 上运行，用你的 Cursor key，只能通过这个网页按你的权限读写。
+    ${a.enabled ? html`<b>✓ 已登记 worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '还没登记：在你的 Mac 上运行下面的命令。'}</p>
+  ${got.token ? html`<p class="hint">口令只显示这一次（重新生成会让旧的失效）。在 Mac 的终端里运行：</p>
+    <${Copyable} text=${`git clone ${a.repo} ~/paper2brain 2>/dev/null; ~/paper2brain/ops/client.sh ${location.origin} ${got.token.token}`} />`
+    : html`<button class="btn sm" onClick=${() => call('token', '/api/me/agent-token', {})}>生成本机 agent 的口令</button>`}
+  <div class="block-title" style="margin-top:14px">${space ? '这个共享空间' : '共享研究'}<span class="line"></span></div>
+  ${space ? html`<div>${acc.members.map((m) => html`<div class="cand"><div class="cand-body"><div class="cand-title">${m.name}${m.id === acc.user.id ? '（你）' : ''}</div>
+      <div class="cand-meta">${m.id === acc.agent_member ? '空间的 agent 用 ta 的 key 和 Mac' : ''}</div></div>
+      ${owner ? html`<select value=${m.role} onChange=${(e) => setRole(m, e.target.value)} aria-label="角色"><option value="viewer">只读</option><option value="editor">编辑</option><option value="owner">所有者</option></select>
+        ${m.id !== acc.agent_member && m.role !== 'viewer' ? html`<button class="btn sm ghost" onClick=${() => call('agent', '/api/members/agent', { user_id: m.id }, refresh)}>由 ta 负责 agent</button>` : null}
+        ${m.id !== acc.user.id ? html`<button class="btn sm ghost danger" onClick=${() => confirm(`把 ${m.name} 移出空间？`) && setRole(m, null)}>移出</button>` : null}`
+      : html`<span class="hint">${{ viewer: '只读', editor: '编辑', owner: '所有者' }[m.role]}</span>`}</div>`)}</div>
+    ${owner ? html`<p class="hint">邀请：<button class="btn sm" onClick=${() => call('invite', '/api/members/invite', { role: 'editor' })}>生成可编辑的邀请链接</button>
+      <button class="btn sm" onClick=${() => call('invite', '/api/members/invite', { role: 'viewer' })}>生成只读的邀请链接</button></p>
+      ${got.invite ? html`<p class="hint">一次有效，7 天内用：</p><${Copyable} text=${joinLink(got.invite.code)} />` : null}`
+      : html`<p><button class="btn sm ghost danger" onClick=${leave}>离开这个空间</button></p>`}`
+  : html`<p class="hint" style="margin-top:0">把一个研究连同它用到的论文、讨论、附件、代码仓库和图复制到一个新的共享空间，再邀请别人；个人库里的原研究保留不动，之后在空间里一起改。</p>
+    <form class="research-create" onSubmit=${share}>
+      <select name="research_id" aria-label="要共享的研究"><option value="">选一个研究…</option>${(researches || []).map((x) => html`<option value=${x.id}>${x.title}</option>`)}</select>
+      <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />
+      <div style="text-align:right"><button class="btn sm primary">共享到新空间</button></div></form>`}
+  <div class="block-title" style="margin-top:14px">在其他设备登录<span class="line"></span></div>
+  ${got.login ? html`<p class="hint" style="margin-top:0">在那台设备的浏览器里打开（一次有效）：</p><${Copyable} text=${joinLink(got.login.code)} />`
+    : html`<button class="btn sm" onClick=${() => call('login', '/api/me/login-link', {})}>生成登录链接</button>`}`;
+}
+
 function Setup() {
   const a = appState.value.agent, ok = a.backends || {};
+  if (appState.value.account) return html`<h3>账号、agent 与共享</h3><${Account} />
+    ${a.enabled && appState.value.account.role === 'owner' ? html`<div class="block-title" style="margin-top:14px">模型<span class="line"></span></div><${Models} key=${a.machine} />` : null}
+    <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>关闭</button></div>`;
   const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
   const mark = (b) => (ok[b] ? '✓ 已连接' : '未连接');
   return html`<h3>${a.enabled ? 'Agent 已连接' : '连接 agent'}</h3>

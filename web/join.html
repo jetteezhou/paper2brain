@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>加入 paper2brain</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+</head>
+<body>
+  <main style="max-width:420px;margin:12vh auto;padding:0 20px">
+    <h2><img src="/logo.svg" alt="" width="28" style="vertical-align:-6px"> paper2brain</h2>
+    <form id="join" hidden>
+      <p class="hint" id="what">用这个邀请链接加入。</p>
+      <input name="name" id="name" placeholder="你的名字（共享空间里别人看到的）" maxlength="40" aria-label="名字" style="width:100%;margin-bottom:10px">
+      <button class="btn primary">加入</button>
+    </form>
+    <p class="hint" id="none" hidden>这个服务需要登录：请用别人发给你的邀请链接打开，或在已登录的设备上生成一个登录链接。</p>
+    <p class="hint" id="error" role="alert" style="color:#c5221f"></p>
+  </main>
+  <script>
+    // the code rides in the #fragment, which browsers never send to the server or its logs
+    const code = location.hash.slice(1), form = document.getElementById('join'), err = document.getElementById('error');
+    if (!code) document.getElementById('none').hidden = false;
+    else fetch('/api/state').then((r) => {
+      form.hidden = false;
+      if (r.ok) { document.getElementById('name').hidden = true; document.getElementById('what').textContent = '你已登录：点“加入”接受这个邀请（登录链接会切换到它的账号）。'; }
+    });
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const r = await fetch('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, name: document.getElementById('name').value }) });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) location.replace('/'); else err.textContent = d.error || `出错了（${r.status}）`;
+    };
+  </script>
+</body>
+</html>
