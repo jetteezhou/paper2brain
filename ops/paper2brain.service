@@ -1,0 +1,17 @@
+# The shared server (multi-user mode). REPO, RUNAS, DATAROOT and DOMAIN are filled in by ops/server.sh.
+[Unit]
+Description=paper2brain shared server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=RUNAS
+WorkingDirectory=REPO
+Environment=P2B_ROOT=DATAROOT
+Environment=P2B_HOSTS=DOMAIN
+ExecStart=REPO/p2b serve --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

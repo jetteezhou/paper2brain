@@ -71,6 +71,25 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 没连接 agent 时，Web 界面照样可以收下内容、确认是哪篇论文、阅读 PDF、调整主题、记想法（开一段讨论，等连上 agent 再接着聊）；快读卡、深读报告和讨论里的回答需要连接 agent。
 
+## 多人共用一台服务器（团队版）
+
+数据和网页服务放在一台云服务器上，每人只用浏览器；agent 仍在每个人自己的 Mac 上跑，用自己的 Cursor key，只能通过服务器的接口按本人权限读写。每人一个独立的论文库（服务器上各自一个目录，互相看不到）；想和别人一起做的研究，复制进一个**共享空间**再邀请成员。
+
+- **角色**：所有者（邀请、改角色、确立研究、删研究、改模型和 Overleaf）、编辑、只读。
+- **共享空间的 agent**：用空间里指定的一位成员（默认是创建者）的 key 和 Mac 跑；所有者可以在设置里换人。
+- **服务器上不跑的**：iCloud 收件箱、多台 Mac 同步与交接、TCodex（它会在服务器上执行命令）；Overleaf 只能在网页上推拉，agent 改不了服务器上的本地副本。
+
+**搭服务器**（Ubuntu 24.04，域名的 A 记录已指向它，只开 22/80/443 端口）：
+
+```sh
+git clone <仓库地址> ~/paper2brain && cd ~/paper2brain
+sudo ops/server.sh p2b.example.com    # 依赖、Chromium、systemd 服务 paper2brain、Caddy（自动 HTTPS）；最后打印第一个账号的邀请链接
+```
+
+数据在 `/var/lib/paper2brain`（`hub.sqlite` 是账号和成员，`libs/<库 id>/` 是各个论文库，每个库每天自己备份到 `backups/`）。再要邀请新账号：`sudo -u <运行用户> env P2B_ROOT=/var/lib/paper2brain ./p2b admin invite --url https://p2b.example.com`；已有账号的人也可以在共享空间里直接生成邀请链接，对方用它就会顺便建好账号。
+
+**每个人的 Mac**：打开邀请链接、写名字；在网页左下角"Agent"设置里点"生成本机 agent 的口令"，照着显示的命令在终端里运行（`ops/client.sh <服务器地址> <口令>`：问一次 Cursor API key，向服务器登记本机 worker，把 worker 装成开机自启）。这台 Mac 不需要 Python 依赖，也不存数据库。换设备登录用设置里的"生成登录链接"。
+
 ## 连接 Cursor agent
 
 1. 安装 Cursor CLI 并登录：`curl https://cursor.com/install -fsS | bash && agent login`
@@ -108,12 +127,13 @@ tail -f /tmp/paper2brain.log /tmp/paper2brain-worker.log           # 日志；�
 
 ```
 paper2brain/   代码：store（唯一碰 SQLite）、rules（写入校验）、sources（抓取）、pipeline（规则预处理）、
-               structure（插图与目录）、cursor_api（agent）、server（Web API）、cli（./p2b）、inbox（iCloud 收件箱）
+               structure（插图与目录）、cursor_api（agent）、server（Web API）、cli（./p2b）、inbox（iCloud 收件箱）、
+               accounts（团队版的账号、库与成员）、remote（团队版成员 Mac 上的 ./p2b，转发到服务器）
 librarian/     agent 工作规范
 web/           Web 界面：Preact + htm + signals（web/vendor），ES 模块直接加载，无构建步骤；
                app/main.js 外壳与路由，discuss.js 讨论工作台，papers.js 收件箱与论文，reader.js 阅读器，research.js 研究
 shortcuts/     iPhone 快捷指令搭建说明
-ops/           worker 启动脚本、launchd 配置
+ops/           worker 启动脚本、launchd 配置；团队版的 server.sh（Linux 服务器）、client.sh（成员的 Mac）、systemd 和 Caddy 配置
 tests/         写入规则与存储测试（临时数据库）
 ```
 

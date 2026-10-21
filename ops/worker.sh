@@ -3,7 +3,9 @@
 # Waits until ~/paper2brain-data/config.json has a cursor_api_key, so it can be installed before the key exists.
 cd "$(dirname "$0")/.." || exit 1
 CONFIG="${P2B_HOME:-$HOME/paper2brain-data}/config.json"
-read_cfg() { "$PWD/.venv/bin/python" -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or '')" "$CONFIG" "$1" 2>/dev/null; }
+PY="$PWD/.venv/bin/python"
+[ -x "$PY" ] || PY=python3  # a member's Mac of the shared server has no venv
+read_cfg() { "$PY" -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or '')" "$CONFIG" "$1" 2>/dev/null; }
 
 agent_bin() {
   for b in agent cursor-agent "$HOME/.local/bin/agent"; do command -v "$b" >/dev/null 2>&1 && { command -v "$b"; return; }; done
@@ -25,4 +27,5 @@ mkdir -p "$DATA"
 # make this worker share that session's worker id and lock
 exec env -i HOME="$HOME" USER="$USER" PATH="$PATH" LANG="${LANG:-en_US.UTF-8}" TMPDIR="${TMPDIR:-/tmp}" \
   CURSOR_API_KEY="$(read_cfg cursor_api_key)" \
+  P2B_SERVER="$(read_cfg server)" P2B_TOKEN="$(read_cfg server_token)" \
   "$BIN" worker --worker-dir "$PWD" --data-dir "$DATA" --name "${NAME:-p2b-mac}" --idle-release-timeout 0 start
