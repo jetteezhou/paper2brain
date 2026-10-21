@@ -532,6 +532,50 @@ def runner_online(backend):
     return backend in runner_info().get("backends", ())
 
 
+# calls to the quick search API, made by the member's Mac while a request here waits for the answer
+_calls, _answers, _wake, _calls_lock = {}, {}, {}, threading.Lock()
+
+
+def _woken(lib):
+    with _calls_lock:
+        return _wake.setdefault(lib, threading.Event())
+
+
+def wait_for_work(lib, seconds):
+    """The Mac's claim waits here between looks, so a search call reaches it at once."""
+    ev = _woken(lib)
+    ev.wait(seconds)
+    ev.clear()
+
+
+def _remote(op, timeout, **args):
+    lib, cid, done = store.config().get("agent_library") or store.home().name, str(uuid.uuid4()), threading.Event()
+    with _calls_lock:
+        _answers[cid] = {"event": done, "lib": lib}
+        _calls.setdefault(lib, []).append({"backend": "api", "call_id": cid, "op": op, "timeout": timeout, **args})
+    _woken(lib).set()
+    if not done.wait(timeout + 10):
+        with _calls_lock:
+            _answers.pop(cid, None)
+            _calls[lib] = [c for c in _calls.get(lib, []) if c["call_id"] != cid]
+        raise AgentError("本机的搜索接口没有回应：Mac 开着吗？")
+    got = _answers.pop(cid)
+    if got.get("error"):
+        raise AgentError(str(got["error"])[:300])
+    return got["result"] if isinstance(got.get("result"), dict) else {}
+
+
+def answer(lib, call_id, result=None, error=None):
+    """The Mac's answer to a search call it took; only the Mac the call was meant for can give it."""
+    with _calls_lock:
+        a = _answers.get(call_id)
+        if not a or a["lib"] != lib:
+            return False
+        a.update(result=result, error=error)
+    a["event"].set()
+    return True
+
+
 def _queue(r, prefix):
     """The run waits as CREATING until the Mac that runs this library's agents takes it (claim)."""
     try:
@@ -544,14 +588,20 @@ def _queue(r, prefix):
         pump()
 
 
-def claim(libraries, mine, backends, machine=None, models=None):
-    """For a member's Mac: the oldest run waiting for one of its backends in the libraries whose agents it runs,
-    now running there. It also says which backends it has, its worker's name and its Cursor account's models."""
+def claim(libraries, mine, backends, machine=None, models=None, take=None):
+    """For a member's Mac: the oldest run (or quick search call) waiting for one of its backends in the libraries
+    whose agents it runs, now running there. It says which backends it has, its worker's name and its Cursor
+    account's models; take: the backends it has room for now (all when not given)."""
     old = _runners.get(mine, {})
     models = [m for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)][:300] if isinstance(models, list) else old.get("models", [])
-    _runners[mine] = {"at": time.time(), "backends": [b for b in backends if b in BACKENDS] if isinstance(backends, list) else [],
+    _runners[mine] = {"at": time.time(), "backends": [b for b in backends if b in (*BACKENDS, "api")] if isinstance(backends, list) else [],
                       "machine": str(machine)[:60] if machine else old.get("machine"), "models": models}
-    prefixes = tuple(PREFIX[b] for b in _runners[mine]["backends"])
+    take = [b for b in take if b in _runners[mine]["backends"]] if isinstance(take, list) else _runners[mine]["backends"]
+    prefixes = tuple(PREFIX[b] for b in take if b in PREFIX)
+    if "api" in take:
+        with _calls_lock:
+            if _calls.get(mine):
+                return _calls[mine].pop(0)
     for lib in libraries:
         with store.at_home(store.library_home(lib)):
             for r in store.unfinished_runs():
@@ -600,7 +650,10 @@ SEARCH_MODEL = {"id": "deepseek-v4.1-flash", "backend": "tcodex", "params": [{"i
 
 def search_api():
     """The OpenAI-compatible chat API the search bar calls directly (config.json "search_api"), or None. A shared
-    space without its own uses the one of the member who runs its agents."""
+    space without its own uses the one of the member who runs its agents. On the shared server it is the member's
+    Mac that calls it (with its own key and proxy, so region-locked models work): {"remote": True} while it is on."""
+    if store.multi():
+        return {"remote": True} if runner_online("api") else None
     cfg = store.config()
     api = cfg.get("search_api") or (store.config_of(cfg["agent_library"]).get("search_api") if cfg.get("agent_library") else None) or {}
     return api if api.get("base_url") and api.get("api_key") and api.get("model") else None
@@ -626,6 +679,10 @@ def _google(api):
 
 def _web(api, prompt, timeout=60):
     """One Gemini turn grounded in Google Search (about 4 s): (text, [{title, url}] of the pages it used)."""
+    if api.get("remote"):
+        got = _remote("web", timeout, prompt=prompt)
+        return str(got.get("text") or ""), [{"title": str(p.get("title") or ""), "url": str(p.get("url") or "")}
+                                            for p in got.get("pages") or [] if isinstance(p, dict)][:8]
     # ponytail: Google itself, or zhizengzeng's <host>/google/v1beta; another provider needs its own path here.
     root = "https://generativelanguage.googleapis.com" if _google(api) else re.sub(r"/v1/?$", "", api["base_url"]) + "/google"
     url = root + f"/v1beta/models/{api.get('web_model') or WEB_MODEL}:generateContent?" + urllib.parse.urlencode({"key": api["api_key"]})
@@ -673,6 +730,8 @@ def search_ai_ready():
 
 
 def _chat(api, prompt):
+    if api.get("remote"):
+        return str(_remote("chat", 30, prompt=prompt).get("text") or "")
     req = urllib.request.Request(api["base_url"] + "/chat/completions", method="POST", headers={
         "Authorization": f"Bearer {api['api_key']}", "Content-Type": "application/json"}, data=json.dumps({
             "model": api["model"], "messages": [{"role": "user", "content": prompt}],

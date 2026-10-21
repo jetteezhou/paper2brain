@@ -436,7 +436,7 @@ function Account() {
   <p class="hint" style="margin-top:0">${acc.user.name}，你的 agent 在你自己的 Mac 上运行：由 Mac 用你的 Cursor key 调用 Cursor（key 不上传服务器），只能通过这个网页按你的权限读写。
     ${a.backends?.cursor ? html`<b>✓ 本机在线，worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '本机 agent 不在线：在你的 Mac 上运行下面的命令（装过的话看 Mac 是否开着）。'}
     TCodex：${a.backends?.tcodex ? '✓ 本机在线，模型列表里可以选 TCodex 的模型' : '本机不在线（在装了 tcodex 的 Mac 上运行下面的命令即可接上）'}。
-    快速搜索接口：${a.search_api ? '✓ 已配置' : '没配置（运行下面的命令时会问）'}。</p>
+    快速搜索接口：${a.search_api ? '✓ 本机已配置' : '不可用（运行下面的命令时会问）'}。</p>
   ${got.token ? html`<p class="hint">口令只显示这一次（重新生成会让旧的失效）。在 Mac 的终端里运行（会问 Cursor API key 和快速搜索接口，已有单人版 paper2brain 的设置时直接沿用）：</p>
     <${Copyable} text=${`git clone ${a.repo} ~/paper2brain-client 2>/dev/null; ~/paper2brain-client/setup.sh ${location.origin} ${got.token.token}`} />`
     : html`<button class="btn sm" onClick=${() => call('token', '/api/me/agent-token', {})}>生成本机 agent 的口令</button>`}
@@ -465,9 +465,10 @@ function Setup() {
   const a = appState.value.agent, ok = a.backends || {};
   if (appState.value.account) return html`<h3>账号、agent 与共享</h3><${Account} />
     ${a.enabled && appState.value.account.role === 'owner' ? html`<div class="block-title" style="margin-top:14px">模型<span class="line"></span></div><${Models} key=${a.machine} />` : null}
-    ${appState.value.account.role === 'owner' ? html`<div class="block-title" style="margin-top:14px">快速搜索接口<span class="line"></span></div>
-      <p class="hint" style="margin-top:0">搜索框的 AI 推荐、快速问、起标题、上网找论文直接调这个 OpenAI 兼容接口（Gemini 用 https://generativelanguage.googleapis.com/v1beta/openai）。存在服务器上${appState.value.account.library === appState.value.account.libraries.find((l) => l.kind === 'personal')?.id ? '你的论文库里' : '这个空间里；不填就用负责 agent 的成员的'}，key 不会再发回网页。${a.search_ai ? '✓ 已可用' : '未可用'}</p>
-      <${SearchApi} />` : null}
+    <div class="block-title" style="margin-top:14px">快速搜索接口<span class="line"></span></div>
+    <p class="hint" style="margin-top:0">搜索框的 AI 推荐、快速问、起标题、上网找论文用一个 OpenAI 兼容接口（Gemini 用 https://generativelanguage.googleapis.com/v1beta/openai）。
+      它由${appState.value.account.library === appState.value.account.libraries.find((l) => l.kind === 'personal')?.id ? '你' : '负责这个空间 agent 的成员'}的 Mac 调用：地址、模型和 key 只存在那台 Mac 上，走它的代理，所以 Gemini 这类限地区的模型也能用。
+      ${a.search_api ? html`<b>✓ 本机已配置并在线</b>` : '现在不可用：Mac 没开，或还没配置。'}改接口或代理：在 Mac 上运行 <code>~/paper2brain-client/setup.sh --search</code>。</p>
     <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>关闭</button></div>`;
   const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
   const mark = (b) => (ok[b] ? '✓ 已连接' : '未连接');

@@ -236,19 +236,13 @@ class Multi(unittest.TestCase):
         docs = self.call("/api/cli", {"argv": ["guide"]}, bearer=agent)[1]["out"]["docs"]
         self.assertIn("README.md", docs)
         self.assertIn("./p2b", docs["README.md"])
-        # setup.sh registers the quick search API in the user's own library; the Cursor key stays on the Mac
-        code, got, _ = self.call("/api/agent/connect", {"cursor_api_key": "key_x", "machine": "p2b-a-mac",
-                                 "search_api": {"base_url": "https://8.8.8.8/v1", "model": "m", "api_key": "s"}}, bearer=agent)
-        self.assertEqual((code, got["search_api"]), (200, True))
-        self.assertEqual(self.call("/api/agent/connect", {"search_api": {"base_url": "http://10.0.0.1/v1", "model": "m", "api_key": "s"}}, bearer=agent)[0], 400)
+        # setup.sh only checks its token: the Cursor key and the quick search API stay on the Mac
+        self.assertEqual(self.call("/api/agent/connect", {}, bearer=agent)[0], 200)
         with store.at_home(store.library_home(a["library"])):
-            self.assertEqual(cursor_api.search_api()["model"], "m")
-            self.assertNotIn("key_x", (store.home() / "config.json").read_text())
             with self.assertRaises(cursor_api.AgentError):
                 cursor_api._json("GET", "/models")  # the shared server never calls Cursor itself
             space = accounts.create_space(a, "组会", rid)
         with store.at_home(store.library_home(space)):
-            self.assertEqual(cursor_api.search_api()["model"], "m")  # a space uses its agent member's
             self.assertEqual(cursor_api.config()["repo"], cursor_api.CLIENT_REPO)
 
     def test_tcodex_runs_on_the_members_mac(self):
@@ -313,6 +307,9 @@ class Multi(unittest.TestCase):
                     break
                 threading.Event().wait(0.1)
         self.assertIsNone(claim(backends=["tcodex"]))  # a Mac without Cursor does not take it
+        self.assertIsNone(claim(backends=["cursor"], take=[]))  # one full of runs leaves it waiting...
+        with store.at_home(home):
+            self.assertEqual(cursor_api._missing("cursor"), [])  # ...and still counts as there
         job = claim(backends=["cursor"])
         self.assertEqual((job["backend"], job["new"], job["repo"], job["model"]),
                          ("cursor", True, cursor_api.CLIENT_REPO, {"id": "claude-x", "params": [{"id": "thinking", "value": "on"}]}))
@@ -334,6 +331,30 @@ class Multi(unittest.TestCase):
         self.assertTrue(update(job2["run_id"], text="", tools=[], done=True, error="Cursor API 404：agent not found"))
         with store.at_home(home):
             self.assertIsNone(store.thread_for(thread_id=t["id"])["agent_id"])
+
+    def test_quick_search_calls_are_made_by_the_members_mac(self):
+        self.url = self.serve()
+        a, ta = self.user("甲")
+        b, _ = self.user("乙")
+        agent, other = accounts.issue(a["id"], "agent"), accounts.issue(b["id"], "agent")
+        home = store.library_home(a["library"])
+        with store.at_home(home):
+            self.assertIsNone(cursor_api.search_api())  # no Mac with a search API asking: off
+        self.assertIsNone(self.call("/api/runner/claim", {"wait": 0, "backends": ["api"]}, bearer=agent)[1]["job"])
+        got = {}
+
+        def ask():
+            with store.at_home(home):
+                got["text"] = cursor_api._chat(cursor_api.search_api(), "起个标题")
+        asking = threading.Thread(target=ask)
+        asking.start()
+        job = self.call("/api/runner/claim", {"wait": 5, "backends": ["api"]}, bearer=agent)[1]["job"]
+        self.assertEqual((job["backend"], job["op"], job["prompt"]), ("api", "chat", "起个标题"))
+        self.assertFalse(self.call("/api/runner/update", {"call_id": job["call_id"], "result": {"text": "别人的"}}, bearer=other)[1]["live"])
+        self.assertTrue(self.call("/api/runner/update", {"call_id": job["call_id"], "result": {"text": "好标题"}}, bearer=agent)[1]["live"])
+        asking.join(5)
+        self.assertEqual(got["text"], "好标题")
+        self.assertEqual(self.call("/api/agent/search-api", {"base_url": "https://x/v1", "model": "m", "api_key": "k"}, cookie=f"p2b_session={ta}")[0], 400)
 
     def test_outbound_fetches_stay_public(self):
         for url in ("http://127.0.0.1/x", "http://169.254.169.254/latest/meta-data", "http://10.0.0.1/", "file:///etc/passwd"):

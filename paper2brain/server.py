@@ -15,7 +15,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import accounts, cli, cursor_api, export, handoff, inbox, overleaf, pipeline, repos, rules, sources, store, structure, sync
+from . import accounts, cli, cursor_api, export, handoff, inbox, overleaf, pipeline, repos, rules, store, structure, sync
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 mimetypes.add_type("text/javascript", ".mjs")  # ES modules (PDF.js) must not be served as octet-stream
@@ -94,14 +94,9 @@ def agent_token(q, body):
 
 @route("POST", "/api/agent/connect")
 def agent_connect(q, body):
-    """From the setup on the user's Mac (paper2brain-client): optionally the quick search API ({base_url, model,
-    api_key, web_model}), kept in the user's own library. The Cursor key stays on the Mac, which calls Cursor itself."""
-    s = body.get("search_api")
-    with store.at_home(store.library_home(_me()["user"]["library"])):
-        if isinstance(s, dict) and s.get("base_url"):
-            sources.check_public(s["base_url"])
-            cursor_api.set_search_api(s.get("base_url"), s.get("model"), s.get("api_key"), s.get("web_model"))
-        return {"ok": True, "search_api": bool(cursor_api.search_api())}
+    """The setup on the user's Mac (paper2brain-client) checks its token here. Its Cursor key and quick search API
+    stay on the Mac, which makes those calls itself."""
+    return {"ok": True}
 
 
 @route("POST", "/api/cli")
@@ -120,15 +115,19 @@ def runner_claim(q, body):
     me = _me()["user"]
     deadline = time.time() + min(max(float(body.get("wait", 25)), 0), 25)
     while True:
-        job = cursor_api.claim(accounts.agent_libraries(me), me["library"], body.get("backends"), body.get("machine"), body.get("models"))
+        job = cursor_api.claim(accounts.agent_libraries(me), me["library"], body.get("backends"), body.get("machine"), body.get("models"),
+                               body.get("take"))
         if job or time.time() >= deadline:
             return {"job": job}
-        time.sleep(1)
+        cursor_api.wait_for_work(me["library"], min(1, max(deadline - time.time(), 0)))
 
 
 @route("POST", "/api/runner/update")
 def runner_update(q, body):
-    """Progress and the result of a run the Mac took; {"live": false} tells it the run was stopped here."""
+    """Progress and the result of a run the Mac took ({"live": false} tells it the run was stopped here), or the
+    answer to a quick search call ({call_id, result | error})."""
+    if body.get("call_id"):
+        return {"live": cursor_api.answer(_me()["user"]["library"], body["call_id"], body.get("result"), body.get("error"))}
     if _me()["library"] not in accounts.agent_libraries(_me()["user"]):
         raise rules.Rejected("这个论文库的 agent 不由你的 Mac 负责")
     return {"live": cursor_api.progress(body.get("run_id"), body.get("text"), body.get("tools"), body.get("session"),
@@ -885,8 +884,8 @@ def search_api_get(q, body):
 @route("POST", "/api/agent/search-api")
 def search_api_set(q, body):
     _owner()
-    if store.multi() and body.get("base_url"):
-        sources.check_public(body["base_url"])
+    if store.multi():
+        raise rules.Rejected("快速搜索接口在你的 Mac 上配置：运行 ~/paper2brain-client/setup.sh --search")
     cursor_api.set_search_api(body.get("base_url"), body.get("model"), body.get("api_key"), body.get("web_model"))
     return {"ok": True}
 
