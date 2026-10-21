@@ -1,8 +1,10 @@
 """p2b: the only way the librarian agent writes to the library. Every command prints JSON."""
 import argparse
+import base64
 import json
 import mimetypes
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -239,6 +241,66 @@ def run(args):
     if cmd == "serve":
         from . import server
         server.serve(args.host, args.port)
+    if cmd == "admin":
+        from . import accounts
+        if not store.multi():
+            raise rules.Rejected("admin 只用在多用户服务器上（设置了 P2B_ROOT）")
+        return {"link": f"{args.url.rstrip('/')}/join.html#{accounts.invite()}", "note": f"一次有效，{accounts.INVITE_DAYS} 天内用"}
+
+
+# Run on the server for an agent elsewhere: nothing that serves, reads this machine's inbox or administers accounts.
+# ponytail: Overleaf checkouts live on the server, where a remote agent cannot edit them; it stays a web-only feature.
+REMOTE_BLOCKED = {"serve", "inbox", "admin", "overleaf"}
+
+
+class _Help(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    """Errors and --help come back as values instead of exiting the server."""
+    def error(self, message):
+        raise rules.Rejected(f"{self.prog}：{message}")
+
+    def print_help(self, file=None):
+        raise _Help(self.format_help())
+
+
+def run_remote(argv, files):
+    """./p2b sent from an agent's machine (remote.py), run in the library chosen for it. files maps each --file /
+    --image value the client named ("-" for stdin) to its base64 content; no other path on this machine is read.
+    Returns (output, {server path: base64}) for the files in the output the agent needs to look at."""
+    with tempfile.TemporaryDirectory() as tmp:
+        argv = [str(a) for a in argv]
+        for i in range(1, len(argv)):
+            if argv[i - 1] in ("--file", "--image") and argv[i] in files:
+                path = Path(tmp) / f"{i}-{Path(argv[i]).name or 'stdin'}"
+                path.write_bytes(base64.b64decode(files[argv[i]]))
+                argv[i] = str(path)
+        try:
+            args = parser(_Parser).parse_args(argv)
+        except _Help as h:
+            return {"help": str(h)}, {}
+        if args.cmd in REMOTE_BLOCKED:
+            raise rules.Rejected(f"./p2b {args.cmd} 不能在多用户服务器上运行")
+        for p in [getattr(args, "file", None), *(getattr(args, "image", None) or [])]:
+            if p is not None and Path(tmp).resolve() not in Path(p).resolve().parents:
+                raise rules.Rejected(f"{p} 没有随命令一起发来")
+        out = run(args)
+    return out, _out_files(args, out)
+
+
+def _out_files(args, out):
+    """Figure images and diagrams the agent opens to check its work, from this library only."""
+    if args.cmd == "figures":
+        paths = [f["image"] for f in out["figures"]]
+    elif args.cmd == "diagram":
+        paths = [d["html"] for d in out] if args.action == "list" else [out["png"]]
+    else:
+        return {}
+    lib = store.home().resolve()
+    return {p: base64.b64encode(Path(p).read_bytes()).decode() for p in paths
+            if Path(p).is_file() and lib in Path(p).resolve().parents}
 
 
 def _thread_brief(tid):
@@ -250,8 +312,8 @@ def _thread_brief(tid):
                          for m in t["messages"]]}
 
 
-def parser():
-    p = argparse.ArgumentParser(prog="p2b", description="paper2brain 论文库命令行")
+def parser(cls=argparse.ArgumentParser):
+    p = cls(prog="p2b", description="paper2brain 论文库命令行")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("capture", help="收下一条内容（按 --id 幂等）")
@@ -391,6 +453,9 @@ def parser():
     s = sub.add_parser("serve", help="启动 Web 界面")
     s.add_argument("--host", help="默认：设了口令时也对内网开放（0.0.0.0），否则只开本机")
     s.add_argument("--port", type=int, default=8765)
+    s = sub.add_parser("admin", help="多用户服务器：invite 生成一个新账号的邀请链接（在服务器上运行）")
+    s.add_argument("action", choices=["invite"])
+    s.add_argument("--url", required=True, help="网页地址，例如 https://p2b.example.com")
     return p
 
 
