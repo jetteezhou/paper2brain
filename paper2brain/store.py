@@ -2330,6 +2330,12 @@ def update_run(run_id, **fields):
         c.execute(f"UPDATE runs SET {cols} WHERE id=?", (*fields.values(), run_id))
 
 
+def claim_run(run_id):
+    """CREATING -> RUNNING, for exactly one taker."""
+    with tx() as c:
+        return c.execute("UPDATE runs SET status='RUNNING', updated_at=? WHERE id=? AND status='CREATING'", (now(), run_id)).rowcount == 1
+
+
 def get_run(run_id):
     with tx() as c:
         return _row(c.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone())

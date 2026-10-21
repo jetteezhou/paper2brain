@@ -63,6 +63,8 @@ def set_backend(backend):
 
 def _missing(backend):
     if backend == "tcodex":
+        if store.multi():
+            return [] if runner_online() else ["在线的本机 TCodex（在装了 tcodex 的 Mac 上运行 ops/client.sh）"]
         return [] if _tcodex_bin() else ["tcodex 命令"]
     cfg = config()
     return [k for k, v in (("CURSOR_API_KEY", cfg["api_key"]), ("P2B_MACHINE", cfg["machine"])) if not v]
@@ -402,7 +404,8 @@ _PATH = os.pathsep.join([os.environ.get("PATH", ""), os.path.expanduser("~/.loca
 
 
 def _tcodex_bin():
-    # TCodex runs on the machine of this server, where on the shared server it could reach every library
+    # never on the shared server itself, where it could reach every library: there members' Macs run it (claim_codex)
+    # ponytail: so the quick one-shot TCodex calls (search bar, titles) stay off there; they need the search API instead
     return None if store.multi() else shutil.which("tcodex", path=_PATH)
 
 
@@ -412,6 +415,10 @@ def _codex_launch(r):
     run_id = f"tc-{uuid.uuid4()}"
     try:
         if (store.get_run(placeholder) or {}).get("status") in ("CANCELLED", "EXPIRED"):
+            return
+        if store.multi():  # waits as CREATING until the Mac that runs this library's agents takes it (claim_codex)
+            _jobs[run_id] = images
+            store.replace_run(placeholder, run_id, r["agent_id"], "CREATING")
             return
         store.replace_run(placeholder, run_id, r["agent_id"], "RUNNING")
         _codex(r["agent_id"], run_id, r["prompt"], images, launch.get("model"))
@@ -435,6 +442,29 @@ def _codex_args(session, text, images, model):
 def _codex(agent_id, run_id, text, images, model):
     """One Codex turn. Our agent id maps to Codex's session id (kv), so a follow-up resumes the same conversation."""
     key, started = f"codex:{agent_id}", time.time()
+
+    def progress(out, tools, session):
+        if session:
+            store.kv_set(key, session)
+        store.update_run(run_id, text=out, tools=tools)
+
+    out, tools, error = codex_turn(store.kv_get(key), text, images, model, progress, lambda p: _procs.__setitem__(run_id, p))
+    if (store.get_run(run_id) or {}).get("status") not in LIVE:
+        return  # cancelled or expired here
+    _codex_done(agent_id, run_id, out, tools, error, int((time.time() - started) * 1000))
+
+
+def _codex_done(agent_id, run_id, out, tools, error, duration_ms):
+    if error and not out:
+        store.forget_agent(agent_id)  # a session that failed to start or resume: the next message starts fresh
+        store.kv_set(f"codex:{agent_id}", "")
+    store.update_run(run_id, status="ERROR" if error else "FINISHED", error=error, text=out, tools=tools, duration_ms=duration_ms)
+
+
+def codex_turn(session, text, images, model, progress, started=None, env=None):
+    """Run one `tcodex exec` turn on this machine (the server's own, or a member's Mac: tcodex_runner.py).
+    images: [(bytes, mime)]. progress(text, tools, new session id or None) after each event; started(process) lets
+    the caller stop it. Returns (text, tools, error)."""
     out, tools, error, notice = "", {}, None, None
     with tempfile.TemporaryDirectory() as tmp:
         paths = []
@@ -443,17 +473,19 @@ def _codex(agent_id, run_id, text, images, model):
             with open(paths[-1], "wb") as f:
                 f.write(data)
         with open(os.path.join(tmp, "stderr"), "w+") as err, \
-                subprocess.Popen(_codex_args(store.kv_get(key), text, paths, model), cwd=REPO_DIR, stdin=subprocess.DEVNULL,
-                                 env={**os.environ, "PATH": _PATH}, stdout=subprocess.PIPE, stderr=err, text=True, start_new_session=True) as p:
-            _procs[run_id] = p
+                subprocess.Popen(_codex_args(session, text, paths, model), cwd=REPO_DIR, stdin=subprocess.DEVNULL,
+                                 env={**os.environ, "PATH": _PATH, **(env or {})}, stdout=subprocess.PIPE, stderr=err, text=True,
+                                 start_new_session=True) as p:
+            if started:
+                started(p)
             for line in p.stdout:
                 try:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                kind, item = ev.get("type"), ev.get("item") or {}
+                kind, item, new = ev.get("type"), ev.get("item") or {}, None
                 if kind == "thread.started":
-                    store.kv_set(key, ev["thread_id"])
+                    new = ev["thread_id"]
                 elif kind == "turn.failed":
                     error = (ev.get("error") or {}).get("message")
                 elif kind == "error":  # also "Reconnecting... 2/5" mid-turn: fatal only if the turn fails or the process exits non-zero
@@ -465,18 +497,55 @@ def _codex(agent_id, run_id, text, images, model):
                                          "args": _short(item) or _short({"path": ", ".join(c.get("path", "") for c in item.get("changes") or [])})}
                 else:
                     continue
-                store.update_run(run_id, text=out, tools=list(tools.values()))
+                progress(out, list(tools.values()), new)
             p.wait()
             err.seek(0)
             if p.returncode and not error:
                 error = notice or err.read()[-300:].strip() or f"tcodex 退出码 {p.returncode}"
-    if (store.get_run(run_id) or {}).get("status") not in LIVE:
-        return  # cancelled or expired here
-    if error and not out:
-        store.forget_agent(agent_id)  # a session that failed to start or resume: the next message starts fresh
-        store.kv_set(key, "")
-    store.update_run(run_id, status="ERROR" if error else "FINISHED", error=error, text=out, tools=list(tools.values()),
-                     duration_ms=int((time.time() - started) * 1000))
+    return out, list(tools.values()), error
+
+
+# ---------- TCodex on the shared server: a member's Mac takes the run (tcodex_runner.py), the server only records it ----------
+
+_jobs = {}  # ponytail: a queued run's images live in memory; after a server restart it is sent without them
+_runners = {}  # a member's personal library id -> when their Mac last asked for TCodex work
+RUNNER_FRESH = 90  # seconds: the Mac asks again at least every ~25 s while it is on
+
+
+def runner_online():
+    """Whether the Mac that runs this library's agents is asking for TCodex work."""
+    lib = store.config().get("agent_library") or store.home().name
+    return time.time() - _runners.get(lib, 0) < RUNNER_FRESH
+
+
+def claim_codex(libraries, mine):
+    """For a member's Mac: the oldest TCodex run waiting in the libraries whose agents it runs, now running there."""
+    _runners[mine] = time.time()
+    for lib in libraries:
+        with store.at_home(store.library_home(lib)):
+            for r in store.unfinished_runs():
+                if r["id"].startswith("tc-") and r["status"] == "CREATING" and store.claim_run(r["id"]):
+                    return {"library": lib, "run_id": r["id"], "agent_id": r["agent_id"], "prompt": r["prompt"],
+                            "model": (r["launch"] or {}).get("model"), "session": store.kv_get(f"codex:{r['agent_id']}") or None,
+                            "images": [{"data": base64.b64encode(d).decode(), "mime": m} for d, m in _jobs.pop(r["id"], ())]}
+    return None
+
+
+def codex_progress(run_id, text, tools, session=None, done=False, error=None, duration_ms=None):
+    """A member's Mac reports on a run it took. False when the run was stopped here: the Mac then stops tcodex."""
+    r = store.get_run(run_id) if str(run_id).startswith("tc-") else None
+    if not r or r["status"] not in LIVE:
+        return False
+    text, error = str(text or "")[:200_000], error and str(error)[:2000]
+    tools = [t for t in tools if isinstance(t, dict)][:500] if isinstance(tools, list) else []
+    if session:
+        store.kv_set(f"codex:{r['agent_id']}", str(session)[:200])
+    if not done:
+        store.update_run(run_id, text=text, tools=tools)
+        return True
+    _codex_done(r["agent_id"], run_id, text, tools, error, duration_ms if isinstance(duration_ms, int) else None)
+    pump()
+    return True
 
 
 SEARCH_MODEL = {"id": "deepseek-v4.1-flash", "backend": "tcodex", "params": [{"id": "effort", "value": "low"}]}

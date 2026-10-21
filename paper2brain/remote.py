@@ -66,7 +66,9 @@ def main(argv=None):
     if not token:
         _fail("缺 P2B_TOKEN：在网页的 Agent 设置里生成本机 agent 的口令，再运行 ops/client.sh")
     argv, files = _files(sys.argv[1:] if argv is None else argv)
-    body = {"argv": argv, "files": files, "agent_id": os.environ.get("CURSOR_CONVERSATION_ID"), "library": os.environ.get("P2B_LIBRARY")}
+    # a Cursor agent's shell has its id; a TCodex run gets ours from tcodex_runner.py
+    agent_id = os.environ.get("P2B_AGENT_ID") or os.environ.get("CURSOR_CONVERSATION_ID")
+    body = {"argv": argv, "files": files, "agent_id": agent_id, "library": os.environ.get("P2B_LIBRARY")}
     req = urllib.request.Request(f"{server}/api/cli", data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"})
     try:

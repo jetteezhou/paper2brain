@@ -111,6 +111,27 @@ def cli_remote(q, body):
     return {"out": out, "files": files}
 
 
+@route("POST", "/api/tcodex/claim")
+def tcodex_claim(q, body):
+    """A member's Mac (paper2brain/tcodex_runner.py) asks for a TCodex run to do; waits up to 25 s for one."""
+    me = _me()["user"]
+    deadline = time.time() + min(max(float(body.get("wait", 25)), 0), 25)
+    while True:
+        job = cursor_api.claim_codex(accounts.agent_libraries(me), me["library"])
+        if job or time.time() >= deadline:
+            return {"job": job}
+        time.sleep(1)
+
+
+@route("POST", "/api/tcodex/update")
+def tcodex_update(q, body):
+    """Progress and the result of a run the Mac took; {"live": false} tells it the run was stopped here."""
+    if _me()["library"] not in accounts.agent_libraries(_me()["user"]):
+        raise rules.Rejected("这个论文库的 agent 不由你的 Mac 负责")
+    return {"live": cursor_api.codex_progress(body.get("run_id"), body.get("text"), body.get("tools"), body.get("session"),
+                                              body.get("done") is True, body.get("error"), body.get("duration_ms"))}
+
+
 @route("POST", "/api/spaces")
 def space_create(q, body):
     """Share a research: copy it, with what it uses, into a new space of which the user is the owner."""
@@ -975,8 +996,9 @@ class Handler(BaseHTTPRequestHandler):
         headers = [("Set-Cookie", f"{k}={v}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax{secure}") for k, v in cookies.items()]
         self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode(), headers=headers)
 
-    # account routes work in any library, also for a viewer; an agent token reaches only the last two
-    ACCOUNT = {"/api/join", "/api/libraries/switch", "/api/me/login-link", "/api/me/agent-token", "/api/agent/connect", "/api/cli"}
+    # account routes work in any library, also for a viewer; an agent token reaches only AGENT
+    AGENT = {"/api/agent/connect", "/api/cli", "/api/tcodex/claim", "/api/tcodex/update"}
+    ACCOUNT = {"/api/join", "/api/libraries/switch", "/api/me/login-link", "/api/me/agent-token", *AGENT}
 
     def _who(self, method, path, body):
         """On the shared server: (who is asking and in which library, None) or (None, (code, error)).
@@ -989,10 +1011,12 @@ class Handler(BaseHTTPRequestHandler):
         if not got:
             return None, None if path == "/api/join" else (401, "请先用邀请链接或登录链接打开")
         user, kind = got
-        if kind == "agent" and path not in ("/api/cli", "/api/agent/connect"):
+        if kind == "agent" and path not in self.AGENT:
             return None, (403, "本机 agent 的口令只能用来运行 ./p2b")
         if path == "/api/cli":
             lib = accounts.agent_library(user, body.get("agent_id"), body.get("library"))
+        elif path == "/api/tcodex/update":
+            lib = body.get("library") or user["library"]
         else:
             lib = cookies["p2b_lib"].value if "p2b_lib" in cookies else user["library"]
         role = accounts.role(user["id"], lib)
