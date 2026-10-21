@@ -4,7 +4,7 @@
   .venv/bin/python ops/handoff.py pull   # on the Mac you switch to, once iCloud has synced
 
 The live database never sits in iCloud (iCloud syncing SQLite's -wal/-shm files separately corrupts it, and launchd
-jobs may not read iCloud files): push copies a consistent snapshot there, pull stops this Mac's server, keeps a
+jobs may not read iCloud files): push stops this Mac's server and worker and copies a snapshot there, pull stops this Mac's server, keeps a
 backup of its database, takes the snapshot, points stored paths at this Mac and starts the server again.
 """
 import json
@@ -31,15 +31,20 @@ def rsync(src, dst, *extra):
 
 def push():
     home = store.home()
+    _jobs("bootout")  # nothing written here after the snapshot, and only one worker answers to the shared name
+    time.sleep(2)
+    if _listening():
+        sys.exit("本机的 paper2brain 还在运行（多半是终端里的 ops/run.sh），先停掉再 push")
     DROP.mkdir(parents=True, exist_ok=True)
     (DROP / "data").mkdir(exist_ok=True)
     rsync(home, DROP / "data")
-    snap = store.backup(f"handoff-{datetime.now():%Y%m%d-%H%M%S}.sqlite")  # sqlite backup API: consistent while the server runs
+    snap = store.backup(f"handoff-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
     subprocess.run(["cp", str(snap), str(DROP / "p2b.sqlite")], check=True)
     snap.unlink()
     subprocess.run(["cp", str(home / "config.json"), str(DROP / "config.json")], check=True)
     (DROP / "handoff.json").write_text(json.dumps({"home": str(home), "host": socket.gethostname(), "at": datetime.now().isoformat(timespec="seconds")}))
-    print(f"已放进 iCloud：{DROP}\n等 iCloud 上传完（访达里 iCloud 云盘的云朵图标不再转），再到另一台 Mac 上 pull。这台之后别再用，除非再从 iCloud pull 回来。")
+    print(f"已放进 iCloud：{DROP}，本机服务已停。\n等 iCloud 上传完（访达里 iCloud 云盘的云朵图标不再转），再到另一台 Mac 上 pull。"
+          "要回到这台，先在那台 push，再在这里 pull。")
 
 
 def _downloaded():

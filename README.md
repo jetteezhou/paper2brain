@@ -34,11 +34,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 **换一台 Mac 用**：一次只在一台 Mac 上用，通过 iCloud 云盘交接（活的数据库不放 iCloud，iCloud 里只放快照）：
 
 ```sh
-.venv/bin/python ops/handoff.py push   # 要离开的 Mac：把数据库快照、PDF、仓库和 config.json 放进 iCloud 云盘/paper2brain-handoff
+.venv/bin/python ops/handoff.py push   # 要离开的 Mac：停掉本机服务，把数据库快照、PDF、仓库和 config.json 放进 iCloud 云盘/paper2brain-handoff
 .venv/bin/python ops/handoff.py pull   # 要接手的 Mac：等 iCloud 同步完再运行；会先备份本机旧库，再接手并重启服务
 ```
 
-新 Mac 第一次用：克隆代码、`ops/setup.sh`（或手动安装）、`ops/install.sh`，在本机 `config.json` 里设好自己的 `machine`（pull 会保留它），再 pull。
+新 Mac 第一次用：克隆代码、`ops/setup.sh`（顺带装好开机自启），装好并登录 Cursor CLI 和 `tcodex`，再 pull。两台 Mac 共用 `config.json` 里同一个 worker 名（`machine`），已有的讨论换了机器也能接着聊；本机 `config.json` 里另设了 `machine` 时 pull 会保留它。
 
 **从别的设备访问**：默认只接受本机。要对外开放，必须设访问口令：`config.json` 的 `password`，或环境变量 `P2B_PASSWORD`（浏览器会弹登录框，用户名随便填；设了之后本机访问也要输），并在 `config.json` 的 `hosts`（或环境变量 `P2B_HOSTS`，逗号隔开）里列出别的设备用来访问的地址：
 
