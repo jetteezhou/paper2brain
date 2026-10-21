@@ -970,7 +970,7 @@ def serve(host=None, port=8765):
     cursor_api.resume_watchers()
     bg(_poll_inbox)
     lan = _lan_ip() if host == "0.0.0.0" else None
-    print(f"paper2brain 已启动：http://127.0.0.1:{port}" + (f"  内网：http://{lan}:{port}" if lan else "") + f"  数据目录：{store.home()}")
+    print(f"paper2brain 已启动：http://127.0.0.1:{port}" + (f"  内网：http://{lan}:{port}" if lan else "") + f"  数据目录：{store.home()}", flush=True)
     a = cursor_api.status()
     print("Agent：" + (f"已配置，本机 worker = {a['machine']}" if a["enabled"] else f"未配置（缺 {', '.join(a['missing'])}），只做规则预处理"))
     ThreadingHTTPServer((host, port), Handler).serve_forever()
