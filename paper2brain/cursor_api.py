@@ -1,6 +1,7 @@
 """Cursor Cloud Agents API: start agents on this Mac's worker and record what they do.
 Docs: https://cursor.com/docs/cloud-agent/api/endpoints"""
 import base64
+import contextvars
 import json
 import os
 import re
@@ -25,9 +26,11 @@ TERMINAL = {"FINISHED", "ERROR", "CANCELLED", "EXPIRED"}
 def config():
     path = store.home() / "config.json"
     cfg = json.loads(path.read_text()) if path.exists() else {}
+    # a shared space runs its agents on one member's Cursor key and worker, kept in that member's own library
+    who = store.config_of(cfg["agent_library"]) if cfg.get("agent_library") else cfg
     return {
-        "api_key": os.environ.get("CURSOR_API_KEY") or cfg.get("cursor_api_key"),
-        "machine": os.environ.get("P2B_MACHINE") or cfg.get("machine"),
+        "api_key": os.environ.get("CURSOR_API_KEY") or who.get("cursor_api_key"),
+        "machine": os.environ.get("P2B_MACHINE") or who.get("machine"),
         "repo": cfg.get("repo") or "https://github.com/jetteezhou/paper2brain",
         "model": cfg.get("model"),
         "models": cfg.get("models") or {},
@@ -134,9 +137,10 @@ def list_models():
     reasoning effort...). Cursor's list is cached 10 minutes."""
     items = []
     if not _missing("cursor"):
-        if time.time() - _models_cache.get("at", 0) > 600:
-            _models_cache.update(items=_json("GET", "/models")["items"], at=time.time())
-        items += [{**m, "backend": "cursor"} for m in _models_cache["items"]]
+        cache = _models_cache.setdefault(config()["api_key"], {})  # per key: each user's account offers its own models
+        if time.time() - cache.get("at", 0) > 600:
+            cache.update(items=_json("GET", "/models")["items"], at=time.time())
+        items += [{**m, "backend": "cursor"} for m in cache["items"]]
     if not _missing("tcodex"):
         items += TCODEX_MODELS
     return items
@@ -186,7 +190,7 @@ _pump_lock = threading.Lock()
 
 
 def _spawn(fn, *args):
-    threading.Thread(target=fn, args=args, daemon=True).start()
+    store.spawn(fn, *args)
 
 
 def _bind(kind, ref, agent_id):
@@ -398,7 +402,8 @@ _PATH = os.pathsep.join([os.environ.get("PATH", ""), os.path.expanduser("~/.loca
 
 
 def _tcodex_bin():
-    return shutil.which("tcodex", path=_PATH)
+    # TCodex runs on the machine of this server, where on the shared server it could reach every library
+    return None if store.multi() else shutil.which("tcodex", path=_PATH)
 
 
 def _codex_launch(r):
@@ -588,8 +593,8 @@ def ai_search(q):
         except Exception:
             pass  # the web answer still comes, without library picks
 
-    jobs = [threading.Thread(target=pick_from_library, daemon=True),
-            threading.Thread(target=lambda: named.extend(_named_papers(q)), daemon=True)]
+    jobs = [threading.Thread(target=contextvars.copy_context().run, args=(pick_from_library,), daemon=True),
+            threading.Thread(target=contextvars.copy_context().run, args=(lambda: named.extend(_named_papers(q)),), daemon=True)]
     for j in jobs:
         j.start()
     try:

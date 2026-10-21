@@ -1,9 +1,11 @@
 """SQLite storage. The only module that touches the database; every write goes through a transaction here."""
+import contextvars
 import json
 import re
 import os
 import shutil
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -348,10 +350,37 @@ def config():
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+_home = contextvars.ContextVar("p2b_home", default=None)
+
+
+def multi():
+    """The shared server (./p2b serve --multi): one data directory per library under P2B_ROOT, chosen per request."""
+    return bool(os.environ.get("P2B_ROOT"))
+
+
 def home():
-    path = Path(os.environ.get("P2B_HOME") or Path.home() / "paper2brain-data")
+    path = _home.get()
+    if path is None:
+        if multi():
+            raise RuntimeError("多用户模式下没有选定论文库")  # fail closed: never fall back to a default library
+        path = Path(os.environ.get("P2B_HOME") or Path.home() / "paper2brain-data")
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@contextmanager
+def at_home(path):
+    """Everything inside (and threads started with spawn) reads and writes the library at path."""
+    token = _home.set(Path(path))
+    try:
+        yield
+    finally:
+        _home.reset(token)
+
+
+def spawn(fn, *args):
+    """A daemon thread that keeps the caller's library (a plain Thread starts with no context)."""
+    threading.Thread(target=contextvars.copy_context().run, args=(fn, *args), daemon=True).start()
 
 
 def now():
@@ -425,6 +454,66 @@ def rehome(old):
     with tx() as c:
         return sum(c.execute(f"UPDATE {t} SET {col} = ? || substr({col}, ?) WHERE substr({col}, 1, ?) = ?",
                              (new, len(old) + 1, len(old), old)).rowcount for t, col in (("papers", "pdf_path"), ("repos", "path")))
+
+
+def library_home(lib_id):
+    """A library's data directory on the shared server."""
+    if not re.fullmatch(r"[0-9a-f]{32}", lib_id or ""):
+        raise ValueError(f"bad library id: {lib_id!r}")
+    return Path(os.environ["P2B_ROOT"]) / "libs" / lib_id
+
+
+def config_of(lib_id):
+    path = library_home(lib_id) / "config.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+_LINKED = "SELECT ref FROM s.research_links WHERE research_id=:r AND kind="
+_THREADS = f"{_LINKED}'thread' UNION SELECT thread_id FROM s.messages WHERE id IN ({_LINKED}'message')"
+_MESSAGES = f"thread_id IN ({_LINKED}'thread') OR id IN ({_LINKED}'message')"
+# what a research takes along into a shared space, parents first; captures, anchors, topics and the rest stay behind
+_COPY = (
+    ("papers", f"id IN ({_LINKED}'paper' UNION SELECT paper_id FROM s.code_maps WHERE research_id=:r)"),
+    ("paper_text", f"paper_id IN ({_LINKED}'paper' UNION SELECT paper_id FROM s.code_maps WHERE research_id=:r)"),
+    ("repos", "id IN (SELECT repo_id FROM s.research_repos WHERE research_id=:r UNION SELECT repo_id FROM s.code_maps WHERE research_id=:r)"),
+    ("research", "id=:r"),
+    *((t, "research_id=:r") for t in ("research_links", "research_repos", "code_maps", "experiments", "research_docs",
+                                       "writing", "plans", "related_work", "exp_figures")),
+    ("threads", f"id IN ({_THREADS})"),
+    ("messages", _MESSAGES),
+    ("runs", f"id IN (SELECT run_id FROM s.messages WHERE {_MESSAGES}) AND status NOT IN {_UNFINISHED_SQL}"),
+    ("notes", f"id IN ({_LINKED}'note')"),
+)
+
+
+def copy_research(rid, dst):
+    """Copy a research and what it uses (papers with their files, linked discussions, docs, repos, code maps, diagrams)
+    into the library at dst, under the same ids. The original stays as it is."""
+    src = home()
+    if not get_research(rid):
+        raise rules.Rejected("这个研究不存在或已删除")
+    with at_home(dst), tx() as c:
+        c.execute("PRAGMA foreign_keys=OFF")  # what was left behind is unlinked below instead
+        c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
+        for t, where in _COPY:
+            cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({t})"))
+            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE {where}", {"r": rid})
+        c.execute("UPDATE threads SET agent_id=NULL")  # the space starts its own agents
+        c.execute("UPDATE threads SET parent_id=NULL WHERE parent_id NOT IN (SELECT id FROM threads)")
+        c.execute("UPDATE threads SET fork_message_id=NULL WHERE fork_message_id NOT IN (SELECT id FROM messages)")
+        c.execute("UPDATE notes SET paper_id=NULL WHERE paper_id NOT IN (SELECT id FROM papers)")
+        c.execute("UPDATE notes SET thread_id=NULL WHERE thread_id NOT IN (SELECT id FROM threads)")
+        c.execute("UPDATE writing SET overleaf=NULL")  # its checkout and credentials belong to the owner
+        old, new = str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/"
+        for t, col in (("papers", "pdf_path"), ("repos", "path"), ("research_docs", "path")):
+            c.execute(f"UPDATE {t} SET {col} = ? || substr({col}, ?) WHERE substr({col}, 1, ?) = ?", (new, len(old) + 1, len(old), old))
+        folders = [Path("papers") / p["id"].replace(":", "_").replace("/", "_") for p in c.execute("SELECT id FROM papers")]
+        folders += [Path(r["path"][len(new):]) for r in c.execute("SELECT path FROM repos") if r["path"].startswith(new)]
+        c.commit()
+        c.execute("DETACH DATABASE s")
+    for f in folders + [Path("diagrams") / rid, Path("assets") / "research" / rid]:
+        if (src / f).is_dir():
+            shutil.copytree(src / f, Path(dst) / f, symlinks=True, dirs_exist_ok=True)
 
 
 def _migrate(conn):
@@ -2255,6 +2344,12 @@ def unfinished_runs():
     """Oldest first, so waiting runs start in the order they were asked for."""
     with tx() as c:
         return _rows(c.execute(f"SELECT * FROM runs WHERE status IN {_UNFINISHED_SQL} ORDER BY created_at, rowid"))
+
+
+def agent_live(agent_id):
+    """Whether this library has a run of this agent under way (an agent only calls ./p2b while it runs)."""
+    with tx() as c:
+        return bool(c.execute(f"SELECT 1 FROM runs WHERE agent_id=? AND status IN {_UNFINISHED_SQL}", (agent_id,)).fetchone())
 
 
 # Research-page tab a run lands on. experiment's ref is an experiment id, resolved separately.

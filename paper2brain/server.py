@@ -1,20 +1,21 @@
 """Local web server: JSON API for the web UI plus static files. Same store and rules as the CLI."""
 import base64
+import contextlib
 import hmac
 import json
 import mimetypes
 import os
 import re
 import subprocess
-import threading
 import time
 import traceback
 import urllib.parse
 import uuid
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import cursor_api, export, handoff, inbox, overleaf, pipeline, repos, rules, store, structure, sync
+from . import accounts, cli, cursor_api, export, handoff, inbox, overleaf, pipeline, repos, rules, sources, store, structure, sync
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 mimetypes.add_type("text/javascript", ".mjs")  # ES modules (PDF.js) must not be served as octet-stream
@@ -29,7 +30,7 @@ def route(method, pattern):
 
 
 def bg(fn, *args):
-    threading.Thread(target=fn, args=args, daemon=True).start()
+    store.spawn(fn, *args)
 
 
 class Reply:
@@ -41,9 +42,101 @@ class Reply:
 
 @route("GET", "/api/state")
 def state(q, body):
-    agent = {**cursor_api.status(), "home": str(store.home()), "repo_dir": str(WEB.parent)}
+    agent = {**cursor_api.status(), "home": str(store.home()), "repo_dir": str(WEB.parent), "repo": cursor_api.config()["repo"]}
     return {"counts": store.counts(), "topics": store.topic_tree(), "topic_proposals": store.topic_proposals(), "agent": agent,
-            "activity": store.activity(), "working": store.working(), "recent": store.recent_work()}
+            "activity": store.activity(), "working": store.working(), "recent": store.recent_work(),
+            "account": _account() if store.multi() else None}
+
+
+# ---------- the shared server: accounts, libraries, members, agents elsewhere ----------
+
+def _me():
+    return accounts.ME.get() or {}
+
+
+def _account():
+    me = _me()
+    space = me["library"] != me["user"]["library"]
+    return {"user": {"id": me["user"]["id"], "name": me["user"]["name"]}, "library": me["library"], "role": me["role"],
+            "libraries": accounts.libraries(me["user"]["id"]), "members": accounts.members(me["library"]) if space else [],
+            "agent_member": accounts.agent_member(me["library"]) if space else me["user"]["id"]}
+
+
+def _owner():
+    if store.multi() and _me().get("role") != "owner":
+        raise rules.Rejected("只有这个空间的所有者能做这一步")
+
+
+@route("POST", "/api/join")
+def join(q, body):
+    user, token, lib = accounts.redeem(body.get("code"), body.get("name"), _me().get("user"))
+    return {"ok": True, "name": user["name"], "_cookies": {**({"p2b_session": token} if token else {}), "p2b_lib": lib}}
+
+
+@route("POST", "/api/libraries/switch")
+def library_switch(q, body):
+    if not accounts.role(_me()["user"]["id"], body.get("library")):
+        raise rules.Rejected("你不在这个论文库里")
+    return {"ok": True, "_cookies": {"p2b_lib": body["library"]}}
+
+
+@route("POST", "/api/me/login-link")
+def login_link(q, body):
+    """A one-time code that signs this account in on another device (the page turns it into a link)."""
+    return {"code": accounts.invite("login", user_id=_me()["user"]["id"])}
+
+
+@route("POST", "/api/me/agent-token")
+def agent_token(q, body):
+    """The token ops/client.sh puts on the user's Mac; a new one replaces the old."""
+    return {"token": accounts.issue(_me()["user"]["id"], "agent")}
+
+
+@route("POST", "/api/agent/connect")
+def agent_connect(q, body):
+    """The user's Cursor key and the name of the worker on their Mac (ops/client.sh sends both)."""
+    key, machine = (body.get("cursor_api_key") or "").strip(), (body.get("machine") or "").strip()
+    if not key or not re.fullmatch(r"[\w.-]{1,60}", machine):
+        raise rules.Rejected("需要 Cursor API key 和 worker 名（字母、数字、点、横线）")
+    accounts.write_config(_me()["user"]["library"], cursor_api_key=key, machine=machine)
+    return {"ok": True}
+
+
+@route("POST", "/api/cli")
+def cli_remote(q, body):
+    """./p2b from an agent on a member's Mac (paper2brain/remote.py); the server chose the library already."""
+    if not isinstance(body.get("argv"), list) or not isinstance(body.get("files") or {}, dict):
+        raise rules.Rejected("请求格式不对")
+    out, files = cli.run_remote(body["argv"], body.get("files") or {})
+    return {"out": out, "files": files}
+
+
+@route("POST", "/api/spaces")
+def space_create(q, body):
+    """Share a research: copy it, with what it uses, into a new space of which the user is the owner."""
+    lib = accounts.create_space(_me()["user"], body.get("name"), body.get("research_id"))
+    return {"library": lib, "_cookies": {"p2b_lib": lib}}
+
+
+@route("POST", "/api/members/invite")
+def member_invite(q, body):
+    _owner()
+    return {"code": accounts.invite("join", _me()["library"], body.get("role") or "editor", by=_me()["user"]["id"])}
+
+
+@route("POST", "/api/members/agent")
+def member_agent(q, body):
+    _owner()
+    accounts.set_agent(_me()["library"], body.get("user_id"))
+    return {"ok": True}
+
+
+@route("POST", "/api/members/([0-9a-f]{32})")
+def member_role(q, body, uid):
+    if uid != _me()["user"]["id"] or body.get("role"):  # anyone may leave; everything else is the owner's
+        _owner()
+    accounts.set_role(_me()["library"], uid, body.get("role"))
+    return {"ok": True}
 
 
 @route("POST", "/api/topics")
@@ -412,12 +505,14 @@ def research_update(q, body, rid):
 
 @route("DELETE", "/api/research/([^/]+)")
 def research_delete(q, body, rid):
+    _owner()
     store.delete_research(rid)
     return {"ok": True}
 
 
 @route("POST", "/api/research/([^/]+)/establish")
 def research_establish(q, body, rid):
+    _owner()
     store.establish(rid, "user", body.get("established", True))
     return _research(rid)
 
@@ -427,6 +522,8 @@ def research_proposal(q, body, rid):
     if body.get("action") == "discard":
         store.discard_proposal(rid)
     else:
+        if body.get("establish"):
+            _owner()
         store.accept_proposal(rid, body.get("base_rev"), body.get("fields"))
         if body.get("establish"):
             store.establish(rid, "user")
@@ -692,6 +789,7 @@ def _overleaf(rid):
 
 @route("POST", "/api/research/([^/]+)/overleaf")
 def overleaf_link(q, body, rid):
+    _owner()
     pid = overleaf.project_id(body.get("url"))
     overleaf.clone(pid)
     store.set_overleaf(rid, pid)
@@ -700,6 +798,7 @@ def overleaf_link(q, body, rid):
 
 @route("POST", "/api/research/([^/]+)/overleaf/unlink")
 def overleaf_unlink(q, body, rid):
+    _owner()
     store.set_overleaf(rid, None)  # the local checkout stays, unpushed edits included
     return {"ok": True}
 
@@ -712,6 +811,7 @@ def overleaf_changes(q, body, rid):
 
 @route("POST", "/api/research/([^/]+)/overleaf/(pull|push|discard)")
 def overleaf_action(q, body, rid, action):
+    _owner()
     pid = _overleaf(rid)
     if action == "push":
         overleaf.push(pid, (body.get("message") or "").strip())
@@ -728,6 +828,7 @@ def agent_models(q, body):
 
 @route("POST", "/api/agent/models")
 def agent_model_set(q, body):
+    _owner()
     cursor_api.set_model(body.get("module"), body.get("model"))
     return {"ok": True}
 
@@ -740,6 +841,9 @@ def search_api_get(q, body):
 
 @route("POST", "/api/agent/search-api")
 def search_api_set(q, body):
+    _owner()
+    if store.multi() and body.get("base_url"):
+        sources.check_public(body["base_url"])
     cursor_api.set_search_api(body.get("base_url"), body.get("model"), body.get("api_key"), body.get("web_model"))
     return {"ok": True}
 
@@ -749,6 +853,8 @@ PULL_LOG = Path("/tmp/paper2brain-pull.log")
 
 @route("GET", "/api/handoff")
 def handoff_get(q, body):
+    if store.multi():
+        raise rules.Rejected("多用户服务器不用 iCloud 交接")
     m = handoff.meta() if handoff.DROP.exists() else None
     return {"me": handoff.ME, "holder": handoff.holder(), "sync": sync.enabled(), "folder": str(handoff.DROP),
             "snapshot": m and {"host": m.get("host"), "owner": m.get("owner"), "at": m.get("at")},
@@ -758,6 +864,8 @@ def handoff_get(q, body):
 @route("POST", "/api/handoff/pull")
 def handoff_pull(q, body):
     """Take the library from iCloud. pull stops this server and starts it again, so it runs in its own session."""
+    if store.multi():
+        raise rules.Rejected("多用户服务器不用 iCloud 交接")
     if not handoff.meta():
         raise rules.Rejected("iCloud 里还没有快照：先在另一台 Mac 上 push，或等它自动放一份")
     with PULL_LOG.open("w") as log:
@@ -773,6 +881,7 @@ def agent_login(q, body):
 
 @route("POST", "/api/agent/backend")
 def agent_backend_set(q, body):
+    _owner()
     cursor_api.set_backend(body.get("backend"))
     return {"ok": True}
 
@@ -850,16 +959,48 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send(self, code, data, mime="application/json; charset=utf-8"):
+    def _send(self, code, data, mime="application/json; charset=utf-8", headers=()):
         self.send_response(code)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in headers:
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
     def _json(self, code, obj):
-        self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode())
+        cookies = obj.pop("_cookies", {}) if isinstance(obj, dict) else {}
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
+        headers = [("Set-Cookie", f"{k}={v}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax{secure}") for k, v in cookies.items()]
+        self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode(), headers=headers)
+
+    # account routes work in any library, also for a viewer; an agent token reaches only the last two
+    ACCOUNT = {"/api/join", "/api/libraries/switch", "/api/me/login-link", "/api/me/agent-token", "/api/agent/connect", "/api/cli"}
+
+    def _who(self, method, path, body):
+        """On the shared server: (who is asking and in which library, None) or (None, (code, error)).
+        The library is the one picked in this browser (cookie p2b_lib), else the user's own; for an agent's ./p2b,
+        the one its run belongs to."""
+        cookies = SimpleCookie(self.headers.get("Cookie", ""))
+        kind, _, bearer = self.headers.get("Authorization", "").partition(" ")
+        token = bearer if kind == "Bearer" else (cookies["p2b_session"].value if "p2b_session" in cookies else None)
+        got = accounts.auth(token)
+        if not got:
+            return None, None if path == "/api/join" else (401, "请先用邀请链接或登录链接打开")
+        user, kind = got
+        if kind == "agent" and path not in ("/api/cli", "/api/agent/connect"):
+            return None, (403, "本机 agent 的口令只能用来运行 ./p2b")
+        if path == "/api/cli":
+            lib = accounts.agent_library(user, body.get("agent_id"), body.get("library"))
+        else:
+            lib = cookies["p2b_lib"].value if "p2b_lib" in cookies else user["library"]
+        role = accounts.role(user["id"], lib)
+        if not role:
+            lib, role = user["library"], "owner"
+        if role == "viewer" and method != "GET" and path not in self.ACCOUNT:
+            return None, (403, "你在这个空间里只能查看")
+        return {"user": user, "library": lib, "role": role}, None
 
     def _file(self, path, mime=None):
         if not path.is_file():
@@ -877,7 +1018,7 @@ class Handler(BaseHTTPRequestHandler):
         if host not in {f"{h}:{port}" for h in ("127.0.0.1", "localhost", here, *extra)} | set(extra):
             return 403, "Host 不对：只接受 127.0.0.1、localhost、本机 IP 或 P2B_HOSTS 里的地址"
         password = _password()
-        if not password and not here.startswith("127."):
+        if not password and not here.startswith("127.") and not store.multi():
             return 403, "从别的设备访问要先在 config.json 里设 password"
         if password:
             kind, _, cred = self.headers.get("Authorization", "").partition(" ")
@@ -911,6 +1052,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(url.path)
         if method == "GET" and not path.startswith("/api/"):
+            if store.multi() and path in ("/", "/index.html") and not self._who(method, path, {})[0]:
+                return self._send(302, b"", headers=[("Location", "/join.html")])
             target = (WEB / path.lstrip("/")).resolve() if path != "/" else WEB / "index.html"
             if WEB.resolve() not in target.parents and target != WEB / "index.html":
                 return self._json(404, {"error": "not found"})
@@ -921,12 +1064,24 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}") if length else {}
         except json.JSONDecodeError:
             return self._json(400, {"error": "请求体不是合法 JSON"})
+        me, scope = None, contextlib.nullcontext()
+        if store.multi():
+            try:
+                me, refused = self._who(method, path, body if isinstance(body, dict) else {})
+            except rules.Rejected as e:
+                refused = (403, str(e))
+            if refused:
+                return self._json(refused[0], {"error": refused[1]})
+            if me:
+                scope = store.at_home(store.library_home(me["library"]))
         for m, pattern, fn in ROUTES:
             # match before unquoting: paper IDs such as DOIs contain "/" (sent as %2F)
             match = pattern.match(url.path) if m == method else None
             if match:
                 try:
-                    out = fn(q, body, *map(urllib.parse.unquote, match.groups()))
+                    accounts.ME.set(me)
+                    with scope:
+                        out = fn(q, body, *map(urllib.parse.unquote, match.groups()))
                 except rules.Rejected as e:
                     return self._json(400, {"error": str(e)})
                 except cursor_api.AgentError as e:
@@ -947,26 +1102,39 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
 
+AGENT_JOBS = (cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending, cursor_api.card_pending)
+
+
+def _run(jobs):
+    for job in jobs:
+        try:
+            job()
+        except Exception:
+            traceback.print_exc()
+
+
 def _poll_inbox():
     while True:
-        held = handoff.holder()
-        for job in (store.backup, cursor_api.expire_stale, structure.backfill, sync.run, lambda: bg(handoff.auto_push),
-                    *((inbox.drain, cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending,
-                       cursor_api.card_pending) if held else ())):
-            try:
-                job()
-            except Exception:
-                traceback.print_exc()
+        if store.multi():  # every library in turn; iCloud (inbox, handoff, sync) is for one person's Macs
+            for lib in accounts.all_libraries():
+                with store.at_home(store.library_home(lib)):
+                    _run((store.backup, cursor_api.expire_stale, structure.backfill, *AGENT_JOBS))
+        else:
+            _run((store.backup, cursor_api.expire_stale, structure.backfill, sync.run, lambda: bg(handoff.auto_push),
+                  *((inbox.drain, *AGENT_JOBS) if handoff.holder() else ())))
         time.sleep(20)
 
 
 def _password():
+    if store.multi():
+        return None  # each request carries its user's token instead (Handler._who)
     return os.environ.get("P2B_PASSWORD") or store.config().get("password")
 
 
 def _hosts():
     """P2B_HOSTS (comma-separated) and config.json "hosts", read on every request so a new tunnel domain needs no restart."""
-    return [h.strip() for h in os.environ.get("P2B_HOSTS", "").split(",") + list(store.config().get("hosts") or []) if h.strip()]
+    mine = [] if store.multi() else list(store.config().get("hosts") or [])  # the shared server has no library of its own
+    return [h.strip() for h in os.environ.get("P2B_HOSTS", "").split(",") + mine if h.strip()]
 
 
 def _lan_ip():
@@ -982,6 +1150,8 @@ def _lan_ip():
 
 def serve(host=None, port=8765):
     """host None: the LAN too when a password is set (other devices on the office network), else only this Mac."""
+    if store.multi():
+        return serve_multi(host or "127.0.0.1", port)
     host = host or ("0.0.0.0" if _password() else "127.0.0.1")
     if (host not in ("127.0.0.1", "localhost") or _hosts()) and not _password():
         raise SystemExit("对本机以外开放（--host 或 P2B_HOSTS）时必须设置 P2B_PASSWORD：这个服务能让 agent 在本机执行命令")
@@ -992,4 +1162,20 @@ def serve(host=None, port=8765):
     print(f"paper2brain 已启动：http://127.0.0.1:{port}" + (f"  内网：http://{lan}:{port}" if lan else "") + f"  数据目录：{store.home()}", flush=True)
     a = cursor_api.status()
     print("Agent：" + (f"已配置，本机 worker = {a['machine']}" if a["enabled"] else f"未配置（缺 {', '.join(a['missing'])}），只做规则预处理"))
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
+
+
+def serve_multi(host, port):
+    """The shared server (P2B_ROOT): every user signs in, each library is its own directory, agents run on the
+    members' own Macs. Meant to sit behind an HTTPS proxy (ops/Caddyfile), with P2B_HOSTS naming its domain."""
+    clash = [k for k in ("P2B_HOME", "CURSOR_API_KEY", "P2B_MACHINE", "P2B_PASSWORD") if os.environ.get(k)]
+    if clash:
+        raise SystemExit(f"多用户模式下不能设置 {'、'.join(clash)}：每个人的 key 和 worker 存在各自的论文库里")
+    if not _hosts():
+        raise SystemExit("设置 P2B_HOSTS 为网页的域名（例如 p2b.example.com），否则浏览器的请求会被拒绝")
+    for lib in accounts.all_libraries():
+        with store.at_home(store.library_home(lib)):
+            cursor_api.resume_watchers()
+    bg(_poll_inbox)
+    print(f"paper2brain 多用户服务已启动：http://{host}:{port}  域名：{', '.join(_hosts())}  数据：{accounts.root()}", flush=True)
     ThreadingHTTPServer((host, port), Handler).serve_forever()
