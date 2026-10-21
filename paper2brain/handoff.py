@@ -7,6 +7,7 @@ loses at most that much. push stops this Mac and hands the library off; pull tak
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -116,6 +117,17 @@ def _downloaded():
     return False
 
 
+def merge_config(theirs, mine, from_host):
+    """The snapshot's settings, with this Mac's own Cursor worker name. A Mac that has none keeps the shared name when
+    the Macs take turns, so old discussions go on; with sync both run at once, and one name can't serve two workers."""
+    out = dict(theirs)
+    if mine.get("machine"):
+        out["machine"] = mine["machine"]
+    elif theirs.get("sync") and from_host != ME:
+        out["machine"] = "p2b-" + re.sub(r"[^a-z0-9]+", "-", ME.lower()).strip("-")
+    return out
+
+
 def pull():
     m = meta()
     if not m:
@@ -136,9 +148,8 @@ def pull():
         (home / f).unlink(missing_ok=True)
     subprocess.run(["cp", str(DROP / "p2b.sqlite"), str(home / "p2b.sqlite")], check=True)
     store._initialized.discard(str(home))  # the snapshot may come from an older version: migrate it
-    config, mine = json.loads((DROP / "config.json").read_text()), home / "config.json"
-    if mine.exists() and "machine" in json.loads(mine.read_text()):
-        config["machine"] = json.loads(mine.read_text())["machine"]  # this Mac's own worker name, when it has one
+    mine = home / "config.json"
+    config = merge_config(json.loads((DROP / "config.json").read_text()), json.loads(mine.read_text()) if mine.exists() else {}, m["host"])
     mine.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     mine.chmod(0o600)
     moved = store.rehome(m["home"])

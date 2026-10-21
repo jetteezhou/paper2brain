@@ -1139,6 +1139,14 @@ class Sync(unittest.TestCase):
             with store.tx() as c:
                 self.assertEqual(c.execute("SELECT text FROM notes").fetchone()[0], "B 记的")
 
+    def test_a_new_mac_gets_its_own_worker_name_only_when_both_run(self):
+        with self.mock.patch.object(self.handoff, "ME", "Zhou's MacBook Air"):
+            merge = self.handoff.merge_config
+            self.assertEqual(merge({"machine": "p2b-mac", "sync": True}, {}, "office")["machine"], "p2b-zhou-s-macbook-air")
+            self.assertEqual(merge({"machine": "p2b-mac"}, {}, "office")["machine"], "p2b-mac")  # taking turns: one name
+            self.assertEqual(merge({"machine": "p2b-mac", "sync": True}, {"machine": "home"}, "office")["machine"], "home")
+            self.assertEqual(merge({"machine": "p2b-mac", "sync": True, "password": "p"}, {}, "Zhou's MacBook Air")["machine"], "p2b-mac")
+
     def test_auto_push_only_on_the_owner(self):
         with self.on(self.a), self.mock.patch.object(self.handoff, "_pushed", 0.0):
             store.counts()

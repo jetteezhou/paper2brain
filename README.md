@@ -31,20 +31,37 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 数据默认存放在 `~/paper2brain-data`（SQLite、PDF、截图），不进仓库；可以用 `P2B_HOME` 指定其他目录。
 
-**换一台 Mac 用**：一次只在一台 Mac 上用，通过 iCloud 云盘交接（活的数据库不放 iCloud，iCloud 里只放快照）：
+## 多台 Mac
 
-```sh
-.venv/bin/python ops/handoff.py push   # 要离开的 Mac：停掉本机服务，把数据库快照、PDF、仓库和 config.json 放进 iCloud 云盘/paper2brain-handoff
-.venv/bin/python ops/handoff.py pull   # 要接手的 Mac：等 iCloud 同步完再运行；会先备份本机旧库，再接手并重启服务
-```
+几台 Mac 可以同时用同一个论文库，经 iCloud 云盘的 `paper2brain-handoff` 文件夹互通（活的数据库不放 iCloud）。
 
-忘了 push 也不怕：交接过一次之后（iCloud 里有了 `paper2brain-handoff`），正在持有论文库的那台 Mac 每半小时自动往 iCloud 放一份新快照，不停服务；另一台 pull 之后由它接着放。
+**日常：同时开着，在哪台上做什么都行。** `config.json` 里 `"sync": true` 时（实验功能，接入新 Mac 时会随配置带过去），各台每 20 秒交换一次改动：论文、快读卡、主题、研究页、讨论（含已结束的 agent 回复）、笔记都同步，PDF、插图、方法图和代码仓库的文件也双向同步。几十秒内改了同一处时，以后改的为准。删掉的文件不同步（另一台上的留着不用）；Overleaf 的本地副本不同步，它经 Overleaf 自己同步。在一台上开的讨论到另一台接着聊时，会换一个本机的新 agent，之前说过的话照样带上。
 
-**两台同时用（实验）**：`config.json` 里设 `"sync": true`（会随 pull 带到另一台），两台 Mac 每 20 秒通过 iCloud 互相交换改动，同一行以最后改的为准：论文、快读卡、主题、研究页、讨论（含已结束的 agent 回复）、笔记都同步，PDF、插图、方法图和代码仓库的文件也双向同步（新的覆盖旧的，删除不同步）。Overleaf 的本地副本不同步，它经 Overleaf 自己同步。iCloud 收件箱和自动整理、深读这些后台 agent 只在持有论文库的那台上跑，免得两台各做一遍。在一台上开的讨论到另一台接着聊时，会换一个本机的新 agent，之前说过的话照样带上。
+**持有者**：iCloud 收件箱（手机上收下的内容）和自动整理、深读、起标题这些后台 agent，只在“持有论文库”的那台上跑，免得几台各做一遍；它还每半小时往 iCloud 放一份完整快照，不停服务，作兜底。最后一次接手的那台就是持有者。
 
-**双重保险**：网页左下角“Agent”设置里的“两台 Mac”一栏显示谁持有论文库、iCloud 快照是什么时候的，点“从 iCloud 接手到这台”就等于 pull（本机旧库先备份，已同步的改动再补回来，服务重启约一分钟后页面自动刷新）。
+**什么时候点“接手”**：网页左下角“Agent”设置 →“两台 Mac”一栏，显示谁是持有者、快照是什么时候的；“从 iCloud 接手到这台”用快照替换本机论文库（本机旧库先备份到 `backups/`，已同步过的改动再补回来），服务重启约一分钟后页面自动刷新。只在这几种时候需要：新 Mac 第一次用；想让这台负责收件箱和后台 agent（比如持有者那台要关机一阵子）；同步出了问题，想从快照重来。
 
-新 Mac 第一次用：克隆代码、`ops/setup.sh`（顺带装好开机自启），装好并登录 Cursor CLI 和 `tcodex`，再 pull。两台 Mac 共用 `config.json` 里同一个 worker 名（`machine`），已有的讨论换了机器也能接着聊；本机 `config.json` 里另设了 `machine` 时 pull 会保留它。
+### 接入一台新 Mac
+
+前提：新 Mac 登录了同一个 Apple ID 并打开了 iCloud 云盘；能用 SSH 访问 GitHub。
+
+1. 在已经在用的那台 Mac 上确认 iCloud 云盘里有 `paper2brain-handoff`（持有者每半小时自动放一份快照；还没有的话在仓库目录运行一次 `.venv/bin/python ops/handoff.py push`，它会停掉那台的服务，之后接手完再在那台上 `launchctl kickstart gui/$(id -u)/com.paper2brain.server` 和 `...worker` 启动回来）。在访达里看着它上传完（云朵图标不再转）。
+2. 在新 Mac 上装代码和环境（仓库别放进 iCloud 云盘，macOS 不让后台服务读那里的文件）：
+
+   ```sh
+   git clone git@github.com:jetteezhou/paper2brain.git ~/paper2brain
+   cd ~/paper2brain && git checkout cursor/web-mvp-f5a8
+   ops/setup.sh tcodex      # Python 依赖、TCodex、开机自启的服务和 worker
+   tcodex login
+   curl https://cursor.com/install -fsS | bash && agent login
+   ```
+
+3. 接手论文库，两种方式任选：打开 http://127.0.0.1:8765 →左下角“Agent”设置 →“两台 Mac”→“从 iCloud 接手到这台”；或者在终端运行 `.venv/bin/python ops/handoff.py pull`。会先等 iCloud 把快照下载完（1 GB 左右，下载太慢会提示稍后再试），然后替换本机的空库、把文件路径改成这台的，重启服务。
+4. 刷新页面，输入访问口令（随配置带过来，用户名随便填）。检查论文数、打开一篇看 PDF 和插图、左下角显示“Agent 已连接”、在一段讨论里发条消息看 agent 能回。
+
+开了同步时，新 Mac 会自动起一个自己的 Cursor worker 名（`p2b-<主机名>`），因为两台同时在线时不能共用一个名字；想用别的名字，接手前在新 Mac 的 `~/paper2brain-data/config.json` 里写好 `"machine"`。接手后新 Mac 成了持有者；想让原来那台继续收手机收件箱，在原来那台上再点一次“接手”。
+
+**只想一次用一台（不开同步）**：离开时在旧 Mac 上 `ops/handoff.py push`（停服务、放快照），到新 Mac 上 pull。两台共用一个 worker 名，旧讨论换了机器也能接着聊。忘了 push 的话，自动快照最多差半小时。
 
 **从别的设备访问**：默认只接受本机。要对外开放，必须设访问口令：`config.json` 的 `password`，或环境变量 `P2B_PASSWORD`（浏览器会弹登录框，用户名随便填；设了之后本机访问也要输）。经代理或域名访问时，再把那个域名写进 `config.json` 的 `hosts`（或环境变量 `P2B_HOSTS`，逗号隔开）。
 
