@@ -3,7 +3,7 @@
 // figure lightbox, which open from anywhere a card is shown.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, del, enc, short, idLabel, href, mdHtml, citeHtml, Mark, Md, workHot, openWork } from './lib.js';
+import { html, get, post, del, enc, short, idLabel, href, mdHtml, citeHtml, Mark, Md, workHot, openWork, DockGrip } from './lib.js';
 import {
   route, baseRoute, appState, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, registerAction, openReader, quoting, peek, peekPaper, addPaper,
 } from './state.js';
@@ -324,7 +324,7 @@ export function Reader() {
     <div class=${`reader-body ${wideSig.value ? 'wide' : ''}`}>
       ${p.pdf_path ? html`<${PdfView} pid=${p.id} page=${+pageArg || view.page || 1} wide=${wideSig.value} />`
         : html`<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br /><${PdfButton} paper=${p.id} /></div></div>`}
-      <div class="panel"><div class="tabs" id="tabs">${tabs.map(([k, label, n]) => html`<button class=${`tab ${tab === k || (k === 'anchors' && tab === 'anchor') ? 'on' : ''}`} onClick=${() => setTab(k)}>${label}${n ? html`<span class="n">${n}</span>` : null}</button>`)}</div>
+      <div class="panel"><${DockGrip} /><div class="tabs" id="tabs">${tabs.map(([k, label, n]) => html`<button class=${`tab ${tab === k || (k === 'anchors' && tab === 'anchor') ? 'on' : ''}`} onClick=${() => setTab(k)}>${label}${n ? html`<span class="n">${n}</span>` : null}</button>`)}</div>
         <div class=${`panel-body ${chatty ? 'chatwrap' : ''}`} id="panel">${body}</div></div>
     </div></div>`;
 }

@@ -153,10 +153,26 @@ function inline(s) {
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/(^|[\s(（])(https?:\/\/[^\s<)）]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 }
+const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+function table(rows) {
+  const sep = rows.length > 1 && /^[\s|:-]*-[\s|:-]*$/.test(rows[1]);
+  const tr = (r, t) => `<tr>${cells(r).map((c) => `<${t}>${inline(c)}</${t}>`).join('')}</tr>`;
+  const body = rows.slice(sep ? 2 : 0).map((r) => tr(r, 'td')).join('');
+  return `<div class="table-wrap"><table class="md-table">${sep ? `<thead>${tr(rows[0], 'th')}</thead>` : ''}<tbody>${body}</tbody></table></div>`;
+}
 function blocks(text) {
   const out = [];
   let list = null;
-  for (const line of text.split('\n')) {
+  let rows = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // Table rows may be separated by blank lines (agents do this); a blank line only ends the table if no row follows.
+    if (/^\s*\|/.test(line)) { rows.push(line); continue; }
+    if (rows.length) {
+      if (!line.trim() && /^\s*\|/.test(lines.slice(i).find((l) => l.trim()) || '')) continue;
+      out.push(table(rows)); rows = [];
+    }
     const m = line.match(/^\s*([-*•]|\d+[.)])\s+(.*)$/);
     if (m) {
       const t = /\d/.test(m[1]) ? 'ol' : 'ul';
@@ -171,6 +187,7 @@ function blocks(text) {
     else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
   }
   if (list) out.push(`</${list}>`);
+  if (rows.length) out.push(table(rows));
   return out.join('');
 }
 export const mdHtml = (src) => String(src || '').replace(/\r/g, '').split('```')
