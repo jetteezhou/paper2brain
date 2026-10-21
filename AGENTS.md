@@ -30,3 +30,16 @@ Take the first option that fully works:
 Never cut: validation at trust boundaries, error handling that prevents data loss, security, accessibility, the calibration real hardware needs, anything the user asked for.
 
 (Yes, this file also applies to agents working on the ponytail repo itself. Especially to them.)
+
+## Cloud Agent
+
+The app is on `cursor/web-mvp-f5a8`. `main` has this file only, so an environment build of `main` does not install Python packages. This machine already has Python 3.12, `python3-venv`, rsync, and the libraries Playwright needs for Chromium. After checking out the app branch:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m playwright install chromium
+.venv/bin/python -m paper2brain serve --host 127.0.0.1 --port 8765
+```
+
+Tests: `.venv/bin/python -m unittest discover -s tests`. Data directory: `P2B_HOME` or `~/paper2brain-data`. Do not run `ops/setup.sh` here; it installs macOS launchd jobs. The web UI and tests need no API key. Sync tests call macOS `brctl` and fail on Linux. TCodex is not installed.
