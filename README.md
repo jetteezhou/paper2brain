@@ -77,7 +77,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 - **角色**：所有者（邀请、改角色、确立研究、删研究、改模型和 Overleaf）、编辑、只读。
 - **共享空间的 agent**：用空间里指定的一位成员（默认是创建者）的 key 和 Mac 跑；所有者可以在设置里换人。
-- **服务器上不跑的**：iCloud 收件箱、多台 Mac 同步与交接、TCodex（它会在服务器上执行命令）；Overleaf 只能在网页上推拉，agent 改不了服务器上的本地副本。
+- **TCodex**：也在成员自己的 Mac 上跑。装了 `tcodex` 的 Mac 运行 `ops/client.sh` 时会顺便装上本机 TCodex（`ops/tcodex.sh`，日志 `/tmp/paper2brain-tcodex.log`），它向服务器领取这个人（和由 ta 负责 agent 的共享空间）的 TCodex 任务、在本机运行并把回答传回；这台 Mac 在线时模型列表里才有 TCodex 的模型。搜索框的 AI 推荐、起标题这些一次性的快速调用不走 TCodex，要用就配"快速搜索接口"。
+- **服务器上不跑的**：iCloud 收件箱、多台 Mac 同步与交接；Overleaf 只能在网页上推拉，agent 改不了服务器上的本地副本。
 
 **搭服务器**（Ubuntu 24.04，域名的 A 记录已指向它，只开 22/80/443 端口）：
 
