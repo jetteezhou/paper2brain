@@ -434,7 +434,8 @@ function Account() {
   const leave = () => confirm('离开这个空间？之后要别人重新邀请才能回来。') && call('leave', `/api/members/${acc.user.id}`, { role: null }, reload);
   return html`<div class="block-title" style="margin-top:0">本机 agent<span class="line"></span></div>
   <p class="hint" style="margin-top:0">${acc.user.name}，你的 agent 在你自己的 Mac 上运行，用你的 Cursor key，只能通过这个网页按你的权限读写。
-    ${a.enabled ? html`<b>✓ 已登记 worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '还没登记：在你的 Mac 上运行下面的命令。'}</p>
+    ${a.enabled ? html`<b>✓ 已登记 worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '还没登记：在你的 Mac 上运行下面的命令。'}
+    TCodex：${a.backends?.tcodex ? '✓ 本机在线，模型列表里可以选 TCodex 的模型' : '本机不在线（在装了 tcodex 的 Mac 上运行下面的命令即可接上）'}。</p>
   ${got.token ? html`<p class="hint">口令只显示这一次（重新生成会让旧的失效）。在 Mac 的终端里运行：</p>
     <${Copyable} text=${`git clone ${a.repo} ~/paper2brain 2>/dev/null; ~/paper2brain/ops/client.sh ${location.origin} ${got.token.token}`} />`
     : html`<button class="btn sm" onClick=${() => call('token', '/api/me/agent-token', {})}>生成本机 agent 的口令</button>`}

@@ -43,7 +43,13 @@ os.chmod(path, 0o600)
 print(f"✓ 已在 {server} 登记本机 worker：{machine}")
 EOF
 
-PATH="$HOME/.local/bin:$PATH"
+PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
 command -v agent >/dev/null || command -v cursor-agent >/dev/null || curl https://cursor.com/install -fsS | bash
-sh ops/install.sh worker
+if command -v tcodex >/dev/null; then
+  sh ops/install.sh worker tcodex
+  echo "✓ 本机 TCodex 也已连上：网页的模型列表里会出现 TCodex 的模型（日志 /tmp/paper2brain-tcodex.log）"
+else
+  sh ops/install.sh worker
+  echo "（没找到 tcodex：要用 TCodex 的模型，装好并 tcodex login 后再运行一次本脚本）"
+fi
 echo "✓ 好了：网页上的 agent 会在这台 Mac 上运行（Mac 关机时 agent 不会回复，其他功能照常）。"

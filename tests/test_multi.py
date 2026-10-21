@@ -16,7 +16,7 @@ from unittest import mock
 
 os.environ.setdefault("P2B_HOME", tempfile.mkdtemp(prefix="p2b-test-"))
 
-from paper2brain import accounts, cli, remote, repos, rules, server, sources, store  # noqa: E402
+from paper2brain import accounts, cli, cursor_api, remote, repos, rules, server, sources, store, tcodex_runner  # noqa: E402
 
 
 class Multi(unittest.TestCase):
@@ -177,6 +177,55 @@ class Multi(unittest.TestCase):
         self.assertTrue(json.loads(out.getvalue())["proposed"])
         with store.at_home(store.library_home(a["library"])):
             self.assertEqual(store.get_research(rid)["proposal"]["problem"], "问题")
+
+    def test_tcodex_runs_on_the_members_mac(self):
+        self.url = self.serve()
+        a, _ = self.user("甲")
+        agent = accounts.issue(a["id"], "agent")
+        home = store.library_home(a["library"])
+        bin_dir = Path(tempfile.mkdtemp())
+        (bin_dir / "tcodex").write_text(
+            '#!/bin/sh\necho "$P2B_AGENT_ID $P2B_LIBRARY $P2B_SERVER $*" >> "$(dirname "$0")/seen"\n'
+            'echo \'{"type":"thread.started","thread_id":"s-1"}\'\n'
+            'echo \'{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"./p2b papers"}}\'\n'
+            'echo \'{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"答案"}}\'\n')
+        (bin_dir / "tcodex").chmod(0o755)
+        tc = {"id": "gpt-6-sol", "backend": "tcodex"}
+        with store.at_home(home):
+            self.assertTrue(cursor_api._missing("tcodex"))  # no Mac asking yet: TCodex is not offered
+            with self.assertRaises(cursor_api.AgentError):
+                cursor_api.start_async("chat", store.thread_for("library")["id"], "你好", model=tc)
+        self.assertIsNone(self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"])
+        with store.at_home(home):
+            self.assertEqual(cursor_api._missing("tcodex"), [])
+            self.assertIn("gpt-6-sol", [m["id"] for m in cursor_api.list_models()])
+            t = store.thread_for("library")
+            cursor_api.start_async("chat", t["id"], "你好", model=tc)
+            for _ in range(50):
+                if store.last_run("chat")["status"] == "CREATING":
+                    break
+                threading.Event().wait(0.1)
+        job = self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"]
+        self.assertEqual((job["prompt"], job["library"], job["session"]), ("你好", a["library"], None))
+        self.assertIsNone(self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"])  # taken once
+        with mock.patch.object(cursor_api, "_PATH", f"{bin_dir}:/usr/bin:/bin"):
+            tcodex_runner.run_job(self.url, agent, job)
+        with store.at_home(home):
+            run = store.get_run(job["run_id"])
+            self.assertEqual((run["status"], run["text"]), ("FINISHED", "答案"))
+            self.assertEqual(store.kv_get(f"codex:{job['agent_id']}"), "s-1")
+            cursor_api.start_async("chat", t["id"], "接着说", agent_id=store.thread_for(thread_id=t["id"])["agent_id"])
+            for _ in range(50):
+                if store.last_run("chat")["status"] == "CREATING":
+                    break
+                threading.Event().wait(0.1)
+        job2 = self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"]
+        self.assertEqual(job2["session"], "s-1")  # the follow-up resumes the same TCodex conversation
+        with store.at_home(home):
+            store.update_run(job2["run_id"], status="CANCELLED")
+        self.assertFalse(self.call("/api/tcodex/update", {"library": a["library"], "run_id": job2["run_id"], "text": "x"}, bearer=agent)[1]["live"])
+        seen = (bin_dir / "seen").read_text().splitlines()[0].split()
+        self.assertEqual(seen[:3], [job["agent_id"], a["library"], self.url])
 
     def test_outbound_fetches_stay_public(self):
         for url in ("http://127.0.0.1/x", "http://169.254.169.254/latest/meta-data", "http://10.0.0.1/", "file:///etc/passwd"):
