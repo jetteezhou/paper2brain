@@ -433,8 +433,8 @@ function Account() {
   const setRole = (m, role) => call('role', `/api/members/${m.id}`, { role }, () => { toast(role ? '已修改' : '已移出'); refresh(); });
   const leave = () => confirm('离开这个空间？之后要别人重新邀请才能回来。') && call('leave', `/api/members/${acc.user.id}`, { role: null }, reload);
   return html`<div class="block-title" style="margin-top:0">本机 agent<span class="line"></span></div>
-  <p class="hint" style="margin-top:0">${acc.user.name}，你的 agent 在你自己的 Mac 上运行，用你的 Cursor key，只能通过这个网页按你的权限读写。
-    ${a.enabled ? html`<b>✓ 已登记 worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '还没登记：在你的 Mac 上运行下面的命令。'}
+  <p class="hint" style="margin-top:0">${acc.user.name}，你的 agent 在你自己的 Mac 上运行：由 Mac 用你的 Cursor key 调用 Cursor（key 不上传服务器），只能通过这个网页按你的权限读写。
+    ${a.backends?.cursor ? html`<b>✓ 本机在线，worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '本机 agent 不在线：在你的 Mac 上运行下面的命令（装过的话看 Mac 是否开着）。'}
     TCodex：${a.backends?.tcodex ? '✓ 本机在线，模型列表里可以选 TCodex 的模型' : '本机不在线（在装了 tcodex 的 Mac 上运行下面的命令即可接上）'}。
     快速搜索接口：${a.search_api ? '✓ 已配置' : '没配置（运行下面的命令时会问）'}。</p>
   ${got.token ? html`<p class="hint">口令只显示这一次（重新生成会让旧的失效）。在 Mac 的终端里运行（会问 Cursor API key 和快速搜索接口，已有单人版 paper2brain 的设置时直接沿用）：</p>

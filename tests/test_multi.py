@@ -236,14 +236,16 @@ class Multi(unittest.TestCase):
         docs = self.call("/api/cli", {"argv": ["guide"]}, bearer=agent)[1]["out"]["docs"]
         self.assertIn("README.md", docs)
         self.assertIn("./p2b", docs["README.md"])
-        # setup.sh registers the worker, the key and the quick search API in the user's own library
+        # setup.sh registers the quick search API in the user's own library; the Cursor key stays on the Mac
         code, got, _ = self.call("/api/agent/connect", {"cursor_api_key": "key_x", "machine": "p2b-a-mac",
                                  "search_api": {"base_url": "https://8.8.8.8/v1", "model": "m", "api_key": "s"}}, bearer=agent)
         self.assertEqual((code, got["search_api"]), (200, True))
-        self.assertEqual(self.call("/api/agent/connect", {"cursor_api_key": "k", "machine": "m",
-                                   "search_api": {"base_url": "http://10.0.0.1/v1", "model": "m", "api_key": "s"}}, bearer=agent)[0], 400)
+        self.assertEqual(self.call("/api/agent/connect", {"search_api": {"base_url": "http://10.0.0.1/v1", "model": "m", "api_key": "s"}}, bearer=agent)[0], 400)
         with store.at_home(store.library_home(a["library"])):
-            self.assertEqual((cursor_api.config()["machine"], cursor_api.search_api()["model"]), ("p2b-a-mac", "m"))
+            self.assertEqual(cursor_api.search_api()["model"], "m")
+            self.assertNotIn("key_x", (store.home() / "config.json").read_text())
+            with self.assertRaises(cursor_api.AgentError):
+                cursor_api._json("GET", "/models")  # the shared server never calls Cursor itself
             space = accounts.create_space(a, "组会", rid)
         with store.at_home(store.library_home(space)):
             self.assertEqual(cursor_api.search_api()["model"], "m")  # a space uses its agent member's
@@ -266,18 +268,18 @@ class Multi(unittest.TestCase):
             self.assertTrue(cursor_api._missing("tcodex"))  # no Mac asking yet: TCodex is not offered
             with self.assertRaises(cursor_api.AgentError):
                 cursor_api.start_async("chat", store.thread_for("library")["id"], "你好", model=tc)
-        self.assertIsNone(self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"])
+        self.assertIsNone(self.call("/api/runner/claim", {"wait": 0, "backends": ["tcodex"]}, bearer=agent)[1]["job"])
         with store.at_home(home):
             self.assertEqual(cursor_api._missing("tcodex"), [])
             self.assertIn("gpt-6-sol", [m["id"] for m in cursor_api.list_models()])
             t = store.thread_for("library")
             cursor_api.start_async("chat", t["id"], "你好", model=tc)
             queued()
-        job = self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"]
+        job = self.call("/api/runner/claim", {"wait": 0, "backends": ["tcodex"]}, bearer=agent)[1]["job"]
         self.assertEqual((job["prompt"], job["library"], job["session"]), (cursor_api.GUIDE_FIRST + "你好", a["library"], None))
-        self.assertIsNone(self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"])  # taken once
+        self.assertIsNone(self.call("/api/runner/claim", {"wait": 0, "backends": ["tcodex"]}, bearer=agent)[1]["job"])  # taken once
         # what paper2brain-client's runner reports while tcodex runs on the Mac, then at the end
-        update = lambda **f: self.call("/api/tcodex/update", {"library": a["library"], "run_id": job["run_id"], **f}, bearer=agent)[1]  # noqa: E731
+        update = lambda **f: self.call("/api/runner/update", {"library": a["library"], "run_id": job["run_id"], **f}, bearer=agent)[1]  # noqa: E731
         self.assertTrue(update(text="", tools=[], session="s-1")["live"])
         self.assertTrue(update(text="答案", tools=[{"name": "command_execution", "status": "done", "args": "./p2b papers"}], done=True, duration_ms=5)["live"])
         with store.at_home(home):
@@ -286,11 +288,52 @@ class Multi(unittest.TestCase):
             self.assertEqual(store.kv_get(f"codex:{job['agent_id']}"), "s-1")
             cursor_api.start_async("chat", t["id"], "接着说", agent_id=store.thread_for(thread_id=t["id"])["agent_id"])
             queued()
-        job2 = self.call("/api/tcodex/claim", {"wait": 0}, bearer=agent)[1]["job"]
+        job2 = self.call("/api/runner/claim", {"wait": 0, "backends": ["tcodex"]}, bearer=agent)[1]["job"]
         self.assertEqual(job2["session"], "s-1")  # the follow-up resumes the same TCodex conversation
         with store.at_home(home):
             store.update_run(job2["run_id"], status="CANCELLED")
-        self.assertFalse(self.call("/api/tcodex/update", {"library": a["library"], "run_id": job2["run_id"], "text": "x"}, bearer=agent)[1]["live"])
+        self.assertFalse(self.call("/api/runner/update", {"library": a["library"], "run_id": job2["run_id"], "text": "x"}, bearer=agent)[1]["live"])
+
+    def test_cursor_runs_are_started_by_the_members_mac(self):
+        self.url = self.serve()
+        a, _ = self.user("甲")
+        agent = accounts.issue(a["id"], "agent")
+        home = store.library_home(a["library"])
+        claim = lambda **f: self.call("/api/runner/claim", {"wait": 0, **f}, bearer=agent)[1]["job"]  # noqa: E731
+        with store.at_home(home):
+            self.assertTrue(cursor_api._missing("cursor"))
+        self.assertIsNone(claim(backends=["cursor"], machine="p2b-a-mac", models=[{"id": "claude-x", "displayName": "Claude X"}]))
+        with store.at_home(home):
+            self.assertEqual(cursor_api.status()["machine"], "p2b-a-mac")
+            self.assertEqual([(m["id"], m["backend"]) for m in cursor_api.list_models()], [("claude-x", "cursor")])
+            t = store.thread_for("library")
+            cursor_api.start_async("chat", t["id"], "你好", model={"id": "claude-x", "params": [{"id": "thinking", "value": "on"}]})
+            for _ in range(50):
+                if any(r["id"].startswith("cr-") and r["status"] == "CREATING" for r in store.unfinished_runs()):
+                    break
+                threading.Event().wait(0.1)
+        self.assertIsNone(claim(backends=["tcodex"]))  # a Mac without Cursor does not take it
+        job = claim(backends=["cursor"])
+        self.assertEqual((job["backend"], job["new"], job["repo"], job["model"]),
+                         ("cursor", True, cursor_api.CLIENT_REPO, {"id": "claude-x", "params": [{"id": "thinking", "value": "on"}]}))
+        update = lambda run, **f: self.call("/api/runner/update", {"library": a["library"], "run_id": run, **f}, bearer=agent)[1]["live"]  # noqa: E731
+        self.assertTrue(update(job["run_id"], text="正在", tools=[]))
+        self.assertTrue(update(job["run_id"], text="答案", tools=[], done=True, status="FINISHED", duration_ms=9))
+        with store.at_home(home):
+            self.assertEqual((store.get_run(job["run_id"])["status"], store.get_run(job["run_id"])["text"]), ("FINISHED", "答案"))
+            aid = store.thread_for(thread_id=t["id"])["agent_id"]
+            self.assertEqual(aid, job["agent_id"])
+            cursor_api.start_async("chat", t["id"], "接着说", agent_id=aid)
+            for _ in range(50):
+                if any(r["id"].startswith("cr-") and r["status"] == "CREATING" for r in store.unfinished_runs()):
+                    break
+                threading.Event().wait(0.1)
+        job2 = claim(backends=["cursor"])
+        self.assertEqual((job2["new"], job2["agent_id"]), (False, aid))
+        # the agent is gone at Cursor: the next message starts a fresh one
+        self.assertTrue(update(job2["run_id"], text="", tools=[], done=True, error="Cursor API 404：agent not found"))
+        with store.at_home(home):
+            self.assertIsNone(store.thread_for(thread_id=t["id"])["agent_id"])
 
     def test_outbound_fetches_stay_public(self):
         for url in ("http://127.0.0.1/x", "http://169.254.169.254/latest/meta-data", "http://10.0.0.1/", "file:///etc/passwd"):

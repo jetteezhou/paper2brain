@@ -66,9 +66,9 @@ def set_backend(backend):
 
 
 def _missing(backend):
+    if store.multi():  # both run on the member's Mac, which says what it has each time it asks for work
+        return [] if runner_online(backend) else [f"在线的本机 {'TCodex' if backend == 'tcodex' else 'agent'}（在 Mac 上运行 paper2brain-client 的 setup.sh）"]
     if backend == "tcodex":
-        if store.multi():
-            return [] if runner_online() else ["在线的本机 TCodex（在装了 tcodex 的 Mac 上运行 paper2brain-client 的 setup.sh）"]
         return [] if _tcodex_bin() else ["tcodex 命令"]
     cfg = config()
     return [k for k, v in (("CURSOR_API_KEY", cfg["api_key"]), ("P2B_MACHINE", cfg["machine"])) if not v]
@@ -76,7 +76,7 @@ def _missing(backend):
 
 def status():
     cfg, ready = config(), [b for b in BACKENDS if not _missing(b)]
-    names = {"cursor": cfg["machine"], "tcodex": "TCodex"}
+    names = {"cursor": runner_info().get("machine") if store.multi() else cfg["machine"], "tcodex": "TCodex"}
     return {"enabled": bool(ready), "missing": [] if ready else _missing(cfg["backend"]), "machine": " + ".join(names[b] for b in ready),
             "auto_agent": cfg["auto_agent"], "backend": cfg["backend"], "backends": {b: b in ready for b in BACKENDS},
             "search_ai": search_ai_ready(), "search_api": bool(search_api())}
@@ -142,7 +142,9 @@ def list_models():
     """The models of every ready backend, each tagged with its backend, with their parameters (context window,
     reasoning effort...). Cursor's list is cached 10 minutes."""
     items = []
-    if not _missing("cursor"):
+    if store.multi():  # the member's Mac lists its Cursor account's models when it asks for work
+        items += [{**m, "backend": "cursor"} for m in runner_info().get("models", []) if not _missing("cursor")]
+    elif not _missing("cursor"):
         cache = _models_cache.setdefault(config()["api_key"], {})  # per key: each user's account offers its own models
         if time.time() - cache.get("at", 0) > 600:
             cache.update(items=_json("GET", "/models")["items"], at=time.time())
@@ -153,6 +155,8 @@ def list_models():
 
 
 def _request(method, path, body=None, accept="application/json", timeout=None):
+    if store.multi():  # Cursor judges the region by the caller: there the member's Mac calls it (claim)
+        raise AgentError("共享服务器不直接调用 Cursor")
     cfg = config()
     if not cfg["api_key"]:
         raise AgentError("未配置 CURSOR_API_KEY")
@@ -277,6 +281,8 @@ def _send(agent_id, text, images=(), name=None, new=False, model=None):
 
 def _launch(r):
     placeholder, launch = r["id"], r["launch"] or {}
+    if store.multi():
+        return _queue(r, "tc-" if _backend_of(agent_id=r["agent_id"]) == "tcodex" else "cr-")
     if _backend_of(agent_id=r["agent_id"]) == "tcodex":
         return _codex_launch(r)
     try:
@@ -410,7 +416,7 @@ _PATH = os.pathsep.join([os.environ.get("PATH", ""), os.path.expanduser("~/.loca
 
 
 def _tcodex_bin():
-    # never on the shared server itself, where it could reach every library: there members' Macs run it (claim_codex)
+    # never on the shared server itself, where it could reach every library: there members' Macs run it (claim)
     # ponytail: so the quick one-shot TCodex calls (search bar, titles) stay off there; they need the search API instead
     return None if store.multi() else shutil.which("tcodex", path=_PATH)
 
@@ -421,10 +427,6 @@ def _codex_launch(r):
     run_id = f"tc-{uuid.uuid4()}"
     try:
         if (store.get_run(placeholder) or {}).get("status") in ("CANCELLED", "EXPIRED"):
-            return
-        if store.multi():  # waits as CREATING until the Mac that runs this library's agents takes it (claim_codex)
-            _jobs[run_id] = images
-            store.replace_run(placeholder, run_id, r["agent_id"], "CREATING")
             return
         store.replace_run(placeholder, run_id, r["agent_id"], "RUNNING")
         _codex(r["agent_id"], run_id, r["prompt"], images, launch.get("model"))
@@ -511,45 +513,84 @@ def codex_turn(session, text, images, model, progress, started=None, env=None):
     return out, list(tools.values()), error
 
 
-# ---------- TCodex on the shared server: a member's Mac takes the run (paper2brain-client), the server only records it ----------
+# ---------- the shared server: a member's Mac takes each run (paper2brain-client) and calls Cursor or runs TCodex there,
+# so Cursor sees the Mac's region and the key never leaves it; the server only queues and records ----------
 
 _jobs = {}  # ponytail: a queued run's images live in memory; after a server restart it is sent without them
-_runners = {}  # a member's personal library id -> when their Mac last asked for TCodex work
+_runners = {}  # a member's personal library id -> {"at", "backends", "machine", "models"} from their Mac
 RUNNER_FRESH = 90  # seconds: the Mac asks again at least every ~25 s while it is on
+PREFIX = {"tcodex": "tc-", "cursor": "cr-"}
 
 
-def runner_online():
-    """Whether the Mac that runs this library's agents is asking for TCodex work."""
-    lib = store.config().get("agent_library") or store.home().name
-    return time.time() - _runners.get(lib, 0) < RUNNER_FRESH
+def runner_info():
+    """What the Mac that runs this library's agents last said about itself, while it keeps asking for work."""
+    info = _runners.get(store.config().get("agent_library") or store.home().name) or {}
+    return info if time.time() - info.get("at", 0) < RUNNER_FRESH else {}
 
 
-def claim_codex(libraries, mine):
-    """For a member's Mac: the oldest TCodex run waiting in the libraries whose agents it runs, now running there."""
-    _runners[mine] = time.time()
+def runner_online(backend):
+    return backend in runner_info().get("backends", ())
+
+
+def _queue(r, prefix):
+    """The run waits as CREATING until the Mac that runs this library's agents takes it (claim)."""
+    try:
+        if (store.get_run(r["id"]) or {}).get("status") in ("CANCELLED", "EXPIRED"):
+            return
+        run_id = f"{prefix}{uuid.uuid4()}"
+        _jobs[run_id] = _images.pop(r["id"], ())
+        store.replace_run(r["id"], run_id, r["agent_id"], "CREATING")
+    finally:
+        pump()
+
+
+def claim(libraries, mine, backends, machine=None, models=None):
+    """For a member's Mac: the oldest run waiting for one of its backends in the libraries whose agents it runs,
+    now running there. It also says which backends it has, its worker's name and its Cursor account's models."""
+    old = _runners.get(mine, {})
+    models = [m for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)][:300] if isinstance(models, list) else old.get("models", [])
+    _runners[mine] = {"at": time.time(), "backends": [b for b in backends if b in BACKENDS] if isinstance(backends, list) else [],
+                      "machine": str(machine)[:60] if machine else old.get("machine"), "models": models}
+    prefixes = tuple(PREFIX[b] for b in _runners[mine]["backends"])
     for lib in libraries:
         with store.at_home(store.library_home(lib)):
             for r in store.unfinished_runs():
-                if r["id"].startswith("tc-") and r["status"] == "CREATING" and store.claim_run(r["id"]):
-                    return {"library": lib, "run_id": r["id"], "agent_id": r["agent_id"], "prompt": r["prompt"],
-                            "model": (r["launch"] or {}).get("model"), "session": store.kv_get(f"codex:{r['agent_id']}") or None,
-                            "images": [{"data": base64.b64encode(d).decode(), "mime": m} for d, m in _jobs.pop(r["id"], ())]}
+                if prefixes and r["id"].startswith(prefixes) and r["status"] == "CREATING" and store.claim_run(r["id"]):
+                    launch, codex = r["launch"] or {}, r["id"].startswith("tc-")
+                    job = {"backend": "tcodex" if codex else "cursor", "library": lib, "run_id": r["id"], "agent_id": r["agent_id"],
+                           "prompt": r["prompt"], "model": launch.get("model"),
+                           "images": [{"data": base64.b64encode(d).decode(), "mime": m} for d, m in _jobs.pop(r["id"], ())]}
+                    if codex:
+                        job["session"] = store.kv_get(f"codex:{r['agent_id']}") or None
+                    else:
+                        job.update(new=bool(launch.get("new")), name=launch.get("name"), repo=config()["repo"])
+                        if job["model"]:
+                            job["model"] = {k: v for k, v in job["model"].items() if k != "backend"}
+                    return job
     return None
 
 
-def codex_progress(run_id, text, tools, session=None, done=False, error=None, duration_ms=None):
-    """A member's Mac reports on a run it took. False when the run was stopped here: the Mac then stops tcodex."""
-    r = store.get_run(run_id) if str(run_id).startswith("tc-") else None
+def progress(run_id, text, tools, session=None, done=False, error=None, duration_ms=None, status=None):
+    """A member's Mac reports on a run it took. False when the run was stopped here: the Mac then stops it too."""
+    r = store.get_run(run_id) if str(run_id).startswith(tuple(PREFIX.values())) else None
     if not r or r["status"] not in LIVE:
         return False
     text, error = str(text or "")[:200_000], error and str(error)[:2000]
     tools = [t for t in tools if isinstance(t, dict)][:500] if isinstance(tools, list) else []
-    if session:
+    duration_ms = duration_ms if isinstance(duration_ms, int) else None
+    if session and run_id.startswith("tc-"):
         store.kv_set(f"codex:{r['agent_id']}", str(session)[:200])
     if not done:
-        store.update_run(run_id, text=text, tools=tools)
+        store.update_run(run_id, text=text, tools=tools, status="RUNNING")
         return True
-    _codex_done(r["agent_id"], run_id, text, tools, error, duration_ms if isinstance(duration_ms, int) else None)
+    if run_id.startswith("tc-"):
+        _codex_done(r["agent_id"], run_id, text, tools, error, duration_ms)
+    else:
+        status = status if status in TERMINAL else "ERROR" if error else "FINISHED"
+        # the Mac could not start or continue the agent (as _launch does here): the next message starts a fresh one
+        if error and error.startswith("Cursor API") and ((r["launch"] or {}).get("new") or re.search(r"Cursor API (404|410)|archived", error, re.I)):
+            store.forget_agent(r["agent_id"])
+        store.update_run(run_id, status=status, error=error, text=text, tools=tools, duration_ms=duration_ms)
     pump()
     return True
 
@@ -829,7 +870,7 @@ def login(cli):
 
 
 def cancel(agent_id, run_id):
-    if run_id.startswith("tc-"):
+    if run_id.startswith(tuple(PREFIX.values())):  # a member's Mac stops a run it took at its next report
         store.update_run(run_id, status="CANCELLED")
         if run_id in _procs:
             os.killpg(_procs[run_id].pid, signal.SIGTERM)
@@ -841,8 +882,8 @@ def resume_watchers():
     """After a restart: keep watching live runs; a run whose request was in flight is found by its agent id or, when
     it never reached Cursor, queued to be sent again (a repeated create is idempotent); waiting runs wait on."""
     for r in store.unfinished_runs():
-        if r["id"].startswith("tc-"):
-            store.update_run(r["id"], status="ERROR", error="服务重启，TCodex 进程已中断，请重试")
+        if r["id"].startswith(tuple(PREFIX.values())):
+            store.update_run(r["id"], status="ERROR", error="服务重启，这次任务已中断，请重试")
         elif not r["id"].startswith("pending-"):
             watch(r["agent_id"], r["id"])
         elif r["status"] != "WAITING" and not r["agent_id"]:

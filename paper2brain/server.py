@@ -94,17 +94,13 @@ def agent_token(q, body):
 
 @route("POST", "/api/agent/connect")
 def agent_connect(q, body):
-    """From the setup on the user's Mac (paper2brain-client): their Cursor key, the name of the worker there and,
-    optionally, the quick search API ({base_url, model, api_key, web_model}), all kept in the user's own library."""
-    key, machine = (body.get("cursor_api_key") or "").strip(), (body.get("machine") or "").strip()
-    if not key or not re.fullmatch(r"[\w.-]{1,60}", machine):
-        raise rules.Rejected("需要 Cursor API key 和 worker 名（字母、数字、点、横线）")
+    """From the setup on the user's Mac (paper2brain-client): optionally the quick search API ({base_url, model,
+    api_key, web_model}), kept in the user's own library. The Cursor key stays on the Mac, which calls Cursor itself."""
     s = body.get("search_api")
     with store.at_home(store.library_home(_me()["user"]["library"])):
         if isinstance(s, dict) and s.get("base_url"):
             sources.check_public(s["base_url"])
             cursor_api.set_search_api(s.get("base_url"), s.get("model"), s.get("api_key"), s.get("web_model"))
-        accounts.write_config(_me()["user"]["library"], cursor_api_key=key, machine=machine)
         return {"ok": True, "search_api": bool(cursor_api.search_api())}
 
 
@@ -117,25 +113,26 @@ def cli_remote(q, body):
     return {"out": out, "files": files}
 
 
-@route("POST", "/api/tcodex/claim")
-def tcodex_claim(q, body):
-    """A member's Mac (paper2brain-client's tcodex_runner) asks for a TCodex run to do; waits up to 25 s for one."""
+@route("POST", "/api/runner/claim")
+def runner_claim(q, body):
+    """A member's Mac (paper2brain-client's runner) asks for a run to do, Cursor or TCodex; waits up to 25 s for one.
+    It says which backends it has, its worker's name and its Cursor account's models (cursor_api.claim)."""
     me = _me()["user"]
     deadline = time.time() + min(max(float(body.get("wait", 25)), 0), 25)
     while True:
-        job = cursor_api.claim_codex(accounts.agent_libraries(me), me["library"])
+        job = cursor_api.claim(accounts.agent_libraries(me), me["library"], body.get("backends"), body.get("machine"), body.get("models"))
         if job or time.time() >= deadline:
             return {"job": job}
         time.sleep(1)
 
 
-@route("POST", "/api/tcodex/update")
-def tcodex_update(q, body):
+@route("POST", "/api/runner/update")
+def runner_update(q, body):
     """Progress and the result of a run the Mac took; {"live": false} tells it the run was stopped here."""
     if _me()["library"] not in accounts.agent_libraries(_me()["user"]):
         raise rules.Rejected("这个论文库的 agent 不由你的 Mac 负责")
-    return {"live": cursor_api.codex_progress(body.get("run_id"), body.get("text"), body.get("tools"), body.get("session"),
-                                              body.get("done") is True, body.get("error"), body.get("duration_ms"))}
+    return {"live": cursor_api.progress(body.get("run_id"), body.get("text"), body.get("tools"), body.get("session"),
+                                        body.get("done") is True, body.get("error"), body.get("duration_ms"), body.get("status"))}
 
 
 @route("POST", "/api/spaces")
@@ -1022,7 +1019,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode(), headers=headers)
 
     # account routes work in any library, also for a viewer; an agent token reaches only AGENT
-    AGENT = {"/api/agent/connect", "/api/cli", "/api/tcodex/claim", "/api/tcodex/update"}
+    AGENT = {"/api/agent/connect", "/api/cli", "/api/runner/claim", "/api/runner/update"}
     ACCOUNT = {"/api/join", "/api/libraries/switch", "/api/me/login-link", "/api/me/agent-token", *AGENT}
 
     def _who(self, method, path, body):
@@ -1040,7 +1037,7 @@ class Handler(BaseHTTPRequestHandler):
             return None, (403, "本机 agent 的口令只能用来运行 ./p2b")
         if path == "/api/cli":
             lib = accounts.agent_library(user, body.get("agent_id"), body.get("library"))
-        elif path == "/api/tcodex/update":
+        elif path == "/api/runner/update":
             lib = body.get("library") or user["library"]
         else:
             lib = cookies["p2b_lib"].value if "p2b_lib" in cookies else user["library"]
