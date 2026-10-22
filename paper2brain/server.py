@@ -167,6 +167,29 @@ def member_invite(q, body):
     return {"code": accounts.invite("join", _me()["library"], body.get("role") or "editor", by=_me()["user"]["id"])}
 
 
+def _admin(body):
+    accounts.check_admin(_me()["user"]["id"], body.get("admin_password"))
+    lib = body.get("library")
+    if lib not in accounts.all_libraries():
+        raise rules.Rejected("没有这个论文库")
+    return store.at_home(store.library_home(lib))
+
+
+@route("POST", "/api/admin/backups")
+def admin_backups(q, body):
+    """Super admin (second password): every library, and the snapshots of the chosen one."""
+    with _admin(body):
+        return {"libraries": accounts.restorable(), "backups": store.backups(), "research": store.snapshot_research(body["backup"]) if body.get("backup") else []}
+
+
+@route("POST", "/api/admin/restore")
+def admin_restore(q, body):
+    """Roll a whole library, or one research in it, back to a snapshot."""
+    with _admin(body):
+        store.restore(body.get("backup"), body.get("research_id") or None)
+    return {"ok": True}
+
+
 @route("POST", "/api/members/agent")
 def member_agent(q, body):
     _owner()
@@ -1059,7 +1082,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # account routes work in any library, also for a viewer; an agent token reaches only AGENT
     AGENT = {"/api/agent/connect", "/api/cli", "/api/runner/claim", "/api/runner/update"}
-    ACCOUNT = {"/api/join", "/api/login", "/api/libraries/switch", "/api/me/agent-token", "/api/me/password", *AGENT}
+    ACCOUNT = {"/api/join", "/api/login", "/api/libraries/switch", "/api/me/agent-token", "/api/admin/backups", "/api/admin/restore", "/api/me/password", *AGENT}
 
     def _who(self, method, path, body):
         """On the shared server: (who is asking and in which library, None) or (None, (code, error)).
@@ -1219,6 +1242,7 @@ def _poll_inbox():
             for lib in accounts.all_libraries():
                 with store.at_home(store.library_home(lib)):
                     _run((store.backup, cursor_api.expire_stale, structure.backfill, translate.backfill, *AGENT_JOBS))
+            _run((accounts.backup_hub,))
         else:
             _run((store.backup, cursor_api.expire_stale, structure.backfill, translate.backfill, sync.run, lambda: bg(handoff.auto_push),
                   *((inbox.drain, *AGENT_JOBS) if handoff.holder() else ())))

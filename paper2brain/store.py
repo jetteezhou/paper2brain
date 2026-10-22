@@ -5,6 +5,7 @@ import re
 import os
 import shutil
 import sqlite3
+import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
@@ -421,15 +422,15 @@ def _connect():
 
 
 _initialized = set()
-BACKUPS_KEPT = 7
+BACKUPS_KEPT = 7 * 24  # hourly copies: a week of points in time to roll back to
 
 
 def backup(name=None):
-    """A consistent copy of the database under backups/. Without a name: today's daily copy (once a day, the newest
-    BACKUPS_KEPT kept). Returns the new file, or None when today's copy already exists."""
+    """A consistent copy of the database under backups/. Without a name: this hour's copy (once an hour, the newest
+    BACKUPS_KEPT kept). Returns the new file, or None when this hour's copy already exists."""
     folder = home() / "backups"
     folder.mkdir(exist_ok=True)
-    path = folder / (name or f"p2b-{datetime.now():%Y%m%d}.sqlite")
+    path = folder / (name or f"p2b-{datetime.now():%Y%m%d-%H}.sqlite")
     if path.exists():
         return None
     tmp = path.with_suffix(".tmp")
@@ -444,6 +445,51 @@ def backup(name=None):
         for old in sorted(folder.glob("p2b-[0-9]*.sqlite"))[:-BACKUPS_KEPT]:
             old.unlink()
     return path
+
+
+def backups():
+    """Snapshots under backups/ to roll back to, newest first: (file name, size in bytes)."""
+    return [(p.name, p.stat().st_size) for p in sorted((home() / "backups").glob("*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)]
+
+
+def snapshot_research(name):
+    """The researches in a snapshot (also those deleted since): what a single-research rollback can bring back."""
+    snap = home() / "backups" / name
+    if Path(name).name != name or not snap.is_file():
+        raise rules.Rejected("没有这份备份")
+    db = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+    try:
+        return [{"id": i, "title": t} for i, t in db.execute("SELECT id, title FROM research ORDER BY updated_at DESC")]
+    finally:
+        db.close()
+
+
+def restore(name, rid=None):
+    """Roll this library (rid None) or just one research back to the snapshot name. The state before is saved first,
+    so a wrong pick can be undone. Files on disk are never deleted, so papers added after the snapshot stay as files."""
+    snap = home() / "backups" / name
+    if Path(name).name != name or not snap.is_file():
+        raise rules.Rejected("没有这份备份")
+    backup(f"p2b-before-restore-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
+    if rid is None:
+        old, new = sqlite3.connect(snap), _connect()
+        try:
+            old.backup(new)
+        finally:
+            old.close()
+            new.close()
+        _initialized.discard(str(home()))  # a snapshot of an older schema gets migrated on the next use
+        return
+    live = home()
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copy(snap, Path(d) / "p2b.sqlite")
+        with at_home(d):
+            if not get_research(rid):
+                raise rules.Rejected("这份备份里没有这个研究")
+            with at_home(live):
+                if get_research(rid):
+                    delete_research(rid)
+            copy_research(rid, live)
 
 
 def rehome(old):

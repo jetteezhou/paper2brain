@@ -485,7 +485,26 @@ function Account() {
     <input name="name" defaultValue=${acc.login || acc.user.name} maxlength="40" aria-label="登录名" autocomplete="username" />
     ${acc.login ? html`<input name="old" type="password" placeholder="当前密码" aria-label="当前密码" autocomplete="current-password" />` : null}
     <input name="password" type="password" placeholder="新密码（至少 8 位）" aria-label="新密码" autocomplete="new-password" />
-    <div style="text-align:right"><button class="btn sm primary">${acc.login ? '修改' : '设置密码'}</button></div></form>`;
+    <div style="text-align:right"><button class="btn sm primary">${acc.login ? '修改' : '设置密码'}</button></div></form>
+  ${acc.admin ? html`<${Rollback} />` : null}`;
+}
+
+// super admin: roll a library, or one research in it, back to an hourly snapshot (the state before is saved first)
+function Rollback() {
+  const [pw, setPw] = useState(''), [lib, setLib] = useState(''), [data, setData] = useState(null), [pick, setPick] = useState({});
+  const load = async (library, backup) => { try { setLib(library); setData(await post('/api/admin/backups', { admin_password: pw, library, backup })); setPick({ backup }); } catch (e) { fail(e); } };
+  const go = async () => {
+    if (!pick.backup) return fail('先选一个时间点');
+    if (!confirm(`把${pick.research_id ? '这个研究' : '整个论文库'}回滚到 ${pick.backup}？这之后的改动会丢失（回滚前的状态会先备份）。`)) return;
+    try { await post('/api/admin/restore', { admin_password: pw, library: lib, backup: pick.backup, research_id: pick.research_id }); toast('已回滚'); load(lib, pick.backup); } catch (e) { fail(e); }
+  };
+  return html`<div class="block-title" style="margin-top:14px">回滚数据（超级管理员）<span class="line"></span></div>
+  <p class="hint" style="margin-top:0"><input type="password" value=${pw} onInput=${(e) => setPw(e.target.value)} placeholder="二级密码" aria-label="二级密码" autocomplete="off" />
+    <button class="btn sm" onClick=${() => load('' + (appState.value.account.library))}>列出论文库</button></p>
+  ${data ? html`<select value=${lib} onChange=${(e) => load(e.target.value)} aria-label="论文库">${data.libraries.map((l) => html`<option value=${l.id}>${l.kind === 'space' ? '共享 · ' : '个人 · '}${l.name}（所有者：${l.owners}）</option>`)}</select>
+    <select value=${pick.backup || ''} onChange=${(e) => load(lib, e.target.value)} aria-label="时间点"><option value="">选一个时间点…</option>${data.backups.map(([n, size]) => html`<option value=${n}>${n}（${Math.round(size / 1024)} KB）</option>`)}</select>
+    <select value=${pick.research_id || ''} onChange=${(e) => setPick({ ...pick, research_id: e.target.value })} aria-label="范围"><option value="">整个论文库</option>${data.research.map((x) => html`<option value=${x.id}>只回滚研究：${x.title}</option>`)}</select>
+    <button class="btn sm danger" onClick=${go}>回滚</button>` : null}`;
 }
 
 function Setup() {

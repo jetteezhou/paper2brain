@@ -1884,15 +1884,30 @@ class Migrations(unittest.TestCase):
             self.assertEqual(len(before), 1)
             self.assertEqual(sqlite3.connect(before[0]).execute("SELECT text FROM thoughts").fetchone()[0], "旧想法")
 
-    def test_daily_backup_once_a_day_keeps_seven(self):
+    def test_hourly_backup_once_an_hour_keeps_a_week(self):
         with scratch_home() as home:
             store.counts()
             folder = home / "backups"
-            for d in range(1, 10):
-                store.backup(f"p2b-202601{d:02d}.sqlite")
+            for d in range(1, store.BACKUPS_KEPT + 3):
+                store.backup(f"p2b-2026{d:04d}-00.sqlite")
             self.assertIsNotNone(store.backup())
             self.assertIsNone(store.backup())
             self.assertEqual(len(list(folder.glob("p2b-[0-9]*.sqlite"))), store.BACKUPS_KEPT)
+
+    def test_rollback_a_library_or_one_research_to_a_snapshot(self):
+        with scratch_home():
+            keep, gone = store.add_research("留着", "user"), store.add_research("会被删", "user")
+            store.backup("t1.sqlite")
+            store.update_research(keep, title="改过了")
+            store.delete_research(gone)
+            store.restore("t1.sqlite", gone)  # one research comes back, the other keeps its newer edit
+            self.assertEqual((store.get_research(gone)["title"], store.get_research(keep)["title"]), ("会被删", "改过了"))
+            self.assertEqual([r["title"] for r in store.snapshot_research("t1.sqlite")].count("会被删"), 1)
+            store.restore("t1.sqlite")  # the whole library
+            self.assertEqual(store.get_research(keep)["title"], "留着")
+            self.assertTrue(any(n.startswith("p2b-before-restore-") for n, _ in store.backups()))
+            with self.assertRaises(rules.Rejected):
+                store.restore("../x.sqlite")
 
 
 if __name__ == "__main__":

@@ -230,6 +230,32 @@ def role(user_id, library):
     return r["role"] if r else None
 
 
+def backup_hub():
+    """Hourly copy of the accounts database (root/hub-backups, a week kept); a restore is copying one file back over hub.sqlite."""
+    folder = root() / "hub-backups"
+    folder.mkdir(exist_ok=True)
+    path = folder / f"hub-{datetime.now():%Y%m%d-%H}.sqlite"
+    if path.exists():
+        return
+    with _db() as c:
+        dst = sqlite3.connect(path.with_suffix(".tmp"))
+        try:
+            c.backup(dst)
+        finally:
+            dst.close()
+    path.with_suffix(".tmp").replace(path)
+    for old in sorted(folder.glob("hub-*.sqlite"))[:-store.BACKUPS_KEPT]:
+        old.unlink()
+
+
+def restorable():
+    """Every library with its owners, for the super admin to pick what to roll back."""
+    with _db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT l.id, l.name, l.kind, group_concat(u.name) AS owners FROM libraries l LEFT JOIN members m "
+            "ON m.library=l.id AND m.role='owner' LEFT JOIN users u ON u.id=m.user_id GROUP BY l.id ORDER BY l.kind, l.created_at")]
+
+
 def all_libraries():
     with _db() as c:
         return [r["id"] for r in c.execute("SELECT id FROM libraries")]
