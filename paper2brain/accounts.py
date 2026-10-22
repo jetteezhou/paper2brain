@@ -315,8 +315,8 @@ def _carry_overleaf(rid, dst):
 
 
 def create_space(user, name, research_id):
-    """Move a research from the library in use into a new space owned by user (from a personal library it leaves,
-    after a backup; its papers and discussions stay); the space's agents run on user's key and worker."""
+    """Copy a research from the library in use into a new space owned by user; the original stays in a personal library
+    (its papers keep showing as used, the list shows the space's copy instead). The space's agents run on user's key and worker."""
     name = (name or "").strip()[:60] or "共享空间"
     with _db() as c:
         lib = _new_library(c, name, "space", user["id"])
@@ -327,10 +327,7 @@ def create_space(user, name, research_id):
             c.execute("DELETE FROM libraries WHERE id=?", (lib,))
         raise
     write_config(lib, agent_library=user["library"])
-    if store.home() == store.library_home(user["library"]):
-        _backup("share", research_id)
-        _carry_overleaf(research_id, store.library_home(lib))
-        store.delete_research(research_id)
+    _carry_overleaf(research_id, store.library_home(lib))  # the checkout moves: two copies must not both write the project
     return lib
 
 

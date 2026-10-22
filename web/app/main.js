@@ -474,7 +474,7 @@ function Account() {
       : html`<p class="hint">只有超级管理员能生成邀请链接，需要加人时找 ta。</p>`}
       ${got.invite ? html`<p class="hint">一次有效，7 天内用：</p><${Copyable} text=${joinLink(got.invite.code)} />` : null}`
       : html`<p><button class="btn sm ghost danger" onClick=${leave}>离开这个空间</button></p>`}`
-  : html`<p class="hint" style="margin-top:0">把一个研究移到一个新的共享空间（它用到的论文、讨论、附件、代码仓库和图一起带过去；个人库里的论文和讨论都还在），再邀请别人一起改。个人库的研究列表里仍能看到它（标着“共享”），点开就进入空间；你作为所有者随时可以在研究页上把它移回个人库。</p>
+  : html`<p class="hint" style="margin-top:0">把一个研究共享到一个新的共享空间（它用到的论文、讨论、附件、代码仓库和图一起复制过去），再邀请别人一起改。个人库里留着原来的论文、讨论和这个研究的记录（看论文时仍显示它被哪些研究用到）；研究列表里显示的是空间里的那份（标着“共享”），点开就进入空间，以后在空间里改。你作为所有者随时可以在研究页上把它移回个人库。</p>
     <form class="research-create" onSubmit=${share}>
       <select name="research_id" aria-label="要共享的研究"><option value="">选一个研究…</option>${(researches || []).map((x) => html`<option value=${x.id}>${x.title}</option>`)}</select>
       <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />

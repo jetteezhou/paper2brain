@@ -553,6 +553,8 @@ def research_list(q, body):
             if lib["kind"] == "space":
                 with store.at_home(store.library_home(lib["id"])):
                     out += [{**x, "space": {"id": lib["id"], "name": lib["name"], "role": lib["role"]}} for x in store.list_research()]
+        shared = {x["id"] for x in out if x.get("space")}
+        out = [x for x in out if x.get("space") or x["id"] not in shared]  # the space's copy is the one to work on
     return out
 
 

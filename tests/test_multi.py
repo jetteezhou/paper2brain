@@ -144,10 +144,9 @@ class Multi(unittest.TestCase):
             with self.assertRaises(Exception):
                 store.thread_for(thread_id=private)
         with store.at_home(store.library_home(a["library"])):
-            self.assertIsNone(store.get_research(rid))  # moved: one copy to work on
-            self.assertTrue(store.get_paper("arxiv:2410.24164"))  # its materials stay
+            self.assertTrue(store.get_research(rid))  # the original stays, so its papers keep showing as used
+            self.assertTrue(store.get_paper("arxiv:2410.24164")["research"])
             self.assertTrue(store.thread_for(thread_id=tid))
-            self.assertTrue(list((store.home() / "backups").glob("p2b-before-share-*.sqlite")))
         self.assertIsNone(accounts.role(b["id"], space))
         accounts.redeem(accounts.invite("join", space, "viewer"), user=b)
         self.assertEqual(accounts.role(b["id"], space), "viewer")
