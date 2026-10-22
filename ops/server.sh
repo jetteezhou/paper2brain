@@ -48,7 +48,9 @@ command -v caddy >/dev/null || apt-get install -y -q caddy 2>/dev/null || caddy_
 as sh -c "cd '$REPO' && { [ -x .venv/bin/python ] || python3 -m venv .venv; } && .venv/bin/pip install -q -r requirements.txt"
 "$REPO/.venv/bin/python" -m playwright install-deps chromium >/dev/null
 as "$REPO/.venv/bin/python" -m playwright install chromium >/dev/null
-echo "✓ Python 依赖和 Chromium"
+# PDFMathTranslate in its own venv: its pinned dependencies clash with ours (tmt 3.1 dropped the class it imports)
+as sh -c "cd '$REPO' && { [ -x .venv-pdf2zh/bin/pdf2zh ] || python3 -m venv .venv-pdf2zh; } && .venv-pdf2zh/bin/pip install -q pdf2zh 'tencentcloud-sdk-python-tmt<3.1'"
+echo "✓ Python 依赖、Chromium 和 PDFMathTranslate"
 
 mkdir -p "$ROOT"
 chown "$RUNAS" "$ROOT"

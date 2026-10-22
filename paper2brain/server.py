@@ -17,7 +17,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import accounts, cli, cursor_api, export, handoff, inbox, overleaf, pipeline, repos, rules, store, structure, sync
+from . import accounts, cli, cursor_api, export, handoff, inbox, overleaf, pipeline, repos, rules, store, structure, sync, translate
 
 WEB = Path(__file__).resolve().parent.parent / "web"
 mimetypes.add_type("text/javascript", ".mjs")  # ES modules (PDF.js) must not be served as octet-stream
@@ -361,7 +361,7 @@ def paper_get(q, body, pid):
     p = _paper(pid)
     s = structure.get(pid)
     return {**p, "figures": s["figures"], "key_figures": structure.key_figures(s, p["card"]), "outline": s["outline"],
-            "key_sections": s["key"]}
+            "key_sections": s["key"], "zh": translate.status(p)}
 
 
 @route("POST", "/api/papers/([^/]+)/add")
@@ -431,6 +431,8 @@ def paper_pdf(q, body, pid):
     p = _paper(pid)
     if not p["pdf_path"]:
         raise rules.Rejected("还没有 PDF")
+    if q.get("lang") == "zh":
+        return Reply(translate.zh_path(p["id"]), "application/pdf", revalidate=True)
     return Reply(p["pdf_path"], "application/pdf", revalidate=True)
 
 
@@ -1202,9 +1204,9 @@ def _poll_inbox():
         if store.multi():  # every library in turn; iCloud (inbox, handoff, sync) is for one person's Macs
             for lib in accounts.all_libraries():
                 with store.at_home(store.library_home(lib)):
-                    _run((store.backup, cursor_api.expire_stale, structure.backfill, *AGENT_JOBS))
+                    _run((store.backup, cursor_api.expire_stale, structure.backfill, translate.backfill, *AGENT_JOBS))
         else:
-            _run((store.backup, cursor_api.expire_stale, structure.backfill, sync.run, lambda: bg(handoff.auto_push),
+            _run((store.backup, cursor_api.expire_stale, structure.backfill, translate.backfill, sync.run, lambda: bg(handoff.auto_push),
                   *((inbox.drain, *AGENT_JOBS) if handoff.holder() else ())))
         time.sleep(20)
 

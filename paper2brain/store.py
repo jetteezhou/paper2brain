@@ -1096,7 +1096,8 @@ def unnamed_papers(limit=8):
 
 def set_fulltext(pid, pdf_path, pages):
     (paper_dir(pid) / "pages.json").write_text(json.dumps(pages, ensure_ascii=False))
-    (paper_dir(pid) / "structure.json").unlink(missing_ok=True)  # figures and outline come from the PDF
+    for derived in ("structure.json", "paper-zh.pdf", "paper-zh.err"):  # figures, outline and translation come from the PDF
+        (paper_dir(pid) / derived).unlink(missing_ok=True)
     with tx() as c:
         c.execute("UPDATE papers SET pdf_path=?, page_count=? WHERE id=?", (str(pdf_path), len(pages), pid))
         c.execute("INSERT OR REPLACE INTO paper_text VALUES (?,?)", (pid, "\n".join(pages)))

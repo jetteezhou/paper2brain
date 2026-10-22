@@ -76,7 +76,21 @@ export function useAnchorMarks(ref, paper) {
 // ---------- the PDF ----------
 
 let pdfjs;
-const PDFV = { doc: null, pid: null, scale: 1, observer: null, host: null, paper: null, flash: null };
+const PDFV = { doc: null, pid: null, lang: 'en', scale: 1, observer: null, host: null, paper: null, flash: null };
+const pdfUrl = (pid, lang) => `/api/papers/${enc(pid)}/pdf${lang === 'zh' ? '?lang=zh' : ''}`;
+
+// ---------- EN / 中 switch: the PDFMathTranslate copy made when the paper came in; English until asked ----------
+
+const zhSig = signal(false);
+const pdfLang = (p) => (zhSig.value && p?.zh === 'done' ? 'zh' : 'en');
+const ZH_WHY = { pending: '中文版正在翻译，稍后再来', failed: '这篇的中文翻译失败了' };
+function LangSwitch({ p }) {
+  if (!p?.pdf_path) return null;
+  const lang = pdfLang(p);
+  return html`<div class="seg sm" title=${p.zh === 'done' ? '切换英文原文 / 中文译文' : ZH_WHY[p.zh] || '服务器没装 PDFMathTranslate'}>
+    <button class=${lang === 'en' ? 'on' : ''} onClick=${() => { zhSig.value = false; }}>EN</button>
+    <button class=${lang === 'zh' ? 'on' : ''} disabled=${p.zh !== 'done'} onClick=${() => { zhSig.value = true; }}>中</button></div>`;
+}
 async function pdfLib() {
   if (!pdfjs) {
     pdfjs = await import('/vendor/pdfjs/pdf.min.mjs');
@@ -86,10 +100,10 @@ async function pdfLib() {
 }
 const pageDiv = (n) => PDFV.host?.querySelector(`.pdf-page[data-page="${n}"]`);
 
-async function mountPdf(host, pid, page = 1) {
+async function mountPdf(host, pid, page = 1, lang = 'en') {
   const lib = await pdfLib();
-  const doc = PDFV.pid === pid && PDFV.doc ? PDFV.doc : await lib.getDocument(`/api/papers/${enc(pid)}/pdf`).promise;
-  Object.assign(PDFV, { doc, pid, host });
+  const doc = PDFV.pid === pid && PDFV.lang === lang && PDFV.doc ? PDFV.doc : await lib.getDocument(pdfUrl(pid, lang)).promise;
+  Object.assign(PDFV, { doc, pid, lang, host });
   const base = (await doc.getPage(1)).getViewport({ scale: 1 });
   PDFV.scale = Math.max(0.6, Math.min(2.4, (host.clientWidth - 36) / base.width));
   PDFV.observer?.disconnect();
@@ -98,7 +112,8 @@ async function mountPdf(host, pid, page = 1) {
   host.innerHTML = '';
   for (let n = 1; n <= doc.numPages; n++) {
     const div = document.createElement('div');
-    Object.assign(div.dataset, { page: n, anchorSurface: 'pdf', pid });
+    // pinned passages are checked against the English text, so the translation is read-only
+    Object.assign(div.dataset, lang === 'en' ? { page: n, anchorSurface: 'pdf', pid } : { page: n });
     div.className = 'pdf-page';
     div.style.width = `${base.width * PDFV.scale}px`;
     div.style.height = `${base.height * PDFV.scale}px`;
@@ -170,13 +185,13 @@ function markPage(n) {
 }
 const markAllPdf = () => PDFV.host?.querySelectorAll('.pdf-page[data-rendered]').forEach((d) => markPage(+d.dataset.page));
 
-function PdfView({ pid, page, wide }) {
+function PdfView({ pid, page, wide, lang }) {
   const host = useRef();
   const [error, setError] = useState(null);
   useEffect(() => {
     const top = PDFV.host === host.current ? [...host.current.querySelectorAll('.pdf-page')].find((d) => d.getBoundingClientRect().bottom > 80) : null;
-    mountPdf(host.current, pid, top ? +top.dataset.page : page || 1).catch((e) => setError(e.message));
-  }, [pid, wide]);
+    mountPdf(host.current, pid, top ? +top.dataset.page : page || 1, lang).catch((e) => setError(e.message));
+  }, [pid, wide, lang]);
   if (error) return html`<div class="pdf-missing">PDF 打不开：${error}</div>`;
   return html`<div class="pdfv" id="pdfv" ref=${host}><div class="pdf-loading"><span class="spin"></span>正在打开 PDF…</div></div>`;
 }
@@ -319,10 +334,11 @@ export function Reader() {
       ${p.pdf_path && p.outline?.length ? html`<select class="toc" title="跳到原文的某一节" onChange=${(e) => { const [pg, ...t] = e.target.value.split('|'); e.target.value = ''; if (pg) jumpPdf(+pg, t.join('|')); }}>
         <option value="">原文目录…</option>${p.outline.map((s) => html`<option value=${`${s.page}|${s.title}`}>${'　'.repeat(Math.min(s.level, 3) - 1)}${short(s.title, 48)}　p.${s.page}</option>`)}</select>` : null}
       ${p.url ? html`<a class="btn sm ghost" href=${href(p.url)} target="_blank" rel="noopener">${idLabel(p.id).split(' ')[0]} ↗</a>` : null}
+      <${LangSwitch} p=${p} />
       <button class="btn sm ghost" onClick=${() => { wideSig.value = !wideSig.value; localStorage.setItem('p2b.wide', wideSig.value ? '1' : '0'); }}>调整面板宽度</button>
     </div>
     <div class=${`reader-body ${wideSig.value ? 'wide' : ''}`}>
-      ${p.pdf_path ? html`<${PdfView} pid=${p.id} page=${+pageArg || view.page || 1} wide=${wideSig.value} />`
+      ${p.pdf_path ? html`<${PdfView} pid=${p.id} page=${+pageArg || view.page || 1} wide=${wideSig.value} lang=${pdfLang(p)} />`
         : html`<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br /><${PdfButton} paper=${p.id} /></div></div>`}
       <div class="panel"><${DockGrip} /><div class="tabs" id="tabs">${tabs.map(([k, label, n]) => html`<button class=${`tab ${tab === k || (k === 'anchors' && tab === 'anchor') ? 'on' : ''}`} onClick=${() => setTab(k)}>${label}${n ? html`<span class="n">${n}</span>` : null}</button>`)}</div>
         <div class=${`panel-body ${chatty ? 'chatwrap' : ''}`} id="panel">${body}</div></div>
@@ -345,13 +361,13 @@ registerAction('cite', (el) => {
 
 /** Its own PDF.js document and pages, so it never disturbs the reader's; the quoted line flashes once its page draws.
  * Pages follow the window's width: stretched at once while resizing, redrawn sharp once it settles. */
-function PeekPdf({ pid, page, q }) {
+function PeekPdf({ pid, page, q, lang }) {
   const host = useRef();
   const [error, setError] = useState(null);
   useEffect(() => {
     let doc, io, ro, timer, dead = false, flashed = !q;
     (async () => {
-      doc = await (await pdfLib()).getDocument(`/api/papers/${enc(pid)}/pdf`).promise;
+      doc = await (await pdfLib()).getDocument(pdfUrl(pid, lang)).promise;
       const base = (await doc.getPage(1)).getViewport({ scale: 1 }), el = host.current;
       const fitScale = () => Math.max(0.5, (el.clientWidth - 24) / base.width);
       let scale = fitScale();
@@ -396,7 +412,7 @@ function PeekPdf({ pid, page, q }) {
       ro.observe(el);
     })().catch((e) => !dead && setError(e.message));
     return () => { dead = true; clearTimeout(timer); ro?.disconnect(); io?.disconnect(); doc?.destroy(); };
-  }, [pid, page, q]);
+  }, [pid, page, q, lang]);
   if (error) return html`<div class="pdf-missing">PDF 打不开：${error}</div>`;
   return html`<div class="peek-pdf" ref=${host}><div class="pdf-loading"><span class="spin"></span>正在打开 PDF…</div></div>`;
 }
@@ -426,11 +442,11 @@ export function Peek() {
   return html`<div class="peek" role="dialog" aria-label="速览论文" style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : null}>
     <div class="peek-top" onPointerDown=${down} onPointerMove=${move} onPointerUp=${() => setDrag(null)}>
       <b title=${p?.title}>${p ? short(p.title, 60) : '…'}</b>${pk.page ? html`<span class="hint">p.${pk.page}</span>` : null}<span class="grow"></span>
-      <button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => { peek.value = null; }}>×</button></div>
+      <${LangSwitch} p=${p} /><button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => { peek.value = null; }}>×</button></div>
     ${pk.q ? html`<div class="peek-q hint" title=${pk.q}>找这句：${short(pk.q, 90)}</div>` : null}
     ${mine?.error && !p ? html`<div class="pdf-missing"><div style="text-align:center">收不下这篇论文：${mine.error}<br />${pk.pid.startsWith('arxiv:') ? html`<a class="btn sm ghost" href=${`https://arxiv.org/abs/${pk.pid.slice(6)}`} target="_blank" rel="noopener">在 arXiv 打开</a>` : null}</div></div>`
       : !p ? html`<div class="pdf-loading"><span class="spin"></span>${mine ? '这篇不在论文库里，正在收下（拉取元数据和 PDF）…' : ''}</div>`
-      : p.pdf_path ? html`<${PeekPdf} pid=${pk.pid} page=${pk.page} q=${pk.q} />`
+      : p.pdf_path ? html`<${PeekPdf} pid=${pk.pid} page=${pk.page} q=${pk.q} lang=${pdfLang(p)} />`
       : html`<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br /><${PdfButton} paper=${p.id} /></div></div>`}</div>`;
 }
 

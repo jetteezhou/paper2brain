@@ -750,6 +750,41 @@ class Store(unittest.TestCase):
             cursor_api.card_pending()
             self.assertEqual(started, [pid])
 
+    def test_translation_runs_once_per_pdf_in_the_background(self):
+        import time
+        from unittest import mock
+
+        from paper2brain import translate
+
+        pid = "arxiv:2601.00777"
+        store.upsert_paper(pid, "Translate Me")
+        store.link(self.cid, pid, "user")
+        pdf = store.paper_dir(pid) / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 en")
+        store.set_fulltext(pid, pdf, PAGES)
+        fake = Path(tempfile.mkdtemp()) / "pdf2zh"  # copies the PDF to <stem>-mono.pdf in the -o folder, as pdf2zh does
+        fake.write_text('#!/bin/sh\nsrc="$1"; while [ "$1" != -o ]; do shift; done; cp "$src" "$2/$(basename "$src" .pdf)-mono.pdf"\n')
+        fake.chmod(0o755)
+        paper = lambda: store.get_paper(pid, with_anchors=False)  # noqa: E731
+        with mock.patch.object(translate, "BIN", fake):
+            self.assertEqual(translate.status(paper()), "pending")
+            for _ in range(200):  # other tests' papers with a PDF may come first, one at a time
+                if translate.status(paper()) != "pending":
+                    break
+                translate.backfill()
+                time.sleep(0.05)
+            self.assertEqual(translate.status(paper()), "done")
+            self.assertEqual(translate.zh_path(pid).read_bytes(), b"%PDF-1.4 en")
+            store.set_fulltext(pid, pdf, PAGES)  # a new PDF: the old translation is gone
+            self.assertEqual(translate.status(paper()), "pending")
+            fake.write_text("#!/bin/sh\necho boom >&2; exit 1\n")
+            while translate._busy.locked():
+                time.sleep(0.05)
+            translate.translate(pid)
+            self.assertEqual(translate.status(paper()), "failed")
+        with mock.patch.object(translate, "BIN", fake.with_name("missing")):
+            self.assertIsNone(translate.status(paper()))  # pdf2zh not installed
+
     def test_figures_are_cropped_from_captions_and_picked_by_number(self):
         import pymupdf
 
