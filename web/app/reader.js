@@ -78,6 +78,8 @@ export function useAnchorMarks(ref, paper) {
 let pdfjs;
 const PDFV = { doc: null, pid: null, lang: 'en', scale: 1, observer: null, host: null, paper: null, flash: null };
 const pdfUrl = (pid, lang) => `/api/papers/${enc(pid)}/pdf${lang === 'zh' ? '?lang=zh' : ''}`;
+// only the byte ranges the pages on screen need: over a slow line a whole-file download would hold up the first page
+const openPdf = async (pid, lang) => (await pdfLib()).getDocument({ url: pdfUrl(pid, lang), disableStream: true, disableAutoFetch: true }).promise;
 
 // ---------- EN / 中 switch: the PDFMathTranslate copy made when the paper came in; English until asked ----------
 
@@ -101,8 +103,7 @@ async function pdfLib() {
 const pageDiv = (n) => PDFV.host?.querySelector(`.pdf-page[data-page="${n}"]`);
 
 async function mountPdf(host, pid, page = 1, lang = 'en') {
-  const lib = await pdfLib();
-  const doc = PDFV.pid === pid && PDFV.lang === lang && PDFV.doc ? PDFV.doc : await lib.getDocument(pdfUrl(pid, lang)).promise;
+  const doc = PDFV.pid === pid && PDFV.lang === lang && PDFV.doc ? PDFV.doc : await openPdf(pid, lang);
   Object.assign(PDFV, { doc, pid, lang, host });
   const base = (await doc.getPage(1)).getViewport({ scale: 1 });
   PDFV.scale = Math.max(0.6, Math.min(2.4, (host.clientWidth - 36) / base.width));
@@ -367,7 +368,7 @@ function PeekPdf({ pid, page, q, lang }) {
   useEffect(() => {
     let doc, io, ro, timer, dead = false, flashed = !q;
     (async () => {
-      doc = await (await pdfLib()).getDocument(pdfUrl(pid, lang)).promise;
+      doc = await openPdf(pid, lang);
       const base = (await doc.getPage(1)).getViewport({ scale: 1 }), el = host.current;
       const fitScale = () => Math.max(0.5, (el.clientWidth - 24) / base.width);
       let scale = fitScale();
