@@ -258,6 +258,17 @@ class Multi(unittest.TestCase):
             self.assertIn("arxiv:2501.00001", [l["ref"] for l in store.get_research(rid)["links"]])  # the paper came along
         with store.at_home(store.library_home(a["library"])):
             self.assertNotIn("arxiv:2501.00001", [l["ref"] for l in store.get_research(rid)["links"]])
+        self.assertIn("空间里改过的", [x["title"] for x in cli("research", "list")[1]["out"]])
+        with store.at_home(store.library_home(a["library"])):
+            talk = store.new_thread("paper:arxiv:2501.00001", text="这篇对 Apexio 有什么启发")
+        self.assertEqual(cli("research", "link", rid, "thread", talk)[0], 200)
+        b, _ = self.user("乙")
+        accounts.redeem(accounts.invite("join", space, "editor"), user=b)
+        with store.at_home(store.library_home(space)), store.viewing(a):
+            self.assertEqual(store.thread_for(thread_id=talk)["messages"][0]["text"], "这篇对 Apexio 有什么启发")
+        with store.at_home(store.library_home(space)), store.viewing(b):
+            with self.assertRaises(Exception):
+                store.thread_for(thread_id=talk)  # linked, yet still 甲's own
         code, got, _ = self.call(f"/api/research/{rid}", {"title": "改指针"}, cookie=f"p2b_session={ta}")
         self.assertEqual(code, 400)
         self.assertIn("组会", got["error"])

@@ -622,6 +622,28 @@ def copy_paper(pid, dst):
         shutil.copytree(src / folder, Path(dst) / folder, symlinks=True)
 
 
+def copy_thread(tid, dst, uid):
+    """A discussion with its messages and finished runs from here into the library at dst, as uid's private one there;
+    returns its scope, or None when there is no such discussion."""
+    src = home()
+    with tx() as c:
+        t = c.execute("SELECT scope FROM threads WHERE id=?", (tid,)).fetchone()
+    if not t:
+        return None
+    with at_home(dst), tx() as c:
+        c.execute("PRAGMA foreign_keys=OFF")
+        c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
+        for table, cond in (("threads", "id=:t"), ("messages", "thread_id=:t"),
+                            ("runs", f"id IN (SELECT run_id FROM s.messages WHERE thread_id=:t) AND status NOT IN {_UNFINISHED_SQL}")):
+            cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({table})"))
+            c.execute(f"INSERT OR IGNORE INTO main.{table} ({cols}) SELECT {cols} FROM s.{table} WHERE {cond}", {"t": tid})
+        c.execute("UPDATE main.threads SET user_id=:u, agent_id=NULL, parent_id=NULL, fork_message_id=NULL WHERE id=:t", {"u": uid, "t": tid})
+        c.execute("UPDATE main.runs SET user_id=:u WHERE id IN (SELECT run_id FROM main.messages WHERE thread_id=:t)", {"u": uid, "t": tid})
+        c.commit()
+        c.execute("DETACH DATABASE s")
+    return t["scope"]
+
+
 def own_unowned(uid):
     """A new space's discussions and runs, all copied from uid's library, are uid's own there."""
     with tx() as c:

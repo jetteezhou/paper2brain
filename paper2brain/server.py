@@ -135,14 +135,37 @@ def cli_remote(q, body):
     space = _pointer_space(me, argv) if store.multi() else None
     if not space:
         out, files = cli.run_remote(argv, body.get("files") or {})
+        if store.multi() and (shared := _shared(me)):  # pointers show what their space has now
+            if argv[:2] == ["research", "list"]:
+                out = [shared.get(x["id"], x) for x in out]
+            elif argv[:1] == ["show"] and isinstance(out, dict) and isinstance(out.get("research"), list):
+                out["research"] = [{**x, **{k: shared[x["id"]][k] for k in ("title", "stage")}, "space": shared[x["id"]]["space"]}
+                                   if x["id"] in shared else x for x in out["research"]]
         return {"out": out, "files": files}
     if space["role"] == "viewer" and not {"show", "list"} & set(argv[:2]):
         raise rules.Rejected(f"这个研究在共享空间「{space['name']}」里，你在那里只能查看")
-    if argv[:2] == ["research", "link"] and len(argv) > 4 and argv[3] == "paper":  # a paper of mine joins the shared research
-        store.copy_paper(cli.to_pid(argv[4]), store.library_home(space["id"]))
+    _bring_along(me, argv, store.library_home(space["id"]))
     with store.at_home(store.library_home(space["id"])), store.viewing(me["user"]):
         out, files = cli.run_remote(argv, body.get("files") or {})
     return {"out": out, "files": files}
+
+
+def _bring_along(me, argv, dst):
+    """Linking something of the personal library to a shared research copies it into the space first: a paper for
+    everyone, a discussion (or the one a message is in) as the user's private one there, with the paper it is about."""
+    if argv[:2] != ["research", "link"] or len(argv) < 5:
+        return
+    kind, ref = argv[3], argv[4]
+    if kind == "paper":
+        store.copy_paper(cli.to_pid(ref), dst)
+    elif kind in ("thread", "message"):
+        try:
+            tid = ref if kind == "thread" else store.message(ref)["thread_id"]
+        except rules.Rejected:
+            return
+        scope = tid and store.copy_thread(tid, dst, me["user"]["id"])
+        if scope and scope.startswith("paper:"):
+            store.copy_paper(scope[len("paper:"):], dst)
 
 
 def _pointer_space(me, argv):
