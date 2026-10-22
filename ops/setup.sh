@@ -13,9 +13,9 @@ command -v python3 >/dev/null || { echo "缺 python3：brew install python@3.12"
 .venv/bin/pip install -q -r requirements.txt
 .venv/bin/python -m playwright install chromium >/dev/null
 # PDFMathTranslate (Chinese copies of the PDFs) in its own venv: its pinned dependencies clash with ours
-# (tmt 3.1 dropped the class it imports)
+# (tmt 3.1 and bitstring 5 dropped classes it imports)
 [ -x .venv-pdf2zh/bin/python ] || python3 -m venv .venv-pdf2zh
-.venv-pdf2zh/bin/pip install -q pdf2zh 'tencentcloud-sdk-python-tmt<3.1'
+.venv-pdf2zh/bin/pip install -q pdf2zh 'tencentcloud-sdk-python-tmt<3.1' 'bitstring<5'
 echo "✓ Python 依赖已装好（.venv），含画方法图用的 Chromium 和 PDF 翻译（.venv-pdf2zh）"
 
 DATA="${P2B_HOME:-$HOME/paper2brain-data}"
