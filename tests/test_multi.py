@@ -30,7 +30,7 @@ class Multi(unittest.TestCase):
         self.env.stop()
 
     def user(self, name):
-        user, token, lib = accounts.redeem(accounts.invite(), name)
+        user, token, lib = accounts.redeem(accounts.invite(), name, password="password1")
         return user, token
 
     def serve(self):
@@ -78,11 +78,33 @@ class Multi(unittest.TestCase):
 
     def test_invites_are_single_use_and_tokens_hashed(self):
         code = accounts.invite()
-        user, token, _ = accounts.redeem(code, "甲")
+        user, token, _ = accounts.redeem(code, "甲", password="password1")
         self.assertEqual(accounts.auth(token)[0]["id"], user["id"])
         with self.assertRaises(rules.Rejected):
-            accounts.redeem(code, "乙")
+            accounts.redeem(code, "乙", password="password1")
         self.assertNotIn(token.encode(), (accounts.root() / "hub.sqlite").read_bytes())
+
+    def test_name_and_password_sign_in(self):
+        self.url = self.serve()
+        self.addCleanup(accounts._FAILS.clear)
+        a, _ = self.user("Jia")
+        for name, password in (("jia", "password2"), ("乙", "short")):  # names are unique ignoring case; 8+ characters
+            with self.assertRaises(rules.Rejected):
+                accounts.redeem(accounts.invite(), name, password=password)
+        self.assertNotIn(b"password1", (accounts.root() / "hub.sqlite").read_bytes())
+        code, _, headers = self.call("/api/login", {"name": "jia", "password": "password1"})
+        cookie = headers["Set-Cookie"].split(";")[0]
+        self.assertEqual(code, 200)
+        self.assertEqual(self.call("/api/state", cookie=cookie)[1]["account"]["login"], "Jia")
+        self.assertEqual(self.call("/api/me/password", {"name": "Jia", "password": "password3", "old": "wrong"}, cookie=cookie)[0], 400)
+        self.assertEqual(self.call("/api/me/password", {"name": "Jia", "password": "password3", "old": "password1"}, cookie=cookie)[0], 200)
+        self.assertEqual(self.call("/api/login", {"name": "Jia", "password": "password1"})[0], 400)
+        self.assertEqual(self.call("/api/login", {"name": "Jia", "password": "password3"})[0], 200)
+        for _ in range(accounts.LOCK_AFTER):
+            self.call("/api/login", {"name": "Jia", "password": "guess"})
+        code, got, _ = self.call("/api/login", {"name": "Jia", "password": "password3"})
+        self.assertEqual(code, 400)
+        self.assertIn("分钟后再试", got["error"])
 
     def test_space_copies_the_research_and_roles_hold(self):
         a, ta = self.user("甲")

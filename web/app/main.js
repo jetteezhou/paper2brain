@@ -432,6 +432,12 @@ function Account() {
   };
   const setRole = (m, role) => call('role', `/api/members/${m.id}`, { role }, () => { toast(role ? '已修改' : '已移出'); refresh(); });
   const leave = () => confirm('离开这个空间？之后要别人重新邀请才能回来。') && call('leave', `/api/members/${acc.user.id}`, { role: null }, reload);
+  const savePassword = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target), form = e.target;
+    call('password', '/api/me/password', { name: f.get('name'), password: f.get('password'), old: f.get('old') },
+      () => { form.reset(); toast('已保存：之后在任何设备用登录名和密码登录'); refresh(); });
+  };
   return html`<div class="block-title" style="margin-top:0">本机 agent<span class="line"></span></div>
   <p class="hint" style="margin-top:0">${acc.user.name}，你的 agent 在你自己的 Mac 上运行：由 Mac 用你的 Cursor key 调用 Cursor（key 不上传服务器），只能通过这个网页按你的权限读写。
     ${a.backends?.cursor ? html`<b>✓ 本机在线，worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '本机 agent 不在线：在你的 Mac 上运行下面的命令（装过的话看 Mac 是否开着）。'}
@@ -456,6 +462,13 @@ function Account() {
       <select name="research_id" aria-label="要共享的研究"><option value="">选一个研究…</option>${(researches || []).map((x) => html`<option value=${x.id}>${x.title}</option>`)}</select>
       <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />
       <div style="text-align:right"><button class="btn sm primary">共享到新空间</button></div></form>`}
+  <div class="block-title" style="margin-top:14px">登录名和密码<span class="line"></span></div>
+  <p class="hint" style="margin-top:0">${acc.login ? `登录名：${acc.login}。在任何设备打开 ${location.origin} ，输入登录名和密码即可。` : '还没设密码：设好后在任何设备打开这个网址就能登录，不用再传登录链接。'}</p>
+  <form class="research-create" onSubmit=${savePassword}>
+    <input name="name" defaultValue=${acc.login || acc.user.name} maxlength="40" aria-label="登录名" autocomplete="username" />
+    ${acc.login ? html`<input name="old" type="password" placeholder="当前密码" aria-label="当前密码" autocomplete="current-password" />` : null}
+    <input name="password" type="password" placeholder="新密码（至少 8 位）" aria-label="新密码" autocomplete="new-password" />
+    <div style="text-align:right"><button class="btn sm primary">${acc.login ? '修改' : '设置密码'}</button></div></form>
   <div class="block-title" style="margin-top:14px">在其他设备登录<span class="line"></span></div>
   ${got.login ? html`<p class="hint" style="margin-top:0">在那台设备的浏览器里打开（一次有效）：</p><${Copyable} text=${joinLink(got.login.code)} />`
     : html`<button class="btn sm" onClick=${() => call('login', '/api/me/login-link', {})}>生成登录链接</button>`}`;

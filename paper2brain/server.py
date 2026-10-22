@@ -59,7 +59,8 @@ def _account():
     space = me["library"] != me["user"]["library"]
     return {"user": {"id": me["user"]["id"], "name": me["user"]["name"]}, "library": me["library"], "role": me["role"],
             "libraries": accounts.libraries(me["user"]["id"]), "members": accounts.members(me["library"]) if space else [],
-            "agent_member": accounts.agent_member(me["library"]) if space else me["user"]["id"]}
+            "agent_member": accounts.agent_member(me["library"]) if space else me["user"]["id"],
+            "login": accounts.login_name(me["user"]["id"])}
 
 
 def _owner():
@@ -69,8 +70,19 @@ def _owner():
 
 @route("POST", "/api/join")
 def join(q, body):
-    user, token, lib = accounts.redeem(body.get("code"), body.get("name"), _me().get("user"))
+    user, token, lib = accounts.redeem(body.get("code"), body.get("name"), _me().get("user"), body.get("password"))
     return {"ok": True, "name": user["name"], "_cookies": {**({"p2b_session": token} if token else {}), "p2b_lib": lib}}
+
+
+@route("POST", "/api/login")
+def sign_in(q, body):
+    return {"ok": True, "_cookies": {"p2b_session": accounts.login(body.get("name"), body.get("password"))}}
+
+
+@route("POST", "/api/me/password")
+def set_password(q, body):
+    accounts.set_password(_me()["user"]["id"], body.get("name"), body.get("password"), body.get("old"))
+    return {"ok": True}
 
 
 @route("POST", "/api/libraries/switch")
@@ -1019,7 +1031,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # account routes work in any library, also for a viewer; an agent token reaches only AGENT
     AGENT = {"/api/agent/connect", "/api/cli", "/api/runner/claim", "/api/runner/update"}
-    ACCOUNT = {"/api/join", "/api/libraries/switch", "/api/me/login-link", "/api/me/agent-token", *AGENT}
+    ACCOUNT = {"/api/join", "/api/login", "/api/libraries/switch", "/api/me/login-link", "/api/me/agent-token", "/api/me/password", *AGENT}
 
     def _who(self, method, path, body):
         """On the shared server: (who is asking and in which library, None) or (None, (code, error)).
@@ -1030,7 +1042,7 @@ class Handler(BaseHTTPRequestHandler):
         token = bearer if kind == "Bearer" else (cookies["p2b_session"].value if "p2b_session" in cookies else None)
         got = accounts.auth(token)
         if not got:
-            return None, None if path == "/api/join" else (401, "请先用邀请链接或登录链接打开")
+            return None, None if path in ("/api/join", "/api/login") else (401, "请先登录")
         user, kind = got
         if kind == "agent" and path not in self.AGENT:
             return None, (403, "本机 agent 的口令只能用来运行 ./p2b")

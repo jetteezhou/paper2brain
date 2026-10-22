@@ -3,6 +3,7 @@ use which. Each library is its own data directory (store.library_home): everyone
 shared with others is copied into a space. Tokens and invite codes are stored only as their SHA-256."""
 import contextvars
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -29,7 +30,12 @@ CREATE TABLE IF NOT EXISTS members (library TEXT NOT NULL REFERENCES libraries(i
   user_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL, PRIMARY KEY (library, user_id));
 CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, kind TEXT NOT NULL, library TEXT, role TEXT, user_id TEXT,
   by TEXT, expires_at TEXT NOT NULL, used_at TEXT);
+CREATE TABLE IF NOT EXISTS logins (name TEXT PRIMARY KEY COLLATE NOCASE, user_id TEXT NOT NULL UNIQUE REFERENCES users(id),
+  salt TEXT NOT NULL, hash TEXT NOT NULL);
 """
+LOCK_AFTER, LOCK_MINUTES = 5, 15
+# ponytail: wrong-password counts live in memory, so a restart clears them; move them into hub.sqlite if that matters
+_FAILS = {}
 
 
 def root():
@@ -107,8 +113,9 @@ def invite(kind="join", library=None, role=None, user_id=None, by=None):
     return code
 
 
-def redeem(code, name=None, user=None):
-    """Use an invite. Returns (user, web token or None when the visitor was already signed in, library to open)."""
+def redeem(code, name=None, user=None, password=None):
+    """Use an invite. Returns (user, web token or None when the visitor was already signed in, library to open).
+    A new account signs in with its name and password from then on."""
     with _db() as c:
         inv = c.execute("SELECT * FROM invites WHERE hash=?", (_hash(code or ""),)).fetchone()
         if not inv or inv["used_at"] or inv["expires_at"] < _now():
@@ -125,12 +132,65 @@ def redeem(code, name=None, user=None):
                 raise rules.Rejected("写一个 40 字以内的名字，别人在共享空间里看到的就是它")
             uid = uuid.uuid4().hex
             c.execute("INSERT INTO users VALUES (?,?,?,?)", (uid, name, "", _now()))
+            _set_login(c, uid, name, password)
             lib = _new_library(c, f"{name} 的论文库", "personal", uid)
             c.execute("UPDATE users SET library=? WHERE id=?", (lib, uid))
             user, fresh = dict(id=uid, name=name, library=lib), True
         if inv["kind"] == "join" and inv["library"] and c.execute("SELECT 1 FROM libraries WHERE id=?", (inv["library"],)).fetchone():
             c.execute("INSERT OR IGNORE INTO members VALUES (?,?,?)", (inv["library"], user["id"], inv["role"]))
     return user, issue(user["id"], "web") if fresh else None, (inv["library"] if inv["kind"] == "join" else None) or user["library"]
+
+
+# ---------- login names and passwords ----------
+
+def _scrypt(password, salt):
+    return hashlib.scrypt((password or "").encode(), salt=bytes.fromhex(salt), n=2 ** 14, r=8, p=1).hex()
+
+
+def _set_login(c, user_id, name, password):
+    name = (name or "").strip()
+    if not name or len(name) > 40:
+        raise rules.Rejected("登录名要 1 到 40 个字")
+    if len(password or "") < 8:
+        raise rules.Rejected("密码至少 8 位")
+    taken = c.execute("SELECT user_id FROM logins WHERE name=?", (name,)).fetchone()
+    if taken and taken["user_id"] != user_id:
+        raise rules.Rejected("这个名字已经有人用了，换一个")
+    salt = secrets.token_hex(16)
+    c.execute("DELETE FROM logins WHERE user_id=?", (user_id,))
+    c.execute("INSERT INTO logins VALUES (?,?,?,?)", (name, user_id, salt, _scrypt(password, salt)))
+
+
+def login_name(user_id):
+    with _db() as c:
+        r = c.execute("SELECT name FROM logins WHERE user_id=?", (user_id,)).fetchone()
+    return r["name"] if r else None
+
+
+def set_password(user_id, name, password, old=None):
+    """Sets this account's login name and password; changing them needs the current password."""
+    with _db() as c:
+        r = c.execute("SELECT * FROM logins WHERE user_id=?", (user_id,)).fetchone()
+        if r and not hmac.compare_digest(_scrypt(old, r["salt"]), r["hash"]):
+            raise rules.Rejected("当前密码不对")
+        _set_login(c, user_id, name, password)
+
+
+def login(name, password):
+    """A new web token for the right name and password. LOCK_AFTER wrong tries lock that name for LOCK_MINUTES."""
+    key = (name or "").strip().lower()
+    fails, until = _FAILS.get(key, (0, None))
+    if until and until > _now():
+        raise rules.Rejected(f"密码错误次数太多，{LOCK_MINUTES} 分钟后再试")
+    with _db() as c:
+        r = c.execute("SELECT * FROM logins WHERE name=?", ((name or "").strip(),)).fetchone()
+    if not (r and hmac.compare_digest(_scrypt(password, r["salt"]), r["hash"])):
+        if not r:
+            _scrypt(password, "00" * 16)  # an unknown name takes as long as a wrong password
+        _FAILS[key] = (0, _now(minutes=LOCK_MINUTES)) if fails + 1 >= LOCK_AFTER else (fails + 1, None)
+        raise rules.Rejected("登录名或密码不对")
+    _FAILS.pop(key, None)
+    return issue(r["user_id"], "web")
 
 
 # ---------- libraries and members ----------
