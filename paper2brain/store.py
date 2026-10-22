@@ -402,23 +402,19 @@ def viewer():
     return _viewer.get()
 
 
+def _owner():
+    return (_viewer.get() or {}).get("id")
+
+
 def _private(conn, uid):
-    """Temp views named like the private tables shadow them for every unqualified query on this connection, so no
-    query can show another member's discussion or run; writes pass through to the real table (main.*)."""
+    """Temp views named like the private tables shadow them for every unqualified read on this connection, so no query
+    can show another member's discussion, run or deleted item. Writes name the real tables (main.*): SQLite before
+    3.38 allows no qualified names in triggers, so the views have none, and inserts stamp user_id themselves."""
     if not re.fullmatch(r"[0-9a-f]{32}", uid):
         raise ValueError(f"bad user id: {uid!r}")
     mine = f"(user_id IS NULL OR user_id='{uid}')"
     for t, where in (("threads", mine), ("runs", mine), ("trash", mine), ("messages", f"thread_id IN (SELECT id FROM main.threads WHERE {mine})")):
-        cols = conn.execute(f"PRAGMA main.table_info({t})").fetchall()
-        names = [c["name"] for c in cols]
-        new = [f"coalesce(NEW.user_id, '{uid}')" if c["name"] == "user_id" else
-               f"coalesce(NEW.{c['name']}, {c['dflt_value']})" if c["dflt_value"] is not None else f"NEW.{c['name']}" for c in cols]
         conn.execute(f"CREATE TEMP VIEW {t} AS SELECT rowid AS rowid, * FROM main.{t} WHERE {where}")
-        conn.execute(f"CREATE TEMP TRIGGER {t}_i INSTEAD OF INSERT ON {t} BEGIN "
-                     f"INSERT INTO main.{t} ({', '.join(names)}) VALUES ({', '.join(new)}); END")
-        conn.execute(f"CREATE TEMP TRIGGER {t}_u INSTEAD OF UPDATE ON {t} BEGIN "
-                     f"UPDATE main.{t} SET {', '.join(f'{n}=NEW.{n}' for n in names)} WHERE id=OLD.id; END")
-        conn.execute(f"CREATE TEMP TRIGGER {t}_d INSTEAD OF DELETE ON {t} BEGIN DELETE FROM main.{t} WHERE id=OLD.id; END")
 
 
 def spawn(fn, *args):
@@ -593,9 +589,9 @@ def copy_research(rid, dst):
             cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({t})"))
             c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE ({cond}){mine.get(t, '')}", {"r": rid, "u": u})
         r = {"r": rid}
-        c.execute(f"UPDATE threads SET agent_id=NULL WHERE {where['threads']}", r)  # the other library starts its own agents
-        c.execute("UPDATE threads SET parent_id=NULL WHERE parent_id NOT IN (SELECT id FROM threads)")
-        c.execute("UPDATE threads SET fork_message_id=NULL WHERE fork_message_id NOT IN (SELECT id FROM messages)")
+        c.execute(f"UPDATE main.threads SET agent_id=NULL WHERE {where['threads']}", r)  # the other library starts its own agents
+        c.execute("UPDATE main.threads SET parent_id=NULL WHERE parent_id NOT IN (SELECT id FROM threads)")
+        c.execute("UPDATE main.threads SET fork_message_id=NULL WHERE fork_message_id NOT IN (SELECT id FROM messages)")
         c.execute("UPDATE notes SET paper_id=NULL WHERE paper_id NOT IN (SELECT id FROM papers)")
         c.execute("UPDATE notes SET thread_id=NULL WHERE thread_id NOT IN (SELECT id FROM threads)")
         old, new = str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/"
@@ -803,7 +799,7 @@ def delete_capture(capture_id):
                 c.execute(f"DELETE FROM research_links WHERE kind=? AND ref IN ({_qs(ids)})", (kind, *ids))
         pids = [p["id"] for p in plan["papers"]]
         refs = [capture_id, *threads, *pids]
-        c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(refs)})", refs)
+        c.execute(f"DELETE FROM main.runs WHERE ref IN ({_qs(refs)})", refs)
         _drop_threads(c, threads)
         for table, col, ids in (("notes", "id", gone["note"]), ("anchors", "paper_id", pids), ("paper_topics", "paper_id", pids),
                                 ("capture_papers", "paper_id", pids), ("paper_text", "paper_id", pids)):
@@ -843,8 +839,8 @@ def _drop_threads_to_trash(c, snap, ids):
 
 def _to_trash(c, kind, ref, title, detail, snap):
     tid = new_id()
-    c.execute("INSERT INTO trash (id, deleted_at, kind, ref, title, detail, rows) VALUES (?,?,?,?,?,?,?)",
-              (tid, now(), kind, ref, title, detail, json.dumps(snap, ensure_ascii=False)))
+    c.execute("INSERT INTO main.trash (id, deleted_at, kind, ref, title, detail, rows, user_id) VALUES (?,?,?,?,?,?,?,?)",
+              (tid, now(), kind, ref, title, detail, json.dumps(snap, ensure_ascii=False), _owner()))
     _event(c, "user", f"{kind}.delete", ref, trash=tid)
     return tid
 
@@ -869,7 +865,7 @@ def delete_paper(pid):
         for kind, ids in gone.items():
             if ids:
                 c.execute(f"DELETE FROM research_links WHERE kind=? AND ref IN ({_qs(ids)})", (kind, *ids))
-        c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(refs)})", refs)
+        c.execute(f"DELETE FROM main.runs WHERE ref IN ({_qs(refs)})", refs)
         _drop_threads_to_trash(c, snap, deps["thread"])
         if deps["note"]:
             c.execute(f"DELETE FROM notes WHERE id IN ({_qs(deps['note'])})", deps["note"])
@@ -903,7 +899,7 @@ def delete_thread(thread_id):
             ("threads", "id=?", [thread_id]), ("messages", "thread_id=?", [thread_id]), ("runs", "ref=?", [thread_id]),
             ("research_links", f"(kind='thread' AND ref=?) OR (kind='message' AND ref IN ({_qs(msgs) or 'NULL'}))", links)))
         c.execute(f"DELETE FROM research_links WHERE (kind='thread' AND ref=?) OR (kind='message' AND ref IN ({_qs(msgs) or 'NULL'}))", links)
-        c.execute("DELETE FROM runs WHERE ref=?", (thread_id,))
+        c.execute("DELETE FROM main.runs WHERE ref=?", (thread_id,))
         _drop_threads_to_trash(c, snap, [thread_id])
         title = t["title"] or (first and first[0][:80]) or "（空讨论）"
         tid = _to_trash(c, "thread", thread_id, title, f"{len(msgs)} 条消息" if msgs else "", snap)
@@ -932,18 +928,18 @@ def restore_trash(trash_id):
         for table, rows in snap.items():
             for r in rows:
                 try:
-                    c.execute(f"INSERT OR IGNORE INTO {table} ({','.join(r)}) VALUES ({_qs(r)})",  # _row decodes JSON columns
+                    c.execute(f"INSERT OR IGNORE INTO main.{table} ({','.join(r)}) VALUES ({_qs(r)})",  # _row decodes JSON columns
                               [json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v for v in r.values()])
                 except sqlite3.IntegrityError:
                     pass
         back = [r["id"] for r in snap.get("threads", [])]
         if back:  # a parent deleted meanwhile: hang at the top level instead
-            c.execute(f"UPDATE threads SET parent_id=NULL, fork_message_id=NULL WHERE id IN ({_qs(back)}) "
+            c.execute(f"UPDATE main.threads SET parent_id=NULL, fork_message_id=NULL WHERE id IN ({_qs(back)}) "
                       "AND parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM threads)", back)
         for k in kids:
-            c.execute("UPDATE threads SET parent_id=?, fork_message_id=? WHERE id=? AND parent_id IS ?",
+            c.execute("UPDATE main.threads SET parent_id=?, fork_message_id=? WHERE id=? AND parent_id IS ?",
                       (k["parent_id"], k["fork_message_id"], k["id"], k["lifted"]))
-        c.execute("DELETE FROM trash WHERE id=?", (trash_id,))
+        c.execute("DELETE FROM main.trash WHERE id=?", (trash_id,))
         _event(c, "user", f"{e['kind']}.restore", e["ref"])
     files = home() / "trash" / trash_id
     if files.exists():
@@ -961,7 +957,7 @@ def purge_trash(trash_id=None):
     with tx() as c:
         ids = [trash_id] if trash_id else _ids(c, "SELECT id FROM trash WHERE deleted_at < ?", (cutoff,))
         if ids:
-            c.execute(f"DELETE FROM trash WHERE id IN ({_qs(ids)})", ids)
+            c.execute(f"DELETE FROM main.trash WHERE id IN ({_qs(ids)})", ids)
     for i in ids:
         shutil.rmtree(home() / "trash" / i, ignore_errors=True)
 
@@ -1415,7 +1411,7 @@ def _repath(c, old, new, name, parent):
     for table in ("paper_topics", "research_topics"):
         c.execute(f"UPDATE {table} SET topic=? WHERE topic=?", (new, old))
     c.execute("UPDATE notes SET topic=? WHERE topic=?", (new, old))
-    c.execute("UPDATE threads SET scope=? WHERE scope=?", (f"topic:{new}", f"topic:{old}"))
+    c.execute("UPDATE main.threads SET scope=? WHERE scope=?", (f"topic:{new}", f"topic:{old}"))
     c.execute("DELETE FROM topics WHERE path=?", (old,))
 
 
@@ -1457,7 +1453,7 @@ def delete_topic(path):
         c.execute("DELETE FROM paper_topics WHERE topic=?", (path,))
         c.execute("DELETE FROM research_topics WHERE topic=?", (path,))
         c.execute("UPDATE notes SET topic=? WHERE topic=?", (up, path))
-        c.execute("UPDATE threads SET scope=? WHERE scope=?", (f"topic:{up}" if up else "library", f"topic:{path}"))
+        c.execute("UPDATE main.threads SET scope=? WHERE scope=?", (f"topic:{up}" if up else "library", f"topic:{path}"))
         c.execute("DELETE FROM topics WHERE path=?", (path,))
         _event(c, "user", "topic.delete", path)
 
@@ -1630,9 +1626,9 @@ def _start_thread(c, scope, text=None, parent_id=None, tid=None, fork=None):
     """A user who opens a discussion from another one placed it there (parent_by='user')."""
     tid = tid or new_id()
     added = c.execute("INSERT OR IGNORE INTO main.threads (id, created_at, scope, parent_id, parent_by, fork_message_id, user_id) "
-                      "VALUES (?,?,?,?,?,?,?)", (tid, now(), scope, parent_id, parent_id and "user", fork, (_viewer.get() or {}).get("id"))).rowcount
+                      "VALUES (?,?,?,?,?,?,?)", (tid, now(), scope, parent_id, parent_id and "user", fork, _owner())).rowcount
     if added and (text or "").strip():
-        c.execute("INSERT INTO messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (new_id(), now(), tid, "user", text.strip(), None))
+        c.execute("INSERT INTO main.messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (new_id(), now(), tid, "user", text.strip(), None))
     return tid
 
 
@@ -1644,8 +1640,8 @@ def _drop_threads(c, ids):
     while c.execute(f"UPDATE main.threads SET parent_id=(SELECT p.parent_id FROM main.threads p WHERE p.id=threads.parent_id), "
                     f"fork_message_id=NULL WHERE parent_id IN ({q}) AND id NOT IN ({q})", (*ids, *ids)).rowcount:
         pass
-    c.execute(f"DELETE FROM messages WHERE thread_id IN ({q})", ids)
-    c.execute(f"DELETE FROM threads WHERE id IN ({q})", ids)
+    c.execute(f"DELETE FROM main.messages WHERE thread_id IN ({q})", ids)
+    c.execute(f"DELETE FROM main.threads WHERE id IN ({q})", ids)
 
 
 def _scope_title(c, scope):
@@ -1734,7 +1730,7 @@ def set_thread_title(tid, title, by):
             raise rules.Rejected("这段讨论不存在了")
         if by != "user" and cur["title_by"] == "user":
             raise rules.Rejected("用户已手动改过这段讨论的标题，agent 不能修改")
-        c.execute("UPDATE threads SET title=?, title_by=? WHERE id=?", (title, by, tid))
+        c.execute("UPDATE main.threads SET title=?, title_by=? WHERE id=?", (title, by, tid))
 
 
 def move_thread(tid, parent_id, by):
@@ -1756,7 +1752,7 @@ def move_thread(tid, parent_id, by):
             if not r:
                 raise rules.Rejected(f"要挂到的讨论 {up} 不存在")
             up = r["parent_id"]
-        c.execute("UPDATE threads SET parent_id=?, parent_by=?, fork_message_id=NULL WHERE id=?", (parent_id or None, by, tid))
+        c.execute("UPDATE main.threads SET parent_id=?, parent_by=?, fork_message_id=NULL WHERE id=?", (parent_id or None, by, tid))
         _event(c, by, "thread.move", tid, parent=parent_id)
 
 
@@ -1769,19 +1765,19 @@ def pending_titles(limit=12):
 
 def set_thread_agent(thread_id, agent_id):
     with tx() as c:
-        c.execute("UPDATE threads SET agent_id=? WHERE id=?", (agent_id, thread_id))
+        c.execute("UPDATE main.threads SET agent_id=? WHERE id=?", (agent_id, thread_id))
 
 
 def add_message(thread_id, role, text, run_id=None):
     mid = new_id()
     with tx() as c:
-        c.execute("INSERT INTO messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
+        c.execute("INSERT INTO main.messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
     return mid
 
 
 def drop_messages(ids):
     with tx() as c:
-        c.execute(f"DELETE FROM messages WHERE id IN ({_qs(ids)})", ids)
+        c.execute(f"DELETE FROM main.messages WHERE id IN ({_qs(ids)})", ids)
 
 
 # ---------- research ----------
@@ -2425,16 +2421,17 @@ def delete_anchor(aid):
 def add_run(run_id, agent_id, kind, ref, prompt, status, launch=None):
     with tx() as c:
         c.execute(
-            "INSERT OR IGNORE INTO runs (id, created_at, updated_at, agent_id, kind, ref, prompt, status, launch) VALUES (?,?,?,?,?,?,?,?,?)",
-            (run_id, now(), now(), agent_id, kind, ref, prompt, status, launch and json.dumps(launch, ensure_ascii=False)),
+            "INSERT OR IGNORE INTO main.runs (id, created_at, updated_at, agent_id, kind, ref, prompt, status, launch, user_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (run_id, now(), now(), agent_id, kind, ref, prompt, status, launch and json.dumps(launch, ensure_ascii=False), _owner()),
         )
 
 
 def replace_run(placeholder, run_id, agent_id, status):
     """Swap the placeholder shown while Cursor was still creating the agent for the real run."""
     with tx() as c:
-        c.execute("UPDATE runs SET id=?, agent_id=?, status=?, updated_at=? WHERE id=?", (run_id, agent_id, status, now(), placeholder))
-        c.execute("UPDATE messages SET run_id=? WHERE run_id=?", (run_id, placeholder))
+        c.execute("UPDATE main.runs SET id=?, agent_id=?, status=?, updated_at=? WHERE id=?", (run_id, agent_id, status, now(), placeholder))
+        c.execute("UPDATE main.messages SET run_id=? WHERE run_id=?", (run_id, placeholder))
 
 
 def update_run(run_id, **fields):
@@ -2443,7 +2440,7 @@ def update_run(run_id, **fields):
     fields["updated_at"] = now()
     cols = ", ".join(f"{k}=?" for k in fields)
     with tx() as c:
-        c.execute(f"UPDATE runs SET {cols} WHERE id=?", (*fields.values(), run_id))
+        c.execute(f"UPDATE main.runs SET {cols} WHERE id=?", (*fields.values(), run_id))
 
 
 def claim_run(run_id):
@@ -2585,7 +2582,7 @@ def stale_runs(cutoff):
 def forget_agent(agent_id):
     """An agent that was never created: threads and captures must not keep following up on it."""
     with tx() as c:
-        c.execute("UPDATE threads SET agent_id=NULL WHERE agent_id=?", (agent_id,))
+        c.execute("UPDATE main.threads SET agent_id=NULL WHERE agent_id=?", (agent_id,))
         c.execute("UPDATE captures SET agent_id=NULL WHERE agent_id=?", (agent_id,))
         c.execute("UPDATE kv SET value='' WHERE value=?", (agent_id,))
 
