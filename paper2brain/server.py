@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import email.utils
+import hashlib
 import hmac
 import json
 import mimetypes
@@ -35,8 +36,8 @@ def bg(fn, *args):
 
 
 class Reply:
-    def __init__(self, path, mime=None):
-        self.path, self.mime = Path(path), mime
+    def __init__(self, path, mime=None, revalidate=False):
+        self.path, self.mime, self.revalidate = Path(path), mime, revalidate
 
 
 # ---------- state ----------
@@ -417,7 +418,7 @@ def trash_purge(q, body, tid):
 
 @route("GET", r"/api/papers/([^/]+)/figures/(\d+)")
 def paper_figure(q, body, pid, n):
-    return Reply(store.paper_dir(pid, create=False) / "figures" / f"{int(n)}.png", "image/png")
+    return Reply(store.paper_dir(pid, create=False) / "figures" / f"{int(n)}.png", "image/png", revalidate=True)
 
 
 @route("POST", "/api/papers/([^/]+)/card")
@@ -430,7 +431,7 @@ def paper_pdf(q, body, pid):
     p = _paper(pid)
     if not p["pdf_path"]:
         raise rules.Rejected("还没有 PDF")
-    return Reply(p["pdf_path"], "application/pdf")
+    return Reply(p["pdf_path"], "application/pdf", revalidate=True)
 
 
 @route("POST", "/api/papers/([^/]+)/read")
@@ -442,6 +443,10 @@ def paper_read(q, body, pid):
 @route("GET", "/api/papers/([^/]+)/pages")
 def paper_pages(q, body, pid):
     return store.pages(pid)
+
+
+# a paper's card, pages and the list: the browser keeps a copy and asks each time, unchanged costs a 304 (discussions don't)
+REVALIDATE = {papers, paper_get, paper_pages}
 
 
 @route("POST", "/api/papers/([^/]+)/pdf")
@@ -1025,11 +1030,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _json(self, code, obj):
+    def _json(self, code, obj, revalidate=False):
         cookies = obj.pop("_cookies", {}) if isinstance(obj, dict) else {}
         secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
         headers = [("Set-Cookie", f"{k}={v}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax{secure}") for k, v in cookies.items()]
-        self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode(), headers=headers)
+        data = json.dumps(obj, ensure_ascii=False, default=str).encode()
+        if not revalidate:
+            return self._send(code, data, headers=headers)
+        tag = hashlib.sha256(data).hexdigest()[:32]
+        # Caddy's compression marks the tag weak or suffixes it, so look for ours inside what comes back
+        if tag in self.headers.get("If-None-Match", ""):
+            return self._not_modified(("ETag", f'"{tag}"'))
+        self._send(code, data, headers=[*headers, ("ETag", f'"{tag}"')], cache="no-cache")
+
+    def _not_modified(self, header):
+        self.send_response(304)
+        self.send_header(*header)
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
 
     # account routes work in any library, also for a viewer; an agent token reaches only AGENT
     AGENT = {"/api/agent/connect", "/api/cli", "/api/runner/claim", "/api/runner/update"}
@@ -1070,10 +1088,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, path.read_bytes(), mime)
         stamp = email.utils.formatdate(path.stat().st_mtime, usegmt=True)
         if self.headers.get("If-Modified-Since") == stamp:
-            self.send_response(304)
-            self.send_header("Last-Modified", stamp)
-            self.send_header("Cache-Control", "no-cache")
-            return self.end_headers()
+            return self._not_modified(("Last-Modified", stamp))
         self._send(200, path.read_bytes(), mime, headers=[("Last-Modified", stamp)], cache="no-cache")
 
     def _refuse(self, method):
@@ -1158,7 +1173,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     traceback.print_exc()
                     return self._json(500, {"error": f"{type(e).__name__}: {e}"})
-                return self._file(out.path, out.mime) if isinstance(out, Reply) else self._json(200, out)
+                return self._file(out.path, out.mime, out.revalidate) if isinstance(out, Reply) else self._json(200, out, fn in REVALIDATE)
         self._json(404, {"error": "not found"})
 
     def do_GET(self):

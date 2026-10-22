@@ -92,6 +92,22 @@ class Multi(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as got:
             urllib.request.urlopen(urllib.request.Request(self.url + "/style.css", headers={"If-Modified-Since": stamp}))
         self.assertEqual((got.exception.code, got.exception.read()), (304, b""))
+        a, ta = self.user("甲")
+        with store.at_home(store.library_home(a["library"])):
+            store.upsert_paper("arxiv:2410.24164", "pi0")
+        def get(path, tag=None):
+            req = urllib.request.Request(self.url + path, headers={"Cookie": f"p2b_session={ta}", **({"If-None-Match": f'W/"{tag}"'} if tag else {})})
+            try:
+                with urllib.request.urlopen(req) as r:
+                    return r.status, (r.headers["ETag"] or "").strip('"')
+            except urllib.error.HTTPError as e:
+                return e.code, None
+        code, tag = get("/api/papers/arxiv:2410.24164")
+        self.assertEqual((code, get("/api/papers/arxiv:2410.24164", tag)[0]), (200, 304))
+        with store.at_home(store.library_home(a["library"])):
+            store.set_short_name("arxiv:2410.24164", "π0", "user")
+        self.assertEqual(get("/api/papers/arxiv:2410.24164", tag)[0], 200)  # changed: sent again
+        self.assertEqual(get("/api/threads?scope=paper:arxiv:2410.24164"), (200, ""))  # discussions are never kept
 
     def test_name_and_password_sign_in(self):
         self.url = self.serve()
