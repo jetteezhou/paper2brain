@@ -125,12 +125,14 @@ async function mountPdf(host, pid, page = 1, lang = 'en') {
   if (page > 1) jumpPdf(page);
 }
 
-/** Resolves once the page's canvas and text layer are in place (the same promise for concurrent callers). */
+let drawing = Promise.resolve();
+/** Resolves once the page's canvas and text layer are in place (the same promise for concurrent callers).
+ * One page at a time, in the order they came on screen: a neighbour's huge figure must not hold up the page being read. */
 function renderPage(n) {
   const div = pageDiv(n);
   if (!div) return Promise.resolve();
   div.dataset.rendered = '1';
-  div.rendering ||= drawPage(div, n);
+  div.rendering ||= drawing = drawing.catch(() => {}).then(() => div.isConnected && drawPage(div, n));
   return div.rendering;
 }
 
