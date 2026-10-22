@@ -1,6 +1,7 @@
 """Local web server: JSON API for the web UI plus static files. Same store and rules as the CLI."""
 import base64
 import contextlib
+import email.utils
 import hmac
 import json
 import mimetypes
@@ -1014,11 +1015,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def _send(self, code, data, mime="application/json; charset=utf-8", headers=()):
+    def _send(self, code, data, mime="application/json; charset=utf-8", headers=(), cache="no-store"):
         self.send_response(code)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         for k, v in headers:
             self.send_header(k, v)
         self.end_headers()
@@ -1060,10 +1061,20 @@ class Handler(BaseHTTPRequestHandler):
             return None, (403, "你在这个空间里只能查看")
         return {"user": user, "library": lib, "role": role}, None
 
-    def _file(self, path, mime=None):
+    def _file(self, path, mime=None, revalidate=False):
+        """revalidate (the page's own files): the browser keeps a copy and asks each time, an unchanged file costs a 304."""
         if not path.is_file():
             return self._json(404, {"error": "文件不存在"})
-        self._send(200, path.read_bytes(), mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        mime = mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if not revalidate:
+            return self._send(200, path.read_bytes(), mime)
+        stamp = email.utils.formatdate(path.stat().st_mtime, usegmt=True)
+        if self.headers.get("If-Modified-Since") == stamp:
+            self.send_response(304)
+            self.send_header("Last-Modified", stamp)
+            self.send_header("Cache-Control", "no-cache")
+            return self.end_headers()
+        self._send(200, path.read_bytes(), mime, headers=[("Last-Modified", stamp)], cache="no-cache")
 
     def _refuse(self, method):
         """Any web page the user has open can send requests to 127.0.0.1. Host must name this server (DNS rebinding);
@@ -1115,7 +1126,7 @@ class Handler(BaseHTTPRequestHandler):
             target = (WEB / path.lstrip("/")).resolve() if path != "/" else WEB / "index.html"
             if WEB.resolve() not in target.parents and target != WEB / "index.html":
                 return self._json(404, {"error": "not found"})
-            return self._file(target)
+            return self._file(target, revalidate=True)
         q = dict(urllib.parse.parse_qsl(url.query))
         length = int(self.headers.get("Content-Length") or 0)
         try:

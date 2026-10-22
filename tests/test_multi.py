@@ -84,6 +84,15 @@ class Multi(unittest.TestCase):
             accounts.redeem(code, "乙", password="password1")
         self.assertNotIn(token.encode(), (accounts.root() / "hub.sqlite").read_bytes())
 
+    def test_page_files_revalidate(self):
+        self.url = self.serve()
+        with urllib.request.urlopen(self.url + "/style.css") as r:
+            stamp, cache = r.headers["Last-Modified"], r.headers["Cache-Control"]
+        self.assertEqual(cache, "no-cache")
+        with self.assertRaises(urllib.error.HTTPError) as got:
+            urllib.request.urlopen(urllib.request.Request(self.url + "/style.css", headers={"If-Modified-Since": stamp}))
+        self.assertEqual((got.exception.code, got.exception.read()), (304, b""))
+
     def test_name_and_password_sign_in(self):
         self.url = self.serve()
         self.addCleanup(accounts._FAILS.clear)
