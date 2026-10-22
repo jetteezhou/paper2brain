@@ -68,16 +68,19 @@ const joinResearch = (t, paperId) => researchPicker({
   links: [{ kind: 'thread', ref: t.id }, ...(paperId ? [{ kind: 'paper', ref: paperId }] : [])],
 });
 
-/** One line that opens a new discussion of a scope with what the user wrote; nobody is asked to answer. */
-export function JotForm({ scope, placeholder, onDone }) {
+/** One line that opens a new discussion of a scope with what the user wrote; nobody is asked to answer, unless ask
+ * (and the agent is on): then it is the first question to the agent. */
+export function JotForm({ scope, placeholder, onDone, ask }) {
   const [v, setV] = useState('');
   const submit = async (e) => {
     e.preventDefault();
     if (!v.trim()) return;
     try {
-      const t = await post('/api/threads', { scope, text: v.trim() });
+      const asking = ask && agentOn.value;
+      const t = await post('/api/threads', asking ? { scope } : { scope, text: v.trim() });
+      if (asking) await post('/api/chat', { scope, text: v.trim(), thread_id: t.id });
       setV('');
-      toast('已记下，开了一段新讨论', '去讨论', () => openThread(t.scope, t.id));
+      if (!asking) toast('已记下，开了一段新讨论', '去讨论', () => openThread(t.scope, t.id));
       refresh();
       onDone?.(t);
     } catch (err) { fail(err); }
@@ -510,7 +513,7 @@ function Outline({ list, selId, onSelect }) {
       <span class="keys"><div class="seg sm"><button class=${pane.value === 'river' ? 'on' : ''} onClick=${() => (pane.value = 'river')}>河流</button>
         <button class=${pane.value === 'map' ? 'on' : ''} onClick=${() => (pane.value = 'map')}>地图</button></div></span></div>
     <div class="ol-tools">
-      <${JotForm} scope="library" placeholder="记一个想法…（回车，开一段新讨论）" onDone=${(t) => onSelect(t.id)} />
+      <${JotForm} scope="library" ask placeholder=${agentOn.value ? '问 agent…（回车，开一段新讨论）' : '记一个想法…（回车，开一段新讨论）'} onDone=${(t) => onSelect(t.id)} />
       <div class="scope-bar"><span class="hint">新讨论</span>
         <button class="scope" onClick=${() => post('/api/threads', { scope: 'library' }).then((t) => onSelect(t.id)).catch(fail)}>整个论文库</button>
         <select class="scope" onChange=${(e) => { const s = e.target.value; e.target.value = ''; if (s) post('/api/threads', { scope: s }).then((t) => onSelect(t.id)).catch(fail); }}>
