@@ -1103,7 +1103,15 @@ class Handler(BaseHTTPRequestHandler):
         stamp = email.utils.formatdate(path.stat().st_mtime, usegmt=True)
         if self.headers.get("If-Modified-Since") == stamp:
             return self._not_modified(("Last-Modified", stamp))
-        self._send(200, path.read_bytes(), mime, headers=[("Last-Modified", stamp)], cache="no-cache")
+        # byte ranges: PDF.js shows the first pages of a large PDF before the rest has come over a slow line
+        size, rng = path.stat().st_size, re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        if rng and int(rng[1]) < size:
+            start, end = int(rng[1]), min(int(rng[2] or size - 1), size - 1)
+            with path.open("rb") as f:
+                f.seek(start)
+                data = f.read(end - start + 1)
+            return self._send(206, data, mime, headers=[("Content-Range", f"bytes {start}-{end}/{size}"), ("Last-Modified", stamp)], cache="no-cache")
+        self._send(200, path.read_bytes(), mime, headers=[("Last-Modified", stamp), ("Accept-Ranges", "bytes")], cache="no-cache")
 
     def _refuse(self, method):
         """Any web page the user has open can send requests to 127.0.0.1. Host must name this server (DNS rebinding);

@@ -1014,6 +1014,18 @@ class Server(unittest.TestCase):
         self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "application/json", "Origin": own}), 200)
         self.assertEqual(sum(t["first"] == "跨站写入" for t in store.recent_threads()), 1)
 
+    def test_pdf_comes_in_byte_ranges(self):
+        import http.client
+        pid = "arxiv:2601.00888"
+        store.upsert_paper(pid, "Ranged")
+        pdf = store.paper_dir(pid) / "paper.pdf"
+        pdf.write_bytes(b"%PDF-0123456789")
+        store.set_fulltext(pid, pdf, PAGES)
+        c = http.client.HTTPConnection("127.0.0.1", self.port)
+        c.request("GET", f"/api/papers/{pid}/pdf", headers={"Host": f"127.0.0.1:{self.port}", "Range": "bytes=5-8"})
+        r = c.getresponse()
+        self.assertEqual((r.status, r.read(), r.headers["Content-Range"]), (206, b"0123", "bytes 5-8/15"))
+
     def test_tunnel_host_needs_the_password(self):
         from unittest import mock
         auth = lambda pw: {"Authorization": "Basic " + base64.b64encode(f"me:{pw}".encode()).decode()}  # noqa: E731
