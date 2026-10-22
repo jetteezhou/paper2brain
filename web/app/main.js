@@ -365,6 +365,20 @@ function SearchApi() {
     <div style="text-align:right"><button class="btn sm primary">保存</button></div></form>`;
 }
 
+/** Which engine PDFMathTranslate uses for the Chinese copies (EN / 中 in the reader). */
+function TranslateEngine() {
+  const [d, reload] = useLive('/api/agent/translate', { poll: false });
+  if (!d) return html`<span class="spin"></span>`;
+  const pick = async (e) => {
+    try { await post('/api/agent/translate', { engine: e.target.value }); toast('已保存，之后翻译的论文用这个引擎'); reload(); } catch (err) { fail(err); }
+  };
+  return html`<div class="block-title" style="margin-top:14px">PDF 翻译引擎<span class="line"></span></div>
+    <p class="hint" style="margin-top:0">论文收下后在后台用 PDFMathTranslate 翻成中文，阅读器和速览窗口右上角切换 EN / 中。
+      ${d.installed ? '' : '服务器还没装 PDFMathTranslate（ops/server.sh 会装）。'}
+      ${d.engine === 'search' && !appState.value.agent.search_api ? '快速搜索接口现在不可用，翻译等它上线再继续。' : ''}
+      <select value=${d.engine} onChange=${pick} aria-label="PDF 翻译引擎">${Object.entries(d.engines).map(([k, label]) => html`<option value=${k}>${label}</option>`)}</select></p>`;
+}
+
 /** Who holds the library, how fresh the iCloud snapshot is, and the pull that takes it over on this Mac. */
 function Handoff() {
   const [d, , err] = useLive('/api/handoff', { poll: false });
@@ -485,6 +499,7 @@ function Setup() {
     <p class="hint" style="margin-top:0">搜索框的 AI 推荐、快速问、起标题、上网找论文用一个 OpenAI 兼容接口（Gemini 用 https://generativelanguage.googleapis.com/v1beta/openai）。
       它由${appState.value.account.library === appState.value.account.libraries.find((l) => l.kind === 'personal')?.id ? '你' : '负责这个空间 agent 的成员'}的 Mac 调用：地址、模型和 key 只存在那台 Mac 上，走它的代理，所以 Gemini 这类限地区的模型也能用。
       ${a.search_api ? html`<b>✓ 本机已配置并在线</b>` : '现在不可用：Mac 没开，或还没配置。'}改接口或代理：在 Mac 上运行 <code>~/paper2brain-client/setup.sh --search</code>。</p>
+    ${appState.value.account.role === 'owner' ? html`<${TranslateEngine} />` : null}
     <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>关闭</button></div>`;
   const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
   const mark = (b) => (ok[b] ? '✓ 已连接' : '未连接');
@@ -513,6 +528,7 @@ function Setup() {
   <p class="hint" style="margin-top:0">搜索框停顿 1 秒后，第一条的 AI 推荐直接调这个 OpenAI 兼容接口（关闭思考，通常 1–8 秒）；不填就用上面“快速搜索”选的 TCodex 模型（约 4 秒）。
     ${a.search_ai ? '✓ 已可用' : '未可用'}</p>
   <${SearchApi} />
+  <${TranslateEngine} />
   <div class="block-title" style="margin-top:14px">两台 Mac<span class="line"></span></div>
   <${Handoff} />
   <p class="hint">调优 agent：修改仓库里的 <code>librarian/*.md</code>，再在捕获详情里点“重新整理”。</p>

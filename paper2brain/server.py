@@ -911,6 +911,18 @@ def search_api_set(q, body):
     return {"ok": True}
 
 
+@route("GET", "/api/agent/translate")
+def translate_get(q, body):
+    return {"engine": translate.engine(), "engines": translate.ENGINES, "installed": translate.BIN.exists()}
+
+
+@route("POST", "/api/agent/translate")
+def translate_set(q, body):
+    _owner()
+    translate.set_engine(body.get("engine"))
+    return {"ok": True}
+
+
 PULL_LOG = Path("/tmp/paper2brain-pull.log")
 
 

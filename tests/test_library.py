@@ -767,6 +767,10 @@ class Store(unittest.TestCase):
         fake.chmod(0o755)
         paper = lambda: store.get_paper(pid, with_anchors=False)  # noqa: E731
         with mock.patch.object(translate, "BIN", fake):
+            self.assertEqual(translate.engine(), "search")
+            translate.backfill()  # the quick search API is not set up: nothing starts
+            self.assertFalse(translate._busy.locked())
+            translate.set_engine("bing")
             self.assertEqual(translate.status(paper()), "pending")
             for _ in range(200):  # other tests' papers with a PDF may come first, one at a time
                 if translate.status(paper()) != "pending":
@@ -784,6 +788,25 @@ class Store(unittest.TestCase):
             self.assertEqual(translate.status(paper()), "failed")
         with mock.patch.object(translate, "BIN", fake.with_name("missing")):
             self.assertIsNone(translate.status(paper()))  # pdf2zh not installed
+        translate.set_engine("search")  # switching engines retries the failures
+        self.assertEqual(translate.status(paper()), "pending")
+
+    def test_translation_bridge_hands_paragraphs_to_the_quick_search_api(self):
+        import json
+        import urllib.error
+        import urllib.request
+        from unittest import mock
+
+        from paper2brain import cursor_api, translate
+
+        with mock.patch.object(cursor_api, "_chat", return_value="你好") as chat, translate._bridge({"base_url": "x"}) as env:
+            ask = lambda key: urllib.request.urlopen(urllib.request.Request(  # noqa: E731
+                env["OPENAI_BASE_URL"] + "/chat/completions", method="POST", headers={"Authorization": f"Bearer {key}"},
+                data=json.dumps({"model": "quick", "messages": [{"role": "user", "content": "Translate: hello"}]}).encode()))
+            self.assertEqual(json.loads(ask(env["OPENAI_API_KEY"]).read())["choices"][0]["message"]["content"], "你好")
+            self.assertEqual(chat.call_args[0], ({"base_url": "x"}, "Translate: hello"))
+            with self.assertRaises(urllib.error.HTTPError):
+                ask("wrong")
 
     def test_figures_are_cropped_from_captions_and_picked_by_number(self):
         import pymupdf
