@@ -60,7 +60,7 @@ def _account():
     return {"user": {"id": me["user"]["id"], "name": me["user"]["name"]}, "library": me["library"], "role": me["role"],
             "libraries": accounts.libraries(me["user"]["id"]), "members": accounts.members(me["library"]) if space else [],
             "agent_member": accounts.agent_member(me["library"]) if space else me["user"]["id"],
-            "login": accounts.login_name(me["user"]["id"])}
+            "login": accounts.login_name(me["user"]["id"]), "admin": accounts.is_admin(me["user"]["id"])}
 
 
 def _owner():
@@ -167,6 +167,7 @@ def research_move_home(q, body, rid):
 @route("POST", "/api/members/invite")
 def member_invite(q, body):
     _owner()
+    accounts.check_admin(_me()["user"]["id"], body.get("admin_password"))
     return {"code": accounts.invite("join", _me()["library"], body.get("role") or "editor", by=_me()["user"]["id"])}
 
 

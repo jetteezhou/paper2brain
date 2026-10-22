@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, kind TEXT NOT NULL, l
   by TEXT, expires_at TEXT NOT NULL, used_at TEXT);
 CREATE TABLE IF NOT EXISTS logins (name TEXT PRIMARY KEY COLLATE NOCASE, user_id TEXT NOT NULL UNIQUE REFERENCES users(id),
   salt TEXT NOT NULL, hash TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admins (user_id TEXT PRIMARY KEY REFERENCES users(id), salt TEXT NOT NULL, hash TEXT NOT NULL);
 """
 LOCK_AFTER, LOCK_MINUTES = 5, 15
 # ponytail: wrong-password counts live in memory, so a restart clears them; move them into hub.sqlite if that matters
@@ -176,21 +177,47 @@ def set_password(user_id, name, password, old=None):
         _set_login(c, user_id, name, password)
 
 
-def login(name, password):
-    """A new web token for the right name and password. LOCK_AFTER wrong tries lock that name for LOCK_MINUTES."""
-    key = (name or "").strip().lower()
+def _check(key, r, password, wrong):
+    """Rejected unless password matches row r (salt, hash); LOCK_AFTER wrong tries in a row lock key for LOCK_MINUTES.
+    A missing row still runs scrypt, so an unknown name takes as long as a wrong password."""
     fails, until = _FAILS.get(key, (0, None))
     if until and until > _now():
         raise rules.Rejected(f"密码错误次数太多，{LOCK_MINUTES} 分钟后再试")
+    if not hmac.compare_digest(_scrypt(password, r["salt"] if r else "00" * 16), r["hash"] if r else ""):
+        _FAILS[key] = (0, _now(minutes=LOCK_MINUTES)) if fails + 1 >= LOCK_AFTER else (fails + 1, None)
+        raise rules.Rejected(wrong)
+    _FAILS.pop(key, None)
+
+
+def login(name, password):
+    """A new web token for the right name and password."""
     with _db() as c:
         r = c.execute("SELECT * FROM logins WHERE name=?", ((name or "").strip(),)).fetchone()
-    if not (r and hmac.compare_digest(_scrypt(password, r["salt"]), r["hash"])):
-        if not r:
-            _scrypt(password, "00" * 16)  # an unknown name takes as long as a wrong password
-        _FAILS[key] = (0, _now(minutes=LOCK_MINUTES)) if fails + 1 >= LOCK_AFTER else (fails + 1, None)
-        raise rules.Rejected("登录名或密码不对")
-    _FAILS.pop(key, None)
+    _check((name or "").strip().lower(), r, password, "登录名或密码不对")
     return issue(r["user_id"], "web")
+
+
+# ---------- super admins: only they, with their second password, make invites for new members ----------
+
+def set_admin(user_id, password):
+    if len(password or "") < 8:
+        raise rules.Rejected("二级密码至少 8 位")
+    salt = secrets.token_hex(16)
+    with _db() as c:
+        c.execute("INSERT OR REPLACE INTO admins VALUES (?,?,?)", (user_id, salt, _scrypt(password, salt)))
+
+
+def is_admin(user_id):
+    with _db() as c:
+        return bool(c.execute("SELECT 1 FROM admins WHERE user_id=?", (user_id,)).fetchone())
+
+
+def check_admin(user_id, password):
+    with _db() as c:
+        r = c.execute("SELECT * FROM admins WHERE user_id=?", (user_id,)).fetchone()
+    if not r:
+        raise rules.Rejected("只有超级管理员能生成邀请链接")
+    _check(f"admin:{user_id}", r, password, "二级密码不对")
 
 
 # ---------- libraries and members ----------

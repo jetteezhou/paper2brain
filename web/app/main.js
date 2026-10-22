@@ -432,6 +432,7 @@ function Account() {
   };
   const setRole = (m, role) => call('role', `/api/members/${m.id}`, { role }, () => { toast(role ? '已修改' : '已移出'); refresh(); });
   const leave = () => confirm('离开这个空间？之后要别人重新邀请才能回来。') && call('leave', `/api/members/${acc.user.id}`, { role: null }, reload);
+  const invite = (role) => call('invite', '/api/members/invite', { role, admin_password: document.getElementById('admin-password').value });
   const savePassword = (e) => {
     e.preventDefault();
     const f = new FormData(e.target), form = e.target;
@@ -453,8 +454,10 @@ function Account() {
         ${m.id !== acc.agent_member && m.role !== 'viewer' ? html`<button class="btn sm ghost" onClick=${() => call('agent', '/api/members/agent', { user_id: m.id }, refresh)}>由 ta 负责 agent</button>` : null}
         ${m.id !== acc.user.id ? html`<button class="btn sm ghost danger" onClick=${() => confirm(`把 ${m.name} 移出空间？`) && setRole(m, null)}>移出</button>` : null}`
       : html`<span class="hint">${{ viewer: '只读', editor: '编辑', owner: '所有者' }[m.role]}</span>`}</div>`)}</div>
-    ${owner ? html`<p class="hint">邀请：<button class="btn sm" onClick=${() => call('invite', '/api/members/invite', { role: 'editor' })}>生成可编辑的邀请链接</button>
-      <button class="btn sm" onClick=${() => call('invite', '/api/members/invite', { role: 'viewer' })}>生成只读的邀请链接</button></p>
+    ${owner ? html`${acc.admin ? html`<p class="hint">邀请：<input id="admin-password" type="password" placeholder="二级密码" aria-label="二级密码" autocomplete="off" />
+      <button class="btn sm" onClick=${() => invite('editor')}>生成可编辑的邀请链接</button>
+      <button class="btn sm" onClick=${() => invite('viewer')}>生成只读的邀请链接</button></p>`
+      : html`<p class="hint">只有超级管理员能生成邀请链接，需要加人时找 ta。</p>`}
       ${got.invite ? html`<p class="hint">一次有效，7 天内用：</p><${Copyable} text=${joinLink(got.invite.code)} />` : null}`
       : html`<p><button class="btn sm ghost danger" onClick=${leave}>离开这个空间</button></p>`}`
   : html`<p class="hint" style="margin-top:0">把一个研究移到一个新的共享空间（它用到的论文、讨论、附件、代码仓库和图一起带过去；个人库里的论文和讨论都还在），再邀请别人一起改。个人库的研究列表里仍能看到它（标着“共享”），点开就进入空间；你作为所有者随时可以在研究页上把它移回个人库。</p>

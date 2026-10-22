@@ -206,8 +206,15 @@ class Multi(unittest.TestCase):
         code, got, headers = self.call("/api/spaces", {"research_id": rid, "name": "组会"}, cookie=f"p2b_session={ta}")
         space = got["library"]
         self.assertIn(f"p2b_lib={space}", headers["Set-Cookie"])
-        invite = self.call("/api/members/invite", {"role": "viewer"}, cookie=f"p2b_session={ta}; p2b_lib={space}")[1]["code"]
-        self.assertEqual(self.call("/api/members/invite", {"role": "viewer"}, cookie=f"p2b_session={tb}; p2b_lib={space}")[0], 200)  # b's own library
+        owner = f"p2b_session={ta}; p2b_lib={space}"
+        self.addCleanup(accounts._FAILS.clear)
+        self.assertEqual(self.call("/api/members/invite", {"role": "viewer"}, cookie=owner)[0], 400)  # owners need to be super admins
+        accounts.set_admin(a["id"], "second-pw")
+        self.assertTrue(self.call("/api/state", cookie=owner)[1]["account"]["admin"])
+        self.assertEqual(self.call("/api/members/invite", {"role": "viewer", "admin_password": "wrong"}, cookie=owner)[0], 400)
+        invite = self.call("/api/members/invite", {"role": "viewer", "admin_password": "second-pw"}, cookie=owner)[1]["code"]
+        self.assertEqual(self.call("/api/members/invite", {"role": "viewer", "admin_password": "second-pw"},
+                                   cookie=f"p2b_session={tb}; p2b_lib={space}")[0], 400)  # b in their own library, not an admin
         self.assertEqual(self.call("/api/join", {"code": invite}, cookie=f"p2b_session={tb}")[0], 200)
         viewer = f"p2b_session={tb}; p2b_lib={space}"
         self.assertEqual(self.call(f"/api/research/{rid}", cookie=viewer)[0], 200)
