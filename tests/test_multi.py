@@ -179,7 +179,7 @@ class Multi(unittest.TestCase):
         accounts.redeem(accounts.invite("join", space, "editor"), user=b)
         home_list = self.call("/api/research?shared=1", cookie=f"p2b_session={ta}")[1]
         self.assertEqual({(x["title"], (x.get("space") or {}).get("name")) for x in home_list}, {("别的研究", None), ("共享的研究", "组会")})
-        self.assertEqual([x["title"] for x in self.call("/api/research", cookie=f"p2b_session={ta}")[1]], ["别的研究"])  # pickers: own only
+        self.assertEqual([x["title"] for x in self.call("/api/research", cookie=f"p2b_session={ta}")[1]], ["共享的研究", "别的研究"])  # pickers: own only, the original included
         with store.at_home(store.library_home(space)):
             store.add_message(tid, "user", "在空间里加的")
             (overleaf.local_dir(pid) / "main.tex").write_text("空间里又改的")
