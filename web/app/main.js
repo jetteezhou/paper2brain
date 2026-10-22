@@ -463,9 +463,9 @@ function Account() {
     : html`<button class="btn sm" onClick=${() => call('token', '/api/me/agent-token', {})}>生成本机 agent 的口令</button>`}
   <div class="block-title" style="margin-top:14px">${space ? '这个共享空间' : '共享研究'}<span class="line"></span></div>
   ${space ? html`<div>${acc.members.map((m) => html`<div class="cand"><div class="cand-body"><div class="cand-title">${m.name}${m.id === acc.user.id ? '（你）' : ''}</div>
-      <div class="cand-meta">${m.id === acc.agent_member ? '空间的 agent 用 ta 的 key 和 Mac' : ''}</div></div>
+      <div class="cand-meta">${m.id === acc.agent_member ? '空间的后台整理（没人发起的任务）在 ta 的 Mac 上跑' : ''}</div></div>
       ${owner ? html`<select value=${m.role} onChange=${(e) => setRole(m, e.target.value)} aria-label="角色"><option value="viewer">只读</option><option value="editor">编辑</option><option value="owner">所有者</option></select>
-        ${m.id !== acc.agent_member && m.role !== 'viewer' ? html`<button class="btn sm ghost" onClick=${() => call('agent', '/api/members/agent', { user_id: m.id }, refresh)}>由 ta 负责 agent</button>` : null}
+        ${m.id !== acc.agent_member && m.role !== 'viewer' ? html`<button class="btn sm ghost" onClick=${() => call('agent', '/api/members/agent', { user_id: m.id }, refresh)}>由 ta 负责后台整理</button>` : null}
         ${m.id !== acc.user.id ? html`<button class="btn sm ghost danger" onClick=${() => confirm(`把 ${m.name} 移出空间？`) && setRole(m, null)}>移出</button>` : null}`
       : html`<span class="hint">${{ viewer: '只读', editor: '编辑', owner: '所有者' }[m.role]}</span>`}</div>`)}</div>
     ${owner ? html`${acc.admin ? html`<p class="hint">邀请：<input id="admin-password" type="password" placeholder="二级密码" aria-label="二级密码" autocomplete="off" />
@@ -474,7 +474,7 @@ function Account() {
       : html`<p class="hint">只有超级管理员能生成邀请链接，需要加人时找 ta。</p>`}
       ${got.invite ? html`<p class="hint">一次有效，7 天内用：</p><${Copyable} text=${joinLink(got.invite.code)} />` : null}`
       : html`<p><button class="btn sm ghost danger" onClick=${leave}>离开这个空间</button></p>`}`
-  : html`<p class="hint" style="margin-top:0">把一个研究共享到一个新的共享空间（它用到的论文、讨论、附件、代码仓库和图一起复制过去），再邀请别人一起改。个人库里留着原来的论文、讨论和这个研究的记录（看论文时仍显示它被哪些研究用到）；研究列表里显示的是空间里的那份（标着“共享”），点开就进入空间，以后在空间里改。你作为所有者随时可以在研究页上把它移回个人库。</p>
+  : html`<p class="hint" style="margin-top:0">把一个研究放进一个新的共享空间，再邀请别人一起改。研究本身（三要素、素材、实验、文档、写作）在空间里只有一份，大家都改这一份；每个人的讨论和 agent 只有自己看得到，用的是自己 Mac 上的 agent。你个人库里留下一个指向它的入口：研究列表里标着“共享”，论文页上仍显示被它用到，点开就进入空间。你作为所有者随时可以在研究页上把它移回个人库。</p>
     <form class="research-create" onSubmit=${share}>
       <select name="research_id" aria-label="要共享的研究"><option value="">选一个研究…</option>${(researches || []).map((x) => html`<option value=${x.id}>${x.title}</option>`)}</select>
       <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />

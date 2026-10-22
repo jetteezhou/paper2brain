@@ -197,7 +197,7 @@ def _v7_discussion_tree(c):
                                    f"ORDER BY created_at DESC", old).fetchone() or [None])[0]
         c.execute("INSERT INTO threads (id, created_at, scope, title, agent_id, title_by) VALUES (?,?,?,?,?,?)",
                   (t["id"], t["created_at"], scope, t["gist"], agent or None, t["gist"] and t["gist_by"]))
-        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)",
+        c.execute("INSERT INTO messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)",
                   (new_id(), t["created_at"], t["id"], "user" if t["by"] == "user" else "assistant", t["text"], None))
         if old:
             for table, col in (("messages", "thread_id"), ("notes", "thread_id"), ("runs", "ref")):
@@ -299,6 +299,13 @@ def _sync_triggers(c):
             c.execute(f"CREATE TRIGGER sync_{t}_{op.lower()} AFTER {op} ON {t} WHEN {when} BEGIN {' '.join(log(r) for r in rows)} END")
 
 
+def _v21_owners(c):
+    """In a shared space each member's discussions, agent runs and what they deleted are their own (user_id; NULL:
+    everyone's, as before)."""
+    for t in ("threads", "runs", "trash"):
+        c.execute(f"ALTER TABLE {t} ADD COLUMN user_id TEXT")
+
+
 def _v20_sync_everything(c):
     """Sync every table the user's work lives in, keyed by each table's own primary key."""
     c.execute("UPDATE sync_rows SET pk=json_array(pk) WHERE pk NOT LIKE '[%'")
@@ -343,7 +350,7 @@ def _v18_trash(c):
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
-              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything]
+              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything, _v21_owners]
 
 
 def config():
@@ -352,6 +359,7 @@ def config():
 
 
 _home = contextvars.ContextVar("p2b_home", default=None)
+_viewer = contextvars.ContextVar("p2b_viewer", default=None)
 
 
 def multi():
@@ -379,6 +387,40 @@ def at_home(path):
         _home.reset(token)
 
 
+@contextmanager
+def viewing(user):
+    """Inside (a member's request to a shared space): only their own discussions and agent runs exist, and the ones they
+    start are stamped theirs. user: {"id", "library"} or None for everything."""
+    token = _viewer.set(user)
+    try:
+        yield
+    finally:
+        _viewer.reset(token)
+
+
+def viewer():
+    return _viewer.get()
+
+
+def _private(conn, uid):
+    """Temp views named like the private tables shadow them for every unqualified query on this connection, so no
+    query can show another member's discussion or run; writes pass through to the real table (main.*)."""
+    if not re.fullmatch(r"[0-9a-f]{32}", uid):
+        raise ValueError(f"bad user id: {uid!r}")
+    mine = f"(user_id IS NULL OR user_id='{uid}')"
+    for t, where in (("threads", mine), ("runs", mine), ("trash", mine), ("messages", f"thread_id IN (SELECT id FROM main.threads WHERE {mine})")):
+        cols = conn.execute(f"PRAGMA main.table_info({t})").fetchall()
+        names = [c["name"] for c in cols]
+        new = [f"coalesce(NEW.user_id, '{uid}')" if c["name"] == "user_id" else
+               f"coalesce(NEW.{c['name']}, {c['dflt_value']})" if c["dflt_value"] is not None else f"NEW.{c['name']}" for c in cols]
+        conn.execute(f"CREATE TEMP VIEW {t} AS SELECT rowid AS rowid, * FROM main.{t} WHERE {where}")
+        conn.execute(f"CREATE TEMP TRIGGER {t}_i INSTEAD OF INSERT ON {t} BEGIN "
+                     f"INSERT INTO main.{t} ({', '.join(names)}) VALUES ({', '.join(new)}); END")
+        conn.execute(f"CREATE TEMP TRIGGER {t}_u INSTEAD OF UPDATE ON {t} BEGIN "
+                     f"UPDATE main.{t} SET {', '.join(f'{n}=NEW.{n}' for n in names)} WHERE id=OLD.id; END")
+        conn.execute(f"CREATE TEMP TRIGGER {t}_d INSTEAD OF DELETE ON {t} BEGIN DELETE FROM main.{t} WHERE id=OLD.id; END")
+
+
 def spawn(fn, *args):
     """A daemon thread that keeps the caller's library (a plain Thread starts with no context)."""
     threading.Thread(target=contextvars.copy_context().run, args=(fn, *args), daemon=True).start()
@@ -403,6 +445,7 @@ def _row(r):
     if r is None:
         return None
     d = dict(r)
+    d.pop("rowid", None)  # the private views (_private) carry it along for ORDER BY rowid
     for k in JSON_COLS & d.keys():
         if d[k] is not None:
             d[k] = json.loads(d[k])
@@ -543,9 +586,12 @@ def copy_research(rid, dst):
     with at_home(dst), tx() as c:
         c.execute("PRAGMA foreign_keys=OFF")  # what was left behind is unlinked below instead
         c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
+        u = (_viewer.get() or {}).get("id")  # a member takes along only their own discussions and runs
+        mine = {"threads": " AND (user_id IS NULL OR user_id=:u)", "runs": " AND (user_id IS NULL OR user_id=:u)",
+                "messages": " AND thread_id IN (SELECT id FROM s.threads WHERE user_id IS NULL OR user_id=:u)"} if u else {}
         for t, cond in _COPY:
             cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({t})"))
-            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE {cond}", {"r": rid})
+            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE ({cond}){mine.get(t, '')}", {"r": rid, "u": u})
         r = {"r": rid}
         c.execute(f"UPDATE threads SET agent_id=NULL WHERE {where['threads']}", r)  # the other library starts its own agents
         c.execute("UPDATE threads SET parent_id=NULL WHERE parent_id NOT IN (SELECT id FROM threads)")
@@ -562,6 +608,19 @@ def copy_research(rid, dst):
     for f in folders + [Path("diagrams") / rid, Path("assets") / "research" / rid]:
         if (src / f).is_dir():
             shutil.copytree(src / f, Path(dst) / f, symlinks=True, dirs_exist_ok=True)
+
+
+def own_unowned(uid):
+    """A new space's discussions and runs, all copied from uid's library, are uid's own there."""
+    with tx() as c:
+        for t in ("threads", "runs"):
+            c.execute(f"UPDATE main.{t} SET user_id=? WHERE user_id IS NULL", (uid,))
+
+
+def research_of_paper(pid):
+    """The researches here that use this paper (for a personal library's paper page, from the spaces the user is in)."""
+    with tx() as c:
+        return _research_for(c, "paper", [pid]).get(pid, [])
 
 
 def _migrate(conn):
@@ -592,6 +651,8 @@ def tx():
         if key not in _initialized:
             _migrate(conn)
             _initialized.add(key)
+        if _viewer.get():
+            _private(conn, _viewer.get()["id"])
         with conn:
             yield conn
     finally:
@@ -1568,10 +1629,10 @@ def _threads_of(c, scopes):
 def _start_thread(c, scope, text=None, parent_id=None, tid=None, fork=None):
     """A user who opens a discussion from another one placed it there (parent_by='user')."""
     tid = tid or new_id()
-    added = c.execute("INSERT OR IGNORE INTO threads (id, created_at, scope, parent_id, parent_by, fork_message_id) VALUES (?,?,?,?,?,?)",
-                      (tid, now(), scope, parent_id, parent_id and "user", fork)).rowcount
+    added = c.execute("INSERT OR IGNORE INTO main.threads (id, created_at, scope, parent_id, parent_by, fork_message_id, user_id) "
+                      "VALUES (?,?,?,?,?,?,?)", (tid, now(), scope, parent_id, parent_id and "user", fork, (_viewer.get() or {}).get("id"))).rowcount
     if added and (text or "").strip():
-        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (new_id(), now(), tid, "user", text.strip(), None))
+        c.execute("INSERT INTO messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (new_id(), now(), tid, "user", text.strip(), None))
     return tid
 
 
@@ -1580,7 +1641,7 @@ def _drop_threads(c, ids):
     if not ids:
         return
     q = _qs(ids)
-    while c.execute(f"UPDATE threads SET parent_id=(SELECT p.parent_id FROM threads p WHERE p.id=threads.parent_id), "
+    while c.execute(f"UPDATE main.threads SET parent_id=(SELECT p.parent_id FROM main.threads p WHERE p.id=threads.parent_id), "
                     f"fork_message_id=NULL WHERE parent_id IN ({q}) AND id NOT IN ({q})", (*ids, *ids)).rowcount:
         pass
     c.execute(f"DELETE FROM messages WHERE thread_id IN ({q})", ids)
@@ -1714,7 +1775,7 @@ def set_thread_agent(thread_id, agent_id):
 def add_message(thread_id, role, text, run_id=None):
     mid = new_id()
     with tx() as c:
-        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
+        c.execute("INSERT INTO messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
     return mid
 
 
@@ -2388,7 +2449,7 @@ def update_run(run_id, **fields):
 def claim_run(run_id):
     """CREATING -> RUNNING, for exactly one taker."""
     with tx() as c:
-        return c.execute("UPDATE runs SET status='RUNNING', updated_at=? WHERE id=? AND status='CREATING'", (now(), run_id)).rowcount == 1
+        return c.execute("UPDATE main.runs SET status='RUNNING', updated_at=? WHERE id=? AND status='CREATING'", (now(), run_id)).rowcount == 1
 
 
 def get_run(run_id):

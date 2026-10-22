@@ -522,9 +522,14 @@ RUNNER_FRESH = 90  # seconds: the Mac asks again at least every ~25 s while it i
 PREFIX = {"tcodex": "tc-", "cursor": "cr-"}
 
 
+def _mac():
+    """The personal library whose Mac serves this request: the member's own in a space, else the library's agent member."""
+    return (store.viewer() or {}).get("library") or store.config().get("agent_library") or store.home().name
+
+
 def runner_info():
     """What the Mac that runs this library's agents last said about itself, while it keeps asking for work."""
-    info = _runners.get(store.config().get("agent_library") or store.home().name) or {}
+    info = _runners.get(_mac()) or {}
     return info if time.time() - info.get("at", 0) < RUNNER_FRESH else {}
 
 
@@ -549,7 +554,7 @@ def wait_for_work(lib, seconds):
 
 
 def _remote(op, timeout, **args):
-    lib, cid, done = store.config().get("agent_library") or store.home().name, str(uuid.uuid4()), threading.Event()
+    lib, cid, done = _mac(), str(uuid.uuid4()), threading.Event()
     with _calls_lock:
         _answers[cid] = {"event": done, "lib": lib}
         _calls.setdefault(lib, []).append({"backend": "api", "call_id": cid, "op": op, "timeout": timeout, **args})
@@ -588,10 +593,12 @@ def _queue(r, prefix):
         pump()
 
 
-def claim(libraries, mine, backends, machine=None, models=None, take=None):
+def claim(libraries, user, backends, machine=None, models=None, take=None):
     """For a member's Mac: the oldest run (or quick search call) waiting for one of its backends in the libraries
     whose agents it runs, now running there. It says which backends it has, its worker's name and its Cursor
-    account's models; take: the backends it has room for now (all when not given)."""
+    account's models; take: the backends it has room for now (all when not given). In a space it takes the member's
+    own runs, and the unowned ones when the space's background work is theirs."""
+    mine = user["library"]
     old = _runners.get(mine, {})
     models = [m for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)][:300] if isinstance(models, list) else old.get("models", [])
     _runners[mine] = {"at": time.time(), "backends": [b for b in backends if b in (*BACKENDS, "api")] if isinstance(backends, list) else [],
@@ -605,7 +612,8 @@ def claim(libraries, mine, backends, machine=None, models=None, take=None):
     for lib in libraries:
         with store.at_home(store.library_home(lib)):
             for r in store.unfinished_runs():
-                if prefixes and r["id"].startswith(prefixes) and r["status"] == "CREATING" and store.claim_run(r["id"]):
+                ours = r["user_id"] == user["id"] if r["user_id"] else lib == mine or store.config_of(lib).get("agent_library") == mine
+                if ours and prefixes and r["id"].startswith(prefixes) and r["status"] == "CREATING" and store.claim_run(r["id"]):
                     launch, codex = r["launch"] or {}, r["id"].startswith("tc-")
                     job = {"backend": "tcodex" if codex else "cursor", "library": lib, "run_id": r["id"], "agent_id": r["agent_id"],
                            "prompt": r["prompt"], "model": launch.get("model"),

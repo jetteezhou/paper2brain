@@ -179,7 +179,7 @@ class Multi(unittest.TestCase):
         accounts.redeem(accounts.invite("join", space, "editor"), user=b)
         home_list = self.call("/api/research?shared=1", cookie=f"p2b_session={ta}")[1]
         self.assertEqual({(x["title"], (x.get("space") or {}).get("name")) for x in home_list}, {("别的研究", None), ("共享的研究", "组会")})
-        self.assertEqual([x["title"] for x in self.call("/api/research", cookie=f"p2b_session={ta}")[1]], ["共享的研究", "别的研究"])  # pickers: own only, the original included
+        self.assertEqual([x["title"] for x in self.call("/api/research", cookie=f"p2b_session={ta}")[1]], ["别的研究"])  # pickers: own only, not the pointer
         with store.at_home(store.library_home(space)):
             store.add_message(tid, "user", "在空间里加的")
             (overleaf.local_dir(pid) / "main.tex").write_text("空间里又改的")
@@ -211,6 +211,35 @@ class Multi(unittest.TestCase):
             self.assertTrue((overleaf.local_dir(pid) / "main.tex").is_file())  # "二" still writes here
         with store.at_home(store.library_home(space)):
             self.assertTrue((overleaf.local_dir(pid) / "main.tex").is_file())
+
+    def test_in_a_space_each_member_sees_and_runs_only_their_own_discussions(self):
+        self.url = self.serve()
+        a, ta = self.user("甲")
+        b, _ = self.user("乙")
+        rid, tid, _ = self.research_with_material(a["library"])
+        with store.at_home(store.library_home(a["library"])):
+            space = accounts.create_space(a, "组会", rid)
+        accounts.redeem(accounts.invite("join", space, "editor"), user=b)
+        here = store.library_home(space)
+        with store.at_home(here), store.viewing(b):
+            mine = store.new_thread("library", text="乙的想法")
+            store.add_run("cr-b", "ag-b", "chat", mine, "p", "CREATING")
+            with self.assertRaises(Exception):
+                store.thread_for(thread_id=tid)  # 甲's discussion, brought along when sharing
+            self.assertTrue(store.get_research(rid))  # the research itself is everyone's
+        with store.at_home(here), store.viewing(a):
+            self.assertTrue(store.thread_for(thread_id=tid))
+            with self.assertRaises(Exception):
+                store.thread_for(thread_id=mine)
+            self.assertIsNone(store.get_run("cr-b"))
+            self.assertFalse(any(m["thread_id"] == mine for m in store.search("乙的想法")["messages"]))
+        self.assertIsNone(cursor_api.claim(accounts.agent_libraries(a), a, ["cursor"]))  # 乙's run waits for 乙's Mac
+        self.assertEqual(cursor_api.claim(accounts.agent_libraries(b), b, ["cursor"])["run_id"], "cr-b")
+        with store.at_home(store.library_home(a["library"])):
+            pid = next(l["ref"] for l in store.get_research(rid)["links"] if l["kind"] == "paper")
+        got = self.call(f"/api/papers/{pid}", cookie=f"p2b_session={ta}")[1]["research"]
+        self.assertEqual([(x["id"], x["space"]["id"]) for x in got], [(rid, space)])  # the pointer leads to the space
+        self.assertEqual(self.call(f"/api/research/{rid}", cookie=f"p2b_session={ta}")[1]["space"]["id"], space)
 
     def test_http_sign_in_isolation_and_roles(self):
         self.url = self.serve()

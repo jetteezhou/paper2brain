@@ -12,7 +12,7 @@ import { Chat } from './discuss.js';
 const STAGE = { forming: ['构思中', 'chip amber'], established: ['已确立', 'chip green-solid'] };
 export const StageChip = ({ stage }) => html`<span class=${STAGE[stage][1]}>${STAGE[stage][0]}</span>`;
 export const ROLE_NAME = { method: '方法借鉴', baseline: 'baseline', support: '支持证据', counter: '反面证据', reproduce: '待复现' };
-export const ResearchChip = ({ x }) => html`<a href="#" class="chip research-chip" title="打开这个研究" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); openResearch(x.id); }}>${STAGE[x.stage][0]} · ${short(x.title, 22)}${x.role ? ` · 作为 ${ROLE_NAME[x.role]}` : ''}</a>`;
+export const ResearchChip = ({ x }) => html`<a href="#" class="chip research-chip" title="打开这个研究" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); x.space ? openShared(x) : openResearch(x.id); }}>${STAGE[x.stage][0]} · ${short(x.title, 22)}${x.role ? ` · 作为 ${ROLE_NAME[x.role]}` : ''}</a>`;
 const ElementsChip = ({ n }) => html`<span class=${`chip ${n === 3 ? 'green' : ''}`} title="研究问题 / 研究方法 / 验证方案">三要素 ${n}/3</span>`;
 
 const FIELDS = [
@@ -752,6 +752,7 @@ function ResearchDetail({ id }) {
   const [tab, setTab] = useState(tabOf[id] || 'overview');
   const focus = researchFocus.value;
   useEffect(() => { if (focus?.id === id && focus.tab) setTab(focus.tab); }, [focus, id]);
+  useEffect(() => { if (x?.space) openShared(x); }, [x?.space?.id]);  // a pointer in the personal library
   if (err) return html`<div class="empty"><b>打不开</b>${err}</div>`;
   if (!x) return html`<div class="empty"><span class="spin"></span></div>`;
   const exps = x.experiments, by = (c) => exps.filter((e) => e.conclusion === c).length, ps = planStats(x.plan.tasks);

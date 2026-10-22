@@ -65,6 +65,25 @@ def _account():
             "login": accounts.login_name(me["user"]["id"]), "admin": accounts.is_admin(me["user"]["id"])}
 
 
+@contextlib.contextmanager
+def _scope(me):
+    """A request works in its library; in a shared space it sees only the member's own discussions and runs."""
+    with store.at_home(store.library_home(me["library"])), store.viewing(me["user"] if me["library"] != me["user"]["library"] else None):
+        yield
+
+
+def _shared(me):
+    """{research id: its space} for the spaces this user is in; in their personal library such a research is a pointer."""
+    out = {}
+    if store.multi() and me["library"] == me["user"]["library"]:
+        for lib in accounts.libraries(me["user"]["id"]):
+            if lib["kind"] == "space":
+                with store.at_home(store.library_home(lib["id"])), store.viewing(me["user"]):
+                    for x in store.list_research():
+                        out[x["id"]] = {**x, "space": {"id": lib["id"], "name": lib["name"], "role": lib["role"]}}
+    return out
+
+
 def _owner():
     if store.multi() and _me().get("role") != "owner":
         raise rules.Rejected("只有这个空间的所有者能做这一步")
@@ -123,7 +142,7 @@ def runner_claim(q, body):
     me = _me()["user"]
     deadline = time.time() + min(max(float(body.get("wait", 25)), 0), 25)
     while True:
-        job = cursor_api.claim(accounts.agent_libraries(me), me["library"], body.get("backends"), body.get("machine"), body.get("models"),
+        job = cursor_api.claim(accounts.agent_libraries(me), me, body.get("backends"), body.get("machine"), body.get("models"),
                                body.get("take"))
         if job or time.time() >= deadline:
             return {"job": job}
@@ -185,7 +204,7 @@ def admin_backups(q, body):
 @route("POST", "/api/admin/restore")
 def admin_restore(q, body):
     """Roll a whole library, or one research in it, back to a snapshot."""
-    with _admin(body):
+    with _admin(body), store.viewing(None):  # every member's discussions roll back, not just the admin's
         store.restore(body.get("backup"), body.get("research_id") or None)
     return {"ok": True}
 
@@ -376,6 +395,12 @@ def _paper(pid):
 @route("GET", "/api/papers/([^/]+)")
 def paper_get(q, body, pid):
     p = _paper(pid)
+    if store.multi():  # the shared researches using it count too; their pointers here are left out
+        shared, me = _shared(_me()), _me()
+        p["research"] = [x for x in p["research"] if x["id"] not in shared]
+        for lib in {x["space"]["id"]: x["space"] for x in shared.values()}.values():
+            with store.at_home(store.library_home(lib["id"])), store.viewing(me["user"]):
+                p["research"] += [{**x, "space": lib} for x in store.research_of_paper(pid)]
     s = structure.get(pid)
     return {**p, "figures": s["figures"], "key_figures": structure.key_figures(s, p["card"]), "outline": s["outline"],
             "key_sections": s["key"], "zh": translate.status(p)}
@@ -546,16 +571,9 @@ def message_get(q, body, mid):
 @route("GET", "/api/research")
 def research_list(q, body):
     """shared=1 in a personal library on the shared server: also the researches of the spaces the user is in."""
-    out = store.list_research("" if q.get("unsorted") else q.get("topic"))
-    me = _me()
-    if q.get("shared") and store.multi() and me["library"] == me["user"]["library"]:
-        for lib in accounts.libraries(me["user"]["id"]):
-            if lib["kind"] == "space":
-                with store.at_home(store.library_home(lib["id"])):
-                    out += [{**x, "space": {"id": lib["id"], "name": lib["name"], "role": lib["role"]}} for x in store.list_research()]
-        shared = {x["id"] for x in out if x.get("space")}
-        out = [x for x in out if x.get("space") or x["id"] not in shared]  # the space's copy is the one to work on
-    return out
+    shared = _shared(_me()) if store.multi() else {}
+    out = [x for x in store.list_research("" if q.get("unsorted") else q.get("topic")) if x["id"] not in shared]  # pointers
+    return out + list(shared.values()) if q.get("shared") else out
 
 
 @route("POST", "/api/research")
@@ -573,6 +591,9 @@ def _research(rid):
 
 @route("GET", "/api/research/([^/]+)")
 def research_get(q, body, rid):
+    """A pointer in the personal library answers with its space, and the page opens the research there."""
+    if store.multi() and rid in (shared := _shared(_me())):
+        return shared[rid]
     x = _research(rid)
     if x["writing"]["overleaf"]:
         x["overleaf_changed"] = overleaf.changed(x["writing"]["overleaf"])
@@ -1198,7 +1219,7 @@ class Handler(BaseHTTPRequestHandler):
             if refused:
                 return self._json(refused[0], {"error": refused[1]})
             if me:
-                scope = store.at_home(store.library_home(me["library"]))
+                scope = _scope(me)
         for m, pattern, fn in ROUTES:
             # match before unquoting: paper IDs such as DOIs contain "/" (sent as %2F)
             match = pattern.match(url.path) if m == method else None

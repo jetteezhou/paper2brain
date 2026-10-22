@@ -327,6 +327,8 @@ def create_space(user, name, research_id):
             c.execute("DELETE FROM libraries WHERE id=?", (lib,))
         raise
     write_config(lib, agent_library=user["library"])
+    with store.at_home(store.library_home(lib)):
+        store.own_unowned(user["id"])  # the owner's discussions of it come along, private to them
     _carry_overleaf(research_id, store.library_home(lib))  # the checkout moves: two copies must not both write the project
     return lib
 
@@ -352,7 +354,7 @@ def move_home(user, space, research_id):
 
 
 def agent_member(library):
-    """The member whose Cursor key and worker run the space's agents."""
+    """The member whose Mac does the space's background agent work (runs nobody started); a member's own runs go to their own Mac."""
     lib = store.config_of(library).get("agent_library")
     with _db() as c:
         r = c.execute("SELECT id FROM users WHERE library=?", (lib,)).fetchone()
@@ -369,9 +371,9 @@ def set_agent(library, user_id):
 
 
 def agent_libraries(user):
-    """Libraries whose agents run on this user's key: their own, and spaces that chose them (while they may edit)."""
-    return [x["id"] for x in libraries(user["id"]) if x["id"] == user["library"]
-            or (x["role"] != "viewer" and store.config_of(x["id"]).get("agent_library") == user["library"])]
+    """Libraries where this user's Mac runs agents: their own, and every space they may edit (their own runs there,
+    and the space's unowned background work when the space chose them, cursor_api.claim)."""
+    return [x["id"] for x in libraries(user["id"]) if x["id"] == user["library"] or x["role"] != "viewer"]
 
 
 def agent_library(user, agent_id=None, wanted=None):
