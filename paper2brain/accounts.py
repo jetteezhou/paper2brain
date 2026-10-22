@@ -103,9 +103,8 @@ def auth(token):
 
 
 def invite(kind="join", library=None, role=None, user_id=None, by=None):
-    """A one-time code. join: a new account (an existing one just joins), into library as role when given;
-    login: signs user_id in on another device."""
-    if kind not in ("join", "login") or (library and role not in ROLES[:2]):
+    """A one-time code for a new account (an existing one just joins), into library as role when given."""
+    if kind != "join" or (library and role not in ROLES[:2]):
         raise rules.Rejected("邀请的角色是 viewer 或 editor")
     code = secrets.token_urlsafe(24)
     with _db() as c:
@@ -119,16 +118,10 @@ def redeem(code, name=None, user=None, password=None):
     A new account signs in with its name and password from then on."""
     with _db() as c:
         inv = c.execute("SELECT * FROM invites WHERE hash=?", (_hash(code or ""),)).fetchone()
-        if not inv or inv["used_at"] or inv["expires_at"] < _now():
+        if not inv or inv["kind"] != "join" or inv["used_at"] or inv["expires_at"] < _now():
             raise rules.Rejected("链接无效、已用过或已过期，请向邀请你的人要一个新的")
         c.execute("UPDATE invites SET used_at=? WHERE hash=?", (_now(), inv["hash"]))
-        if inv["kind"] == "login":
-            r = c.execute("SELECT * FROM users WHERE id=?", (inv["user_id"],)).fetchone()
-            if name or password:  # a login link is for the account's owner: whoever types credentials must prove they are theirs
-                lg = c.execute("SELECT * FROM logins WHERE user_id=?", (r["id"],)).fetchone()
-                _check(f"link:{r['id']}", lg if lg and lg["name"].lower() == (name or "").strip().lower() else None, password, "这是别人的登录链接，用户名或密码不对")
-            user, fresh = dict(id=r["id"], name=r["name"], library=r["library"]), True
-        elif user:
+        if user:
             fresh = False
         else:
             name = (name or "").strip()
@@ -140,9 +133,9 @@ def redeem(code, name=None, user=None, password=None):
             lib = _new_library(c, f"{name} 的论文库", "personal", uid)
             c.execute("UPDATE users SET library=? WHERE id=?", (lib, uid))
             user, fresh = dict(id=uid, name=name, library=lib), True
-        if inv["kind"] == "join" and inv["library"] and c.execute("SELECT 1 FROM libraries WHERE id=?", (inv["library"],)).fetchone():
+        if inv["library"] and c.execute("SELECT 1 FROM libraries WHERE id=?", (inv["library"],)).fetchone():
             c.execute("INSERT OR IGNORE INTO members VALUES (?,?,?)", (inv["library"], user["id"], inv["role"]))
-    return user, issue(user["id"], "web") if fresh else None, (inv["library"] if inv["kind"] == "join" else None) or user["library"]
+    return user, issue(user["id"], "web") if fresh else None, inv["library"] or user["library"]
 
 
 # ---------- login names and passwords ----------

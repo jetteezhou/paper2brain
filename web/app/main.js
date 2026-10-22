@@ -480,15 +480,12 @@ function Account() {
       <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />
       <div style="text-align:right"><button class="btn sm primary">共享到新空间</button></div></form>`}
   <div class="block-title" style="margin-top:14px">登录名和密码<span class="line"></span></div>
-  <p class="hint" style="margin-top:0">${acc.login ? `登录名：${acc.login}。在任何设备打开 ${location.origin} ，输入登录名和密码即可。` : '还没设密码：设好后在任何设备打开这个网址就能登录，不用再传登录链接。'}</p>
+  <p class="hint" style="margin-top:0">${acc.login ? `登录名：${acc.login}。在任何设备打开 ${location.origin} ，输入登录名和密码即可。` : '还没设密码：设好后在任何设备打开这个网址就能登录，'}</p>
   <form class="research-create" onSubmit=${savePassword}>
     <input name="name" defaultValue=${acc.login || acc.user.name} maxlength="40" aria-label="登录名" autocomplete="username" />
     ${acc.login ? html`<input name="old" type="password" placeholder="当前密码" aria-label="当前密码" autocomplete="current-password" />` : null}
     <input name="password" type="password" placeholder="新密码（至少 8 位）" aria-label="新密码" autocomplete="new-password" />
-    <div style="text-align:right"><button class="btn sm primary">${acc.login ? '修改' : '设置密码'}</button></div></form>
-  <div class="block-title" style="margin-top:14px">在其他设备登录<span class="line"></span></div>
-  ${got.login ? html`<p class="hint" style="margin-top:0">在那台设备的浏览器里打开（一次有效）：</p><${Copyable} text=${joinLink(got.login.code)} />`
-    : html`<button class="btn sm" onClick=${() => call('login', '/api/me/login-link', {})}>生成登录链接</button>`}`;
+    <div style="text-align:right"><button class="btn sm primary">${acc.login ? '修改' : '设置密码'}</button></div></form>`;
 }
 
 function Setup() {

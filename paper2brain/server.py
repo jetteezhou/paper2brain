@@ -94,12 +94,6 @@ def library_switch(q, body):
     return {"ok": True, "_cookies": {"p2b_lib": body["library"]}}
 
 
-@route("POST", "/api/me/login-link")
-def login_link(q, body):
-    """A one-time code that signs this account in on another device (the page turns it into a link)."""
-    return {"code": accounts.invite("login", user_id=_me()["user"]["id"])}
-
-
 @route("POST", "/api/me/agent-token")
 def agent_token(q, body):
     """The token setup.sh of paper2brain-client puts on the user's Mac; a new one replaces the old."""
@@ -1065,7 +1059,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # account routes work in any library, also for a viewer; an agent token reaches only AGENT
     AGENT = {"/api/agent/connect", "/api/cli", "/api/runner/claim", "/api/runner/update"}
-    ACCOUNT = {"/api/join", "/api/login", "/api/libraries/switch", "/api/me/login-link", "/api/me/agent-token", "/api/me/password", *AGENT}
+    ACCOUNT = {"/api/join", "/api/login", "/api/libraries/switch", "/api/me/agent-token", "/api/me/password", *AGENT}
 
     def _who(self, method, path, body):
         """On the shared server: (who is asking and in which library, None) or (None, (code, error)).

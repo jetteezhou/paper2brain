@@ -89,7 +89,7 @@ sudo ops/server.sh p2b.example.com    # 依赖、Chromium、systemd 服务 paper
 
 数据在 `/var/lib/paper2brain`（`hub.sqlite` 是账号和成员，`libs/<库 id>/` 是各个论文库，每个库每天自己备份到 `backups/`）。再要邀请新账号：`sudo -u <运行用户> env P2B_ROOT=/var/lib/paper2brain ./p2b admin invite --url https://p2b.example.com`；已有账号的人也可以在共享空间里直接生成邀请链接，对方用它就会顺便建好账号。
 
-**每个人的 Mac**：打开邀请链接、写名字；在网页左下角"Agent"设置里点"生成本机 agent 的口令"，照着显示的命令在终端里运行。成员的 Mac 用的是单独的仓库 [paper2brain-client](https://github.com/jetteezhou/paper2brain-client)（`setup.sh <服务器地址> <口令>`：问一次 Cursor API key 和快速搜索接口，登记到服务器上这个人的论文库，把 worker 和 TCodex 装成开机自启）。它只有转发 `./p2b` 和运行 TCodex 的少量代码，基本不变；agent 的工作规范 `librarian/` 每个任务开始时用 `./p2b guide` 从服务器取，所以服务代码和规范怎么改，成员都不用更新客户端。换设备登录用设置里的"生成登录链接"。
+**每个人的 Mac**：打开邀请链接、写名字；在网页左下角"Agent"设置里点"生成本机 agent 的口令"，照着显示的命令在终端里运行。成员的 Mac 用的是单独的仓库 [paper2brain-client](https://github.com/jetteezhou/paper2brain-client)（`setup.sh <服务器地址> <口令>`：问一次 Cursor API key 和快速搜索接口，登记到服务器上这个人的论文库，把 worker 和 TCodex 装成开机自启）。它只有转发 `./p2b` 和运行 TCodex 的少量代码，基本不变；agent 的工作规范 `librarian/` 每个任务开始时用 `./p2b guide` 从服务器取，所以服务代码和规范怎么改，成员都不用更新客户端。换设备用登录名和密码登录。
 
 ## 连接 Cursor agent
 
