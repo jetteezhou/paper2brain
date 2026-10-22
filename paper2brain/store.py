@@ -606,6 +606,22 @@ def copy_research(rid, dst):
             shutil.copytree(src / f, Path(dst) / f, symlinks=True, dirs_exist_ok=True)
 
 
+def copy_paper(pid, dst):
+    """A paper (row, full text, files) from here into the library at dst, which keeps its own if it has one."""
+    src, folder = home(), Path("papers") / pid.replace(":", "_").replace("/", "_")
+    with at_home(dst), tx() as c:
+        c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
+        for t, col in (("papers", "id"), ("paper_text", "paper_id")):
+            cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({t})"))
+            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE {col}=?", (pid,))
+        old, new = str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/"
+        c.execute("UPDATE papers SET pdf_path = ? || substr(pdf_path, ?) WHERE id=? AND substr(pdf_path, 1, ?) = ?", (new, len(old) + 1, pid, len(old), old))
+        c.commit()
+        c.execute("DETACH DATABASE s")
+    if (src / folder).is_dir() and not (Path(dst) / folder).exists():
+        shutil.copytree(src / folder, Path(dst) / folder, symlinks=True)
+
+
 def own_unowned(uid):
     """A new space's discussions and runs, all copied from uid's library, are uid's own there."""
     with tx() as c:

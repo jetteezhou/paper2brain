@@ -131,8 +131,33 @@ def cli_remote(q, body):
     """./p2b from an agent on a member's Mac (paper2brain-client); the server chose the library already."""
     if not isinstance(body.get("argv"), list) or not isinstance(body.get("files") or {}, dict):
         raise rules.Rejected("请求格式不对")
-    out, files = cli.run_remote(body["argv"], body.get("files") or {})
+    argv, me = [str(a) for a in body["argv"]], _me()
+    space = _pointer_space(me, argv) if store.multi() else None
+    if not space:
+        out, files = cli.run_remote(argv, body.get("files") or {})
+        return {"out": out, "files": files}
+    if space["role"] == "viewer" and not {"show", "list"} & set(argv[:2]):
+        raise rules.Rejected(f"这个研究在共享空间「{space['name']}」里，你在那里只能查看")
+    if argv[:2] == ["research", "link"] and len(argv) > 4 and argv[3] == "paper":  # a paper of mine joins the shared research
+        store.copy_paper(cli.to_pid(argv[4]), store.library_home(space["id"]))
+    with store.at_home(store.library_home(space["id"])), store.viewing(me["user"]):
+        out, files = cli.run_remote(argv, body.get("files") or {})
     return {"out": out, "files": files}
+
+
+def _pointer_space(me, argv):
+    """From the personal library, a command about a shared research (its id, or one of its experiments) runs in its
+    space: the pointer here keeps only what was there when it was shared."""
+    shared, tokens = _shared(me), set(argv)
+    for rid, x in shared.items():
+        if rid in tokens:
+            return x["space"]
+    if argv[:1] == ["experiment"]:
+        for sp in {x["space"]["id"]: x["space"] for x in shared.values()}.values():
+            with store.at_home(store.library_home(sp["id"])), store.viewing(me["user"]):
+                if any(store.get_experiment(t) for t in argv[2:3]):
+                    return sp
+    return None
 
 
 @route("POST", "/api/runner/claim")
@@ -580,6 +605,12 @@ def research_list(q, body):
 def research_add(q, body):
     links = [(x["kind"], x["ref"]) for x in body.get("links") or []]
     return store.get_research(store.add_research(body.get("title"), "user", body.get("summary"), body.get("topics") or [], links))
+
+
+def _not_pointer(rid):
+    """In the personal library a shared research is only a pointer: changes go to the space."""
+    if rid in (shared := _shared(_me())):
+        raise rules.Rejected(f"这个研究已共享到「{shared[rid]['space']['name']}」，请到空间里改")
 
 
 def _research(rid):
@@ -1227,6 +1258,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     accounts.ME.set(me)
                     with scope:
+                        if me and method != "GET" and url.path.startswith("/api/research/"):
+                            _not_pointer(urllib.parse.unquote(url.path.split("/")[3]))
                         out = fn(q, body, *map(urllib.parse.unquote, match.groups()))
                 except rules.Rejected as e:
                     return self._json(400, {"error": str(e)})

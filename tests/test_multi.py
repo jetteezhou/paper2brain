@@ -241,6 +241,27 @@ class Multi(unittest.TestCase):
         self.assertEqual([(x["id"], x["space"]["id"]) for x in got], [(rid, space)])  # the pointer leads to the space
         self.assertEqual(self.call(f"/api/research/{rid}", cookie=f"p2b_session={ta}")[1]["space"]["id"], space)
 
+    def test_from_the_personal_library_a_shared_research_is_changed_in_its_space(self):
+        self.url = self.serve()
+        a, ta = self.user("甲")
+        rid, _, _ = self.research_with_material(a["library"])
+        with store.at_home(store.library_home(a["library"])):
+            space = accounts.create_space(a, "组会", rid)
+            store.upsert_paper("arxiv:2501.00001", "我后来读的")
+        with store.at_home(store.library_home(space)):
+            store.update_research(rid, title="空间里改过的")
+        agent = accounts.issue(a["id"], "agent")
+        cli = lambda *argv: self.call("/api/cli", {"argv": list(argv)}, bearer=agent)  # noqa: E731
+        self.assertEqual(cli("research", "show", rid)[1]["out"]["title"], "空间里改过的")  # not the pointer's old copy
+        self.assertEqual(cli("research", "link", rid, "paper", "arxiv:2501.00001")[0], 200)
+        with store.at_home(store.library_home(space)):
+            self.assertIn("arxiv:2501.00001", [l["ref"] for l in store.get_research(rid)["links"]])  # the paper came along
+        with store.at_home(store.library_home(a["library"])):
+            self.assertNotIn("arxiv:2501.00001", [l["ref"] for l in store.get_research(rid)["links"]])
+        code, got, _ = self.call(f"/api/research/{rid}", {"title": "改指针"}, cookie=f"p2b_session={ta}")
+        self.assertEqual(code, 400)
+        self.assertIn("组会", got["error"])
+
     def test_http_sign_in_isolation_and_roles(self):
         self.url = self.serve()
         a, ta = self.user("甲")
