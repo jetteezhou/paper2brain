@@ -124,6 +124,9 @@ def redeem(code, name=None, user=None, password=None):
         c.execute("UPDATE invites SET used_at=? WHERE hash=?", (_now(), inv["hash"]))
         if inv["kind"] == "login":
             r = c.execute("SELECT * FROM users WHERE id=?", (inv["user_id"],)).fetchone()
+            if name or password:  # a login link is for the account's owner: whoever types credentials must prove they are theirs
+                lg = c.execute("SELECT * FROM logins WHERE user_id=?", (r["id"],)).fetchone()
+                _check(f"link:{r['id']}", lg if lg and lg["name"].lower() == (name or "").strip().lower() else None, password, "这是别人的登录链接，用户名或密码不对")
             user, fresh = dict(id=r["id"], name=r["name"], library=r["library"]), True
         elif user:
             fresh = False
