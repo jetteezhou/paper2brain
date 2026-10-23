@@ -393,7 +393,9 @@ def validate_plan(tasks):
     return out
 
 
-FIGURE_KINDS = ("table", "bar", "line", "radar")
+FIGURE_KINDS = ("table", "bar", "hbar", "line", "radar")
+# full: the figure takes the page's whole width; half: it sits beside the next half-width figure.
+FIGURE_WIDTHS = ("full", "half")
 # The parts of a paper's Experiments section, in the order they appear.
 FIGURE_SECTIONS = ("main", "ablation", "analysis", "appendix")
 
@@ -486,6 +488,8 @@ def validate_figures(figures, context="", setup=None):
             errors.append(f"「{title}」kind 只能是 {' / '.join(FIGURE_KINDS)}")
         if f.get("section") not in FIGURE_SECTIONS:
             errors.append(f"「{title}」section 只能是 {' / '.join(FIGURE_SECTIONS)}")
+        if (f.get("width") or "full") not in FIGURE_WIDTHS:
+            errors.append(f"「{title}」width 只能是 {' / '.join(FIGURE_WIDTHS)}")
         if f.get("question") not in range(1, len(setup["questions"]) + 1):
             errors.append(f"「{title}」question 写它回答 setup.questions 里的第几个（1-{len(setup['questions'])}）")
         if not str(f.get("caption") or "").strip():
@@ -523,7 +527,7 @@ def validate_figures(figures, context="", setup=None):
         if fid in seen:
             errors.append(f"第 {i} 张 id 重复：{fid}")
         seen.add(fid)
-        out.append({"id": fid, "title": title[:80], "kind": f.get("kind"), "section": f.get("section"), "question": f.get("question"),
+        out.append({"id": fid, "title": title[:80], "kind": f.get("kind"), "width": f.get("width") or "full", "section": f.get("section"), "question": f.get("question"),
                     "caption": str(f.get("caption") or "").strip(), "claim": str(f.get("claim") or "").strip() or None, "metric": metric,
                     "rows": rows, "series": series, "x_title": str(f.get("x_title") or "").strip() or None,
                     "y_title": str(f.get("y_title") or "").strip() or None, "target": target})

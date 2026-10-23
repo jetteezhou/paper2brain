@@ -420,20 +420,7 @@ function ExpCard({ e }) {
 // ---------- experiment design: the paper's Experiments section, planned before the runs, filled by their results ----------
 
 const FIG_KIND = { table: '表', bar: '柱状图', hbar: '条形图', line: '折线图', radar: '雷达图' };
-/** What to draw. A stored table stays a table when the numbers are a wide matrix or mixed units; a same-metric
- * comparison with a few series is a bar (sideways past 8 categories); an ordered numeric axis is a line. */
-function present(f) {
-  if (f.kind === 'line' || f.kind === 'radar') return f.kind;
-  if (f.kind === 'bar') return f.rows.length > 8 ? 'hbar' : 'bar';
-  if (!f.metric || f.series.length > 4) return 'table';
-  if (f.rows.length >= 3 && f.rows.every((r) => /^\s*[+-]?\d/.test(r))) return 'line';
-  if (f.rows.length > 8) return 'hbar';
-  if (f.rows.length > 6 && f.series.length >= 4) return 'table';
-  return 'bar';
-}
-/** Wide matrices and long charts take the row; a short table or a small chart may sit beside another. */
-const spansRow = (f, how) => how === 'hbar' || how === 'table' && (f.series.length >= 3 || f.rows.length >= 8)
-  || how === 'bar' && (f.series.length >= 3 || f.rows.length >= 6) || how === 'line' && f.rows.length >= 8;
+const FIG_WIDTH = { full: '单栏', half: '双栏' };
 const FIG_SECTION = { main: '主结果', ablation: '消融实验', analysis: '分析', appendix: '附录' };
 const num = (v) => { const n = parseFloat(String(v).replace(/,/g, '')); return Number.isFinite(n) ? n : null; };
 const cellKey = (r, s) => `${r}\u0000${s}`;
@@ -448,7 +435,7 @@ const DESIGN_LINE = { benchmarks: named, baselines: named, controls: named, metr
 function numbered(figs) {
   const order = Object.keys(FIG_SECTION), n = { Table: 0, Figure: 0 };
   return [...figs].sort((a, b) => order.indexOf(a.section) - order.indexOf(b.section))
-    .map((f) => { const k = present(f) === 'table' ? 'Table' : 'Figure'; n[k] += 1; return [f, `${k} ${n[k]}`]; });
+    .map((f) => { const k = f.kind === 'table' ? 'Table' : 'Figure'; n[k] += 1; return [f, `${k} ${n[k]}`]; });
 }
 
 function DesignView({ d }) {
@@ -461,12 +448,12 @@ function DesignView({ d }) {
     ${d.implementation ? html`<div class="exp-row"><span class="hint">实现</span><${Html} cls="quotable" s=${inlineMd(d.implementation)} /></div>` : null}</div>`;
 }
 
-/** Consecutive short figures share a row; a wide table or a long chart keeps the row to itself. */
+/** Two consecutive half-width figures share a row; a full-width one (the default) keeps the row to itself. */
 function figRows(fs) {
   const rows = []; let buf = [];
   const flush = () => { if (buf.length) { rows.push(buf); buf = []; } };
   for (const item of fs) {
-    if (spansRow(item[0], present(item[0]))) { flush(); rows.push([item]); }
+    if (item[0].width !== 'half') { flush(); rows.push([item]); }
     else if (buf.push(item) === 2) flush();
   }
   flush();
@@ -501,7 +488,7 @@ function FigureCard({ x, f, d, label, remove }) {
     const m = colMetric(s), vals = f.rows.map((r) => at(r, s) && num(at(r, s).value)).filter((v) => v != null);
     return [s, m && vals.length > 1 ? (m.better === 'lower' ? Math.min : Math.max)(...vals) : null];
   }));
-  const how = present(f), yLabel = f.y_title || metricLabel(metricOf(d, f.metric));
+  const how = f.kind, yLabel = f.y_title || metricLabel(metricOf(d, f.metric));
   const axis = (t) => ({ title: { display: !!t, text: t || '' } });
   const chart = how !== 'table' && { type: how === 'hbar' ? 'bar' : how, data: { labels: f.rows, datasets: [
     ...f.series.map((s) => ({ label: s, data: f.rows.map((r) => (at(r, s) ? num(at(r, s).value) : null)), spanGaps: true })),
@@ -531,7 +518,7 @@ function FiguresProposal({ x }) {
   const names = (a, b, what) => { const add = b.filter((v) => !a.includes(v)), gone = a.filter((v) => !b.includes(v));
     return [add.length && `加${what}：${add.join('、')}`, gone.length && `删${what}：${gone.join('、')}`].filter(Boolean); };
   const diff = (o, f) => [o.title !== f.title && `改名：${o.title}`, o.section !== f.section && `${FIG_SECTION[o.section] || '未分节'} → ${FIG_SECTION[f.section]}`,
-    o.kind !== f.kind && `${FIG_KIND[o.kind]} → ${FIG_KIND[f.kind]}`, o.question !== f.question && `改答 Q${f.question}`, o.metric !== f.metric && `指标改为 ${f.metric || '按列'}`,
+    o.kind !== f.kind && `${FIG_KIND[o.kind]} → ${FIG_KIND[f.kind]}`, (o.width || 'full') !== (f.width || 'full') && `${FIG_WIDTH[o.width || 'full']} → ${FIG_WIDTH[f.width || 'full']}`, o.question !== f.question && `改答 Q${f.question}`, o.metric !== f.metric && `指标改为 ${f.metric || '按列'}`,
     ...names(o.rows, f.rows, '行'), ...names(o.series, f.series, '系列'), JSON.stringify(o.target) !== JSON.stringify(f.target) && '目标线有改动'].filter(Boolean);
   const texts = (o, f) => [['claim', '论点'], ['caption', '图注']].filter(([k]) => (o[k] || '') !== (f[k] || ''));
   const shape = (f) => `${FIG_SECTION[f.section]} · ${FIG_KIND[f.kind]} · ${f.rows.length} 行 × ${f.series.length} 系列${f.claim ? ` · ${f.claim}` : ''}`;

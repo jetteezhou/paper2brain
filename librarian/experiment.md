@@ -32,7 +32,13 @@
 
 - **按论文的位置放**（`section`）：`main` 主结果（我们 vs 全部 baseline，在全部基准上，通常是 Table 1；每个 baseline 都要进主结果）；`ablation` 消融（完整方法 vs 每次去掉一个关键模块的变体，变体名用"w/o 模块名"）；`analysis` 分析（随数据量、频率、模型规模等变化的趋势，失败模式，效率）；`appendix` 放进附录的补充结果。验证方案里的最小验证实验必须出现在主结果或第一张分析图里。
 - **每张图表回答一个研究问题**（`question` 写第几个）。每个研究问题至少有一张图表回答，回答不了任何问题的图不放。
-- **结构选读得最清的那一种**，不要一律做成表。多方法 × 多基准、或者系列是不同单位的指标，用 `table`（rows 是方法，series 是基准或指标，和论文主表一样）。同一指标、类别大约 8 个以内、系列不超过 4 个的对比和消融用 `bar`。类别很多（方法或任务超过 8 个）而系列少，也用 `bar`（界面会画成横向柱）。横轴是有顺序的量（数据量、频率、预算、步数）用 `line`（rows 是横轴取值，按顺序排）。同一方法在几个同量纲维度上的画像用 `radar`。宽表和长图自己占一行；只有两三列的短表、或一张小图，可以和旁边一张并排。
+- **图形由你按数据选读得最清的那一种**（`kind`），不要一律做成表，界面照你选的画：
+  - `table`：多方法 × 多基准的主表，或者系列是不同单位的指标（rows 是方法，series 是基准或指标，和论文主表一样）。
+  - `bar`：同一指标、类别不多（大约 8 个以内）、系列不超过 4 个的对比和消融。
+  - `hbar`：横向条形图，类别多（方法或任务十几个）或名字长，而系列少。
+  - `line`：横轴是有顺序的量（数据量、频率、预算、步数），rows 是横轴取值，按顺序排。
+  - `radar`：几个方法在同量纲的多个维度上的能力画像。
+- **栏宽也由你定**（`width`）：`full` 单栏，占满一行（默认；宽表、长图、主结果都用它）；`half` 双栏，和紧挨着的下一张 `half` 并排，适合只有两三列的短表或一张小图。相邻的两张都是 `half` 才会并排，落单的 `half` 独占一行。
 - **名字一致**：主结果里的方法只能来自 `method`、`baselines` 和 `controls`；`metric` 用 `setup.metrics` 里的（series 全是指标时省略）；基准用 `setup.benchmarks` 里的名字，需要平均列时写"Avg."。
 - **图注写成论文的样子**（`caption`）：用论文的语言写（论文用英文写就写英文），能直接贴进论文。说清这张图比较了什么、在什么设置下、指标是什么、方向（↑ / ↓）、n 和种子数、加粗表示什么。`claim` 用中文一句话写这张图要证明的结论（论文里 Results 段落的论点），例如"trigger 唤醒在四个任务集上不低于固定 5Hz，调用次数少一半"。
 - **title** 写简短的名字（"LIBERO 主结果"），**不写编号**：Table / Figure 的编号按 section 顺序和图表在列表里的顺序自动生成，所以按论文里出现的顺序排列。
@@ -57,7 +63,7 @@
    "implementation": "可选：模型、数据、算力、关键超参"},
  "figures": [{"id": "保留原有图的 id；新图省略",
    "title": "LIBERO 主结果", "section": "main | ablation | analysis | appendix", "question": 1,
-   "kind": "table | bar | line | radar", "metric": "Success Rate",
+   "kind": "table | bar | hbar | line | radar", "width": "full | half", "metric": "Success Rate",
    "rows": ["π0", "CheckVLA", "Fixed-rate (5Hz)", "TriggerVLA"], "series": ["LIBERO-Spatial", "LIBERO-Long", "Avg."],
    "caption": "Success rates (%, ↑) on LIBERO, averaged over 3 seeds with 50 rollouts per task. Best results in bold.",
    "claim": "一句话：这张图要证明什么",

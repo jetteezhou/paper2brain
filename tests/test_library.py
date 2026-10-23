@@ -442,13 +442,15 @@ class Store(unittest.TestCase):
         fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
                "rows": ["Spatial", "Object"], "series": ["ours", "pi0", "CheckVLA", "fixed-rate"], "target": {"value": 0.85}}
         figs = rules.validate_figures([fig], ctx, design)
+        self.assertEqual(figs[0]["width"], "full", "a figure that names no width takes the whole row")
+        self.assertEqual(rules.validate_figures([{**fig, "kind": "hbar", "width": "half"}], ctx, design)[0]["width"], "half")
         rules.check_coverage(design, figs)
         with self.assertRaisesRegex(rules.Rejected, r"\['CheckVLA'\] 没进主结果"):
             rules.check_coverage(design, rules.validate_figures([{**fig, "series": ["ours", "pi0"]}], ctx, design))
         for bad, msg in (({"target": {"value": 0.9}}, "三要素里找不到"), ({"rows": ["a", "a"]}, "不重复"), ({"kind": "pie"}, "kind"),
                          ({"series": ["ours", "OpenVLA"]}, "不在 setup.baselines"), ({"series": ["ours", "fixed-rate"]}, "已发表的 baseline"),
                          ({"metric": "acc"}, "不在 setup.metrics"), ({"question": 2}, "question"), ({"caption": ""}, "caption"),
-                         ({"section": "results"}, "section")):
+                         ({"section": "results"}, "section"), ({"width": "third"}, "width")):
             with self.assertRaisesRegex(rules.Rejected, msg):
                 rules.validate_figures([{**fig, **bad}], ctx, design)
         with self.assertRaisesRegex(rules.Rejected, "先定实验设置"):
