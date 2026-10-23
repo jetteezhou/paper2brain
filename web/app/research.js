@@ -382,7 +382,7 @@ const loadChart = () => chartjs ||= import('/vendor/chartjs/chart.umd.min.js').t
   return globalThis.Chart;
 });
 
-function ExpChart({ c }) {
+function ExpChart({ c, h }) {
   const ref = useRef();
   useEffect(() => {
     let chart, gone = false;
@@ -393,7 +393,7 @@ function ExpChart({ c }) {
     }).catch(fail);
     return () => { gone = true; chart?.destroy(); };
   }, [JSON.stringify(c)]);
-  return html`<div class="exp-chart"><canvas ref=${ref} role="img" aria-label=${c.title || '实验图表'}></canvas></div>`;
+  return html`<div class="exp-chart" style=${h ? { height: `${h}px` } : null}><canvas ref=${ref} role="img" aria-label=${c.title || '实验图表'}></canvas></div>`;
 }
 
 function ExpCard({ e }) {
@@ -419,7 +419,21 @@ function ExpCard({ e }) {
 
 // ---------- experiment design: the paper's Experiments section, planned before the runs, filled by their results ----------
 
-const FIG_KIND = { table: '表', bar: '柱状图', line: '折线图', radar: '雷达图' };
+const FIG_KIND = { table: '表', bar: '柱状图', hbar: '条形图', line: '折线图', radar: '雷达图' };
+/** What to draw. A stored table stays a table when the numbers are a wide matrix or mixed units; a same-metric
+ * comparison with a few series is a bar (sideways past 8 categories); an ordered numeric axis is a line. */
+function present(f) {
+  if (f.kind === 'line' || f.kind === 'radar') return f.kind;
+  if (f.kind === 'bar') return f.rows.length > 8 ? 'hbar' : 'bar';
+  if (!f.metric || f.series.length > 4) return 'table';
+  if (f.rows.length >= 3 && f.rows.every((r) => /^\s*[+-]?\d/.test(r))) return 'line';
+  if (f.rows.length > 8) return 'hbar';
+  if (f.rows.length > 6 && f.series.length >= 4) return 'table';
+  return 'bar';
+}
+/** Wide matrices and long charts take the row; a short table or a small chart may sit beside another. */
+const spansRow = (f, how) => how === 'hbar' || how === 'table' && (f.series.length >= 3 || f.rows.length >= 8)
+  || how === 'bar' && (f.series.length >= 3 || f.rows.length >= 6) || how === 'line' && f.rows.length >= 8;
 const FIG_SECTION = { main: '主结果', ablation: '消融实验', analysis: '分析', appendix: '附录' };
 const num = (v) => { const n = parseFloat(String(v).replace(/,/g, '')); return Number.isFinite(n) ? n : null; };
 const cellKey = (r, s) => `${r}\u0000${s}`;
@@ -434,7 +448,7 @@ const DESIGN_LINE = { benchmarks: named, baselines: named, controls: named, metr
 function numbered(figs) {
   const order = Object.keys(FIG_SECTION), n = { Table: 0, Figure: 0 };
   return [...figs].sort((a, b) => order.indexOf(a.section) - order.indexOf(b.section))
-    .map((f) => { const k = f.kind === 'table' ? 'Table' : 'Figure'; n[k] += 1; return [f, `${k} ${n[k]}`]; });
+    .map((f) => { const k = present(f) === 'table' ? 'Table' : 'Figure'; n[k] += 1; return [f, `${k} ${n[k]}`]; });
 }
 
 function DesignView({ d }) {
@@ -447,12 +461,24 @@ function DesignView({ d }) {
     ${d.implementation ? html`<div class="exp-row"><span class="hint">实现</span><${Html} cls="quotable" s=${inlineMd(d.implementation)} /></div>` : null}</div>`;
 }
 
+/** Consecutive short figures share a row; a wide table or a long chart keeps the row to itself. */
+function figRows(fs) {
+  const rows = []; let buf = [];
+  const flush = () => { if (buf.length) { rows.push(buf); buf = []; } };
+  for (const item of fs) {
+    if (spansRow(item[0], present(item[0]))) { flush(); rows.push([item]); }
+    else if (buf.push(item) === 2) flush();
+  }
+  flush();
+  return rows;
+}
+
 function Sections({ x, d, figs, remove }) {
   const list = numbered(figs);
   return Object.entries(FIG_SECTION).map(([k, name]) => {
     const fs = list.filter(([f]) => f.section === k);
     return fs.length ? html`<div class="fig-section"><div class="fig-section-title">${name}</div><div class="fig-grid">
-      ${fs.map(([f, label]) => html`<${FigureCard} key=${f.id} x=${x} f=${f} d=${d} label=${label} remove=${remove && (() => remove(f))} />`)}</div></div>` : null;
+      ${figRows(fs).map((row) => html`<div class="fig-row">${row.map(([f, label]) => html`<${FigureCard} key=${f.id} x=${x} f=${f} d=${d} label=${label} remove=${remove && (() => remove(f))} />`)}</div>`)}</div></div>` : null;
   });
 }
 
@@ -475,19 +501,21 @@ function FigureCard({ x, f, d, label, remove }) {
     const m = colMetric(s), vals = f.rows.map((r) => at(r, s) && num(at(r, s).value)).filter((v) => v != null);
     return [s, m && vals.length > 1 ? (m.better === 'lower' ? Math.min : Math.max)(...vals) : null];
   }));
+  const how = present(f), yLabel = f.y_title || metricLabel(metricOf(d, f.metric));
   const axis = (t) => ({ title: { display: !!t, text: t || '' } });
-  const chart = f.kind !== 'table' && { type: f.kind, data: { labels: f.rows, datasets: [
+  const chart = how !== 'table' && { type: how === 'hbar' ? 'bar' : how, data: { labels: f.rows, datasets: [
     ...f.series.map((s) => ({ label: s, data: f.rows.map((r) => (at(r, s) ? num(at(r, s).value) : null)), spanGaps: true })),
-    ...(f.target ? [{ ...(f.kind === 'bar' ? { type: 'line' } : {}), label: f.target.label || `目标 ${f.target.value}`, data: f.rows.map(() => f.target.value), borderDash: [6, 4], pointRadius: 0, fill: false }] : [])] },
-    options: f.kind === 'radar' ? {} : { scales: { x: axis(f.x_title), y: axis(f.y_title || metricLabel(metricOf(d, f.metric))) } } };
+    ...(f.target ? [{ ...(how === 'bar' || how === 'hbar' ? { type: 'line' } : {}), label: f.target.label || `目标 ${f.target.value}`, data: f.rows.map(() => f.target.value), borderDash: [6, 4], pointRadius: 0, fill: false }] : [])] },
+    options: how === 'radar' ? {} : how === 'hbar' ? { indexAxis: 'y', scales: { x: axis(yLabel), y: axis(f.x_title) } }
+      : { scales: { x: axis(f.x_title), y: axis(yLabel) } } };
   const caption = f.caption ? html`<div class="fig-caption quotable"><b>${label}:</b> <${Html} s=${inlineMd(f.caption)} /></div>` : null;
   const q = d?.questions[f.question - 1];
   return html`<div class="exp-card"><div class="exp-head"><b>${label}</b><span class="quotable">${f.title}</span>
-      ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[f.kind]}</span>
+      ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[how]}</span>
       <span class=${`chip ${n === total ? 'green' : ''}`} title="已经有实验结果的格子">已填 ${n}/${total}</span><span class="grow"></span>
       ${remove ? html`<span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
     ${f.claim ? html`<div class="hint quotable">要证明：<${Html} s=${inlineMd(f.claim)} /></div>` : null}
-    ${chart ? html`<${ExpChart} c=${chart} />${caption}` : html`${caption}<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
+    ${chart ? html`<${ExpChart} c=${chart} h=${how === 'hbar' ? Math.min(520, 28 * f.rows.length + 48) : null} />${caption}` : html`${caption}<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
         ${f.series.map((s) => html`<th>${s}${!f.metric && colMetric(s) ? ` ${arrow(colMetric(s))}` : ''}</th>`)}</tr></thead>
       <tbody>${f.rows.map((r) => html`<tr class=${r === d?.method ? 'ours' : ''}><td>${r}</td>${f.series.map((s) => {
         const c = at(r, s), v = c && c.value;

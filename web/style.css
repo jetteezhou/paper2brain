@@ -616,9 +616,10 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .exp-form { display: flex; flex-direction: column; gap: 8px; }
 .exp-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
 .exp-row { display: grid; grid-template-columns: 40px 1fr; gap: 8px; font-size: 13.5px; margin: 3px 0; }
-.exp-charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; margin: 8px 0; }
+.exp-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; margin: 8px 0; }
 .exp-chart { position: relative; height: 240px; }
-.fig-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 10px; margin-top: 8px; }
+.fig-grid { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.fig-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 10px; }
 .fig-grid .exp-card { margin-bottom: 0; }
 .fig-section { margin-top: 14px; }
 .fig-section-title { font-weight: 600; font-size: 13.5px; color: var(--muted); }
