@@ -895,8 +895,14 @@ def _context(rid):
 
 @route("POST", "/api/research/([^/]+)/figures")
 def figures_update(q, body, rid):
-    store.update_figures(rid, rules.validate_figures(body.get("figures"), _context(rid), store.get_figures(rid)["design"]),
-                         "user", body.get("base_rev"))
+    """The user's own edit: the figures, and optionally the setup and which experiment result fills which cell."""
+    cur = store.get_figures(rid)
+    design = rules.validate_setup(body["setup"], store.paper_ids()) if body.get("setup") else None
+    figures = rules.validate_figures(body.get("figures", cur["figures"]), _context(rid), design or cur["design"])
+    cells = rules.validate_cells(body["cells"], figures, store.get_research(rid)["experiments"]) if "cells" in body else None
+    store.update_figures(rid, figures, "user", body.get("base_rev"), design)
+    if cells:
+        store.fill_cells(rid, cells)
     return {"ok": True}
 
 

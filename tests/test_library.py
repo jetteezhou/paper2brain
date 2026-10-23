@@ -472,6 +472,16 @@ class Store(unittest.TestCase):
         self.assertEqual([c["row"] for c in store.get_figures(rid)["cells"]], ["Spatial"])
         store.update_figures(rid, [{**store.get_figures(rid)["figures"][0], "rows": ["Object"]}], "user", 1)
         self.assertEqual(store.get_figures(rid)["cells"], [])
+        from paper2brain import server
+        for pid in known:
+            store.upsert_paper(pid, pid)
+        f0 = {**store.get_figures(rid)["figures"][0], "target": None}
+        server.figures_update({}, {"setup": {**setup, "questions": ["Q one", "Q two"]}, "figures": [{**f0, "question": 2}],
+                                   "cells": [{**cell, "row": "Object"}], "base_rev": 2}, rid)
+        fg = store.get_figures(rid)
+        self.assertEqual((fg["design"]["questions"][1], fg["figures"][0]["question"], [c["row"] for c in fg["cells"]]), ("Q two", 2, ["Object"]))
+        with self.assertRaisesRegex(rules.Rejected, "rows"):
+            server.figures_update({}, {"figures": [{**f0, "rows": []}], "base_rev": 3}, rid)
 
     def test_agent_cannot_overwrite_user_edited_experiment(self):
         rid = store.add_research("exp", "user")

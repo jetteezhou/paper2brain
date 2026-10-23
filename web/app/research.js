@@ -438,14 +438,76 @@ function numbered(figs) {
     .map((f) => { const k = f.kind === 'table' ? 'Table' : 'Figure'; n[k] += 1; return [f, `${k} ${n[k]}`]; });
 }
 
-function DesignView({ d }) {
+function DesignView({ d, edit }) {
   return html`<div class="exp-card design">
+    ${edit ? html`<div class="exp-head"><b>实验设置</b><span class="grow"></span><button class="btn sm ghost" onClick=${edit}>编辑</button></div>` : null}
     <div class="exp-row"><span class="hint">问题</span><ol class="quotable">${d.questions.map((q) => html`<li>${q}</li>`)}</ol></div>
     <div class="exp-row"><span class="hint">基准</span><span class="quotable">${d.benchmarks.map((b, i) => html`${i ? '；' : ''}<b>${b.name}</b>${b.note ? html`<span class="hint">（<${Html} s=${inlineMd(b.note)} />）</span>` : null}`)}</span></div>
     <div class="exp-row"><span class="hint">对比</span><span class="quotable"><b>${d.method}</b>（我们）vs ${d.baselines.map((b, i) => html`${i ? '、' : ''}<span title=${b.note || ''}>${b.name}</span>${b.paper ? html` <${Html} s=${inlineMd(`[${b.paper}]`)} />` : null}`)}</span></div>
     ${d.controls?.length ? html`<div class="exp-row"><span class="hint">对照</span><span class="quotable">${d.controls.map((b, i) => html`${i ? '、' : ''}<span title=${b.note || ''}>${b.name}</span>`)}<span class="hint">（自己方法的变体与简单对照）</span></span></div>` : null}
     <div class="exp-row"><span class="hint">指标</span><span class="quotable">${d.metrics.map(metricLabel).join('；')}</span></div>
     ${d.implementation ? html`<div class="exp-row"><span class="hint">实现</span><${Html} cls="quotable" s=${inlineMd(d.implementation)} /></div>` : null}</div>`;
+}
+
+// The setup's lists edited as text: one item per line, its fields split by |.
+const DESIGN_LISTS = [['benchmarks', '基准', ['name', 'note'], '名字 | 说明'], ['baselines', '对比', ['name', 'paper', 'note'], '方法名 | 论文 id | 说明'],
+  ['controls', '对照', ['name', 'note'], '名字 | 说明'], ['metrics', '指标', ['name', 'unit', 'better'], '名字 | 单位 | higher 或 lower']];
+const linesOf = (v) => (v || '').split('\n').map((l) => l.trim()).filter(Boolean);
+
+function DesignForm({ x, d, done }) {
+  const submit = async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), setup = { questions: linesOf(f.get('questions')), method: f.get('method'), implementation: f.get('implementation') };
+    for (const [k, , keys] of DESIGN_LISTS) setup[k] = linesOf(f.get(k)).map((l) => { const v = l.split('|').map((s) => s.trim()), n = keys.length - 1;
+      return Object.fromEntries(keys.map((key, i) => [key, (i < n ? v[i] : v.slice(n).join(' | ')) || null])); });
+    try { await post(`/api/research/${enc(x.id)}/figures`, { setup, base_rev: x.figures.revision }); toast('已保存'); done(); refresh(); } catch (err) { fail(err); }
+  };
+  return html`<form class="exp-card exp-form" onSubmit=${submit}>
+    <label class="hint">研究问题（每行一个）<textarea name="questions" rows="3">${d.questions.join('\n')}</textarea></label>
+    <label class="hint">我们的方法在表里的名字<input name="method" defaultValue=${d.method} /></label>
+    ${DESIGN_LISTS.map(([k, l, keys, hint]) => html`<label class="hint">${l}（每行一项：${hint}）
+      <textarea name=${k} rows="3">${(d[k] || []).map((b) => keys.map((key) => b[key] || '').join(' | ').replace(/( \| )+$/, '')).join('\n')}</textarea></label>`)}
+    <label class="hint">实现细节<textarea name="implementation" rows="3">${d.implementation || ''}</textarea></label>
+    <div style="display:flex;gap:8px;align-items:center"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button>
+      <span class="hint">改了方法名，用到它的图表要一起改，否则会保存不了。</span></div></form>`;
+}
+
+/** A figure's own fields, plus which experiment result fills each cell: a cell only ever points at a recorded result. */
+function FigureForm({ x, f, d, done }) {
+  const [rows, setRows] = useState(f.rows.join('\n')), [series, setSeries] = useState(f.series.join('\n'));
+  const [pick, setPick] = useState(() => Object.fromEntries(x.figures.cells.filter((c) => c.figure === f.id)
+    .map((c) => [cellKey(c.row, c.series), `${c.experiment}\u0000${c.result}`])));
+  const results = x.experiments.flatMap((e) => (e.results || []).map((r) => [`${e.id}\u0000${r.name}`, `${e.title || short(firstLine(e.raw), 30)} · ${r.name} = ${r.value}`]));
+  const rs = linesOf(rows), ss = linesOf(series);
+  const submit = async (ev) => {
+    ev.preventDefault();
+    const v = Object.fromEntries(new FormData(ev.target)), t = v.target_value.trim();
+    const nf = { ...f, title: v.title, section: v.section, kind: v.kind, width: v.width, question: +v.question, metric: v.metric || null,
+      rows: rs, series: ss, caption: v.caption, claim: v.claim, x_title: v.x_title, y_title: v.y_title,
+      target: t ? { value: Number(t), label: v.target_label } : null };
+    const cells = rs.flatMap((r) => ss.map((s) => { const [experiment, result] = (pick[cellKey(r, s)] || '').split('\u0000');
+      return { figure: f.id, row: r, series: s, experiment: experiment || null, result: result || null }; }));
+    try {
+      await post(`/api/research/${enc(x.id)}/figures`, { figures: x.figures.figures.map((g) => (g.id === f.id ? nf : g)), cells, base_rev: x.figures.revision });
+      toast('已保存'); done(); refresh();
+    } catch (err) { fail(err); }
+  };
+  const select = (name, opts, cur) => html`<select name=${name}>${opts.map(([k, l]) => html`<option value=${k} selected=${String(cur ?? '') === String(k)}>${l}</option>`)}</select>`;
+  return html`<form class="exp-card exp-form" onSubmit=${submit}>
+    <input name="title" defaultValue=${f.title} placeholder="简短的名字，不写编号" />
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${select('section', Object.entries(FIG_SECTION), f.section)}${select('kind', Object.entries(FIG_KIND), f.kind)}
+      ${select('width', Object.entries(FIG_WIDTH), f.width || 'full')}${select('question', (d?.questions || []).map((q, i) => [i + 1, `Q${i + 1}`]), f.question)}
+      ${select('metric', [['', '指标按列（列都是指标时）'], ...(d?.metrics || []).map((m) => [m.name, metricLabel(m)])], f.metric)}</div>
+    <div style="display:flex;gap:8px"><label class="hint" style="flex:1">行（每行一个）<textarea rows="4" value=${rows} onInput=${(e) => setRows(e.target.value)}></textarea></label>
+      <label class="hint" style="flex:1">系列 / 列（每行一个）<textarea rows="4" value=${series} onInput=${(e) => setSeries(e.target.value)}></textarea></label></div>
+    <textarea name="caption" rows="2" placeholder="图注（论文里的 caption）">${f.caption || ''}</textarea>
+    <input name="claim" defaultValue=${f.claim || ''} placeholder="要证明的结论（一句话）" />
+    <div style="display:flex;gap:8px"><input name="x_title" defaultValue=${f.x_title || ''} placeholder="横轴标题（可选）" /><input name="y_title" defaultValue=${f.y_title || ''} placeholder="纵轴标题（可选）" /></div>
+    <div style="display:flex;gap:8px"><input name="target_value" defaultValue=${f.target?.value ?? ''} placeholder="成功线数值（可选，要出自三要素）" /><input name="target_label" defaultValue=${f.target?.label || ''} placeholder="成功线说明" /></div>
+    ${rs.length && ss.length ? html`<div class="hint">格子：选哪条实验记录的哪个结果填进去（数字改实验记录）</div><div class="table-wrap"><table class="cmap paper"><thead><tr><th></th>${ss.map((s) => html`<th>${s}</th>`)}</tr></thead>
+      <tbody>${rs.map((r) => html`<tr><td>${r}</td>${ss.map((s) => html`<td><select value=${pick[cellKey(r, s)] || ''} onChange=${(e) => setPick({ ...pick, [cellKey(r, s)]: e.target.value })}>
+        <option value="">—</option>${results.map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select></td>`)}</tr>`)}</tbody></table></div>` : null}
+    <div style="display:flex;gap:8px"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button></div></form>`;
 }
 
 /** Two consecutive half-width figures share a row; a full-width one (the default) keeps the row to itself. */
@@ -480,6 +542,8 @@ function cellsOf(x, f) {
 }
 
 function FigureCard({ x, f, d, label, remove }) {
+  const [editing, setEditing] = useState(false);
+  if (editing) return html`<${FigureForm} x=${x} f=${f} d=${d} done=${() => setEditing(false)} />`;
   const cells = cellsOf(x, f), at = (r, s) => cells[cellKey(r, s)];
   const n = Object.keys(cells).length, total = f.rows.length * f.series.length;
   const sources = [...new Set(Object.values(cells).map(({ e }) => e.title || short(firstLine(e.raw), 30)))];
@@ -500,7 +564,7 @@ function FigureCard({ x, f, d, label, remove }) {
   return html`<div class="exp-card"><div class="exp-head"><b>${label}</b><span class="quotable">${f.title}</span>
       ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[how]}</span>
       <span class=${`chip ${n === total ? 'green' : ''}`} title="已经有实验结果的格子">已填 ${n}/${total}</span><span class="grow"></span>
-      ${remove ? html`<span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
+      ${remove ? html`<button class="btn sm ghost" onClick=${() => setEditing(true)}>编辑</button><span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
     ${f.claim ? html`<div class="hint quotable">要证明：<${Html} s=${inlineMd(f.claim)} /></div>` : null}
     ${chart ? html`<${ExpChart} c=${chart} h=${how === 'hbar' ? Math.min(520, 28 * f.rows.length + 48) : null} />${caption}` : html`${caption}<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
         ${f.series.map((s) => html`<th>${s}${!f.metric && colMetric(s) ? ` ${arrow(colMetric(s))}` : ''}</th>`)}</tr></thead>
@@ -551,7 +615,7 @@ function FiguresProposal({ x }) {
 
 function Figures({ x }) {
   const fg = x.figures, run = liveRun(runsOf(x, 'figures'));
-  const [ins, setIns] = useState('');
+  const [ins, setIns] = useState(''), [editing, setEditing] = useState(false);
   const draft = async (e) => {
     e.preventDefault();
     try { await post(`/api/research/${enc(x.id)}/figures/draft`, { instruction: ins }); setIns(''); toast('已交给 agent，设计好后会作为修改稿等你确认'); refresh(); } catch (err) { fail(err); }
@@ -563,7 +627,7 @@ function Figures({ x }) {
       <button class="btn sm primary" disabled=${!agentOn.value || !!run}>${run ? html`<${Mark} spin />处理中` : fg.design ? '让 agent 更新实验设计' : '让 agent 设计实验'}</button></form>
     ${run ? html`<div class="card-wait"><${Mark} spin />Agent 正在处理实验设计：定实验设置和图表，或把实验结果填进格子…</div>` : null}
     ${fg.proposal ? html`<${FiguresProposal} key=${fg.proposal.at} x=${x} />` : null}
-    ${fg.design ? html`<${DesignView} d=${fg.design} />` : null}
+    ${!fg.design ? null : editing ? html`<${DesignForm} x=${x} d=${fg.design} done=${() => setEditing(false)} />` : html`<${DesignView} d=${fg.design} edit=${() => setEditing(true)} />`}
     ${fg.figures.length ? html`<${Sections} x=${x} d=${fg.design} figs=${fg.figures} remove=${remove} />`
       : fg.proposal ? null : html`<div class="hint">还没有实验设计。先按论文的样子定下要回答的研究问题、基准、对比方法和指标，以及主结果、消融、分析各放哪些图表，再去跑实验：每个格子就是一个要跑的实验，跑完的结果会被填进来。</div>`}
     <${RunsBlock} runs=${runsOf(x, 'figures')} label="实验设计" spec="librarian/experiment.md" /></div>`;

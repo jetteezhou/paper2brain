@@ -614,6 +614,9 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .exp-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; background: var(--panel); }
 .exp-card.abandoned { opacity: .7; border-style: dashed; }
 .exp-form { display: flex; flex-direction: column; gap: 8px; }
+.exp-form label { display: flex; flex-direction: column; gap: 4px; }
+.exp-form div > input { flex: 1; min-width: 0; }
+.exp-form .cmap select { max-width: 180px; }
 .exp-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
 .exp-row { display: grid; grid-template-columns: 40px 1fr; gap: 8px; font-size: 13.5px; margin: 3px 0; }
 .exp-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; margin: 8px 0; }
