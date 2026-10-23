@@ -423,13 +423,24 @@ function PeekPdf({ pid, page, q, lang }) {
 
 export const Peek = () => peek.value.map((pk, i) => html`<${PeekWindow} key=${pk.id} pk=${pk} i=${i} />`);
 
+/** Click (or a fresh open) brings that window forward. 80–84 stays under modals at 90; at most five windows. */
+const PEEK_Z = 80;
+function raisePeek(el) {
+  if (!el) return;
+  const rest = [...document.querySelectorAll('.peek')].filter((n) => n !== el)
+    .sort((a, b) => (+a.style.zIndex || 0) - (+b.style.zIndex || 0));
+  [...rest, el].forEach((n, i) => { n.style.zIndex = PEEK_Z + i; });
+}
+
 function PeekWindow({ pk, i }) {
   const set = (next) => { peek.value = peek.value.flatMap((x) => (x.id !== pk.id ? [x] : next ? [{ ...next, id: pk.id }] : [])); };
   const [p, reload, err] = useLive(`/api/papers/${enc(pk.pid)}`, { poll: false });
   const [pos, setPos] = useState(null);
   const [drag, setDrag] = useState(null);
   const [adding, setAdding] = useState(null);
+  const root = useRef();
   const mine = adding && adding.pid === pk.pid ? adding : null;
+  useEffect(() => { raisePeek(root.current); }, [pk]);
   useEffect(() => {
     if (mine || !(err || p?.listed === false)) return;
     setAdding({ pid: pk.pid });
@@ -445,7 +456,7 @@ function PeekWindow({ pk, i }) {
   const move = (e) => drag && setPos({ x: Math.max(0, e.clientX - drag.dx), y: Math.max(0, e.clientY - drag.dy) });
   const full = () => { set(null); openReader(pk.pid, { tab: 'card', page: pk.page, q: pk.q }); };
   // new windows cascade so the ones under them stay grabbable
-  return html`<div class="peek" role="dialog" aria-label="速览论文" style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : { top: `${64 + i * 28}px`, right: `${24 + i * 28}px` }}>
+  return html`<div class="peek" role="dialog" aria-label="速览论文" ref=${root} onPointerDown=${(e) => raisePeek(e.currentTarget)} style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : { top: `${64 + i * 28}px`, right: `${24 + i * 28}px` }}>
     <div class="peek-top" onPointerDown=${down} onPointerMove=${move} onPointerUp=${() => setDrag(null)}>
       <b title=${p?.title}>${p ? short(p.title, 60) : '…'}</b>${pk.page ? html`<span class="hint">p.${pk.page}</span>` : null}<span class="grow"></span>
       <${LangSwitch} p=${p} /><button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => set(null)}>×</button></div>

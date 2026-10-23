@@ -103,8 +103,8 @@ export function openReader(pid, intent = {}) {
   readerIntent.value = intent;
   location.hash = `#/read/${enc(pid)}${intent.page ? '@' + intent.page : ''}`;
 }
-/** Papers' PDFs in floating windows over whatever is open, newest on top: [{ id, pid, page, q }]. A paper already
- * open jumps in its own window; past five the oldest closes. */
+/** Papers' PDFs in floating windows over whatever is open: [{ id, pid, page, q }]. A paper already
+ * open jumps in its own window; past five the oldest closes. Which one is on top follows the last click. */
 export const peek = signal([]);
 let peekSeq = 0;
 export const peekPaper = (pid, page, q) => {
