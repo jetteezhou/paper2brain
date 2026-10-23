@@ -1420,9 +1420,15 @@ def add_topic(name, parent, by, reason=None, papers=()):
     with tx() as c:
         parent = _topic_parent(c, parent)
         path = f"{parent}/{name}" if parent else name
-        if c.execute("SELECT state FROM topics WHERE path=?", (path,)).fetchone():
-            raise rules.Rejected(f"主题 {path} 已经有了（或已被提议）")
         known = _papers_in(c, papers)
+        cur = c.execute("SELECT state, for_papers FROM topics WHERE path=?", (path,)).fetchone()
+        if cur and cur["state"] == "proposed" and by != "user":
+            # papers that arrive while a proposal waits join it, so accepting files them too
+            merged = list(dict.fromkeys(json.loads(cur["for_papers"] or "[]") + known))
+            c.execute("UPDATE topics SET for_papers=? WHERE path=?", (json.dumps(merged) if merged else None, path))
+            return path
+        if cur:
+            raise rules.Rejected(f"主题 {path} 已经有了（或已被提议）")
         position = c.execute("SELECT coalesce(max(position), -1) + 1 FROM topics WHERE parent IS ?", (parent,)).fetchone()[0]
         c.execute("INSERT INTO topics (path, name, parent, position, state, reason, for_papers) VALUES (?,?,?,?,?,?,?)",
                   (path, name, parent, position, "active" if by == "user" else "proposed", (reason or "").strip() or None,

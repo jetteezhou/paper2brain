@@ -1553,6 +1553,7 @@ class Topics(unittest.TestCase):
         with scratch_home():
             store.upsert_paper("arxiv:2303.04137", "Diffusion Policy")
             store.upsert_paper("arxiv:2304.13705", "ACT")
+            store.upsert_paper("arxiv:2410.24164", "π0")
             store.set_topics("arxiv:2304.13705", ["VLA"], "user")  # the user fixed this one
             with self.assertRaisesRegex(rules.Rejected, "--why"):
                 store.add_topic("灵巧手", None, "agent")
@@ -1562,8 +1563,14 @@ class Topics(unittest.TestCase):
             self.assertEqual([p["path"] for p in store.topic_proposals()], [path])
             with self.assertRaisesRegex(rules.Rejected, "未知主题"):
                 store.set_topics("arxiv:2303.04137", [path], "agent")
+            store.set_topics("arxiv:2410.24164", ["VLA"], "agent")  # arrives while the proposal waits: joins it
+            self.assertEqual(store.add_topic("模仿学习", "VLA", "agent", "同上", ["arxiv:2410.24164"]), path)
+            self.assertEqual(len(store.topic_proposals()), 1)
             store.decide_topic(path, True)
             self.assertEqual(store.get_paper("arxiv:2303.04137")["topics"], [path])
+            self.assertIn(path, store.get_paper("arxiv:2410.24164")["topics"])
+            with self.assertRaisesRegex(rules.Rejected, "已经有了"):
+                store.add_topic("模仿学习", "VLA", "agent", "同上")
             self.assertEqual(store.get_paper("arxiv:2304.13705")["topics"], ["VLA"])
             store.add_topic("灵巧手", None, "agent", "没位置")
             store.decide_topic("灵巧手", False)
