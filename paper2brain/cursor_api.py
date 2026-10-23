@@ -1086,7 +1086,8 @@ def discuss(scope, text, thread_id=None, start=False, images=(), model=None, red
     """Continue the scope's latest discussion, or an older one the user jumped back to. start=True opens a new
     research: the agent first reads what the user brought and drafts, instead of just answering. A model switches
     the discussion to a new agent on it, told what was said so far (an agent keeps the model it was created with).
-    redo=True drops the last question and its answer and asks it again of a new agent, which never saw that answer."""
+    redo=True drops the last question and its answer and asks it again of a new agent, which never saw that answer;
+    in an experiment discussion the figure drafts that answer proposed go too."""
     thread = store.thread_for(scope, thread_id)
     if redo:
         last = thread["messages"][-2:]
@@ -1098,6 +1099,8 @@ def discuss(scope, text, thread_id=None, start=False, images=(), model=None, red
         if q["forks"] or a["forks"] or q["research"] or a["research"]:
             raise rules.Rejected("这一问一答已经分出了讨论或加入了研究，换个方式：从上一条分叉再问")
         store.drop_messages([q["id"], a["id"]])
+        if scope.startswith("experiment:"):
+            store.rollback_figures(scope.partition(":")[2], q["created_at"])
         thread["messages"], text = thread["messages"][:-2], q["text"]
     if model or redo:
         thread["agent_id"] = None

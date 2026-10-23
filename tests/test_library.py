@@ -916,6 +916,27 @@ class Store(unittest.TestCase):
         self.assertNotEqual(store.get_run(r2)["agent_id"], store.get_run(r1)["agent_id"])
         self.assertEqual(t["model"], {"id": "other-model"})
 
+    def test_regenerating_in_an_experiment_discussion_takes_back_the_drafts_of_that_answer(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        rid = store.add_research("figs", "user")
+        at = lambda s: mock.patch.object(store, "now", return_value=f"2026-01-01T00:00:{s}+00:00")  # noqa: E731
+        with at("00"):
+            store.propose_figures(rid, [], "before", "agent")
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "config", return_value=AGENT_CFG), mock.patch.object(cursor_api, "_spawn"):
+            with at("10"):
+                run = server.chat({}, {"scope": f"experiment:{rid}", "text": "加一张消融"})["run_id"]
+            with at("20"):
+                store.propose_figures(rid, [], "answer 1", "agent")
+            with at("21"):
+                store.propose_figures(rid, [], "answer 2", "agent")
+            store.update_run(run, status="FINISHED")
+            server.chat({}, {"scope": f"experiment:{rid}", "thread_id": store.thread_for(f"experiment:{rid}")["id"], "redo": True})
+        self.assertEqual(store.get_figures(rid)["proposal"]["note"], "before")
+
     def test_finding_from_a_research_uses_its_papers_as_seeds_and_avoids_rejects(self):
         from unittest import mock
 

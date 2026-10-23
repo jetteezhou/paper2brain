@@ -2304,13 +2304,29 @@ def update_figures(rid, figures, by, base_rev=None, design=None):
         return (cur["revision"] if cur else 0) + 1
 
 
+def _last(p, n=3):
+    """The draft p replaced, and the ones before it, n deep: enough to step back over the drafts of one answer."""
+    return p and {**p, "prev": _last(p.get("prev"), n - 1) if n > 1 else None}
+
+
 def propose_figures(rid, figures, note, by, base_rev=None, design=None):
     with tx() as c:
-        cur = c.execute("SELECT revision FROM exp_figures WHERE research_id=?", (rid,)).fetchone()
+        cur = _row(c.execute("SELECT revision, proposal FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
         rules.check_revision(cur["revision"] if cur else 0, base_rev)
         c.execute("INSERT OR IGNORE INTO exp_figures (research_id) VALUES (?)", (rid,))
         c.execute("UPDATE exp_figures SET proposal=? WHERE research_id=?",
-                  (json.dumps({"design": design, "figures": figures, "note": note, "by": by, "at": now()}, ensure_ascii=False), rid))
+                  (json.dumps({"design": design, "figures": figures, "note": note, "by": by, "at": now(),
+                               "prev": _last(cur and cur["proposal"])}, ensure_ascii=False), rid))
+
+
+def rollback_figures(rid, since):
+    """Drop the drafts proposed at or after since (an ISO time), bringing back the one they replaced."""
+    p = was = get_figures(rid)["proposal"]
+    while p and p["at"] >= since:
+        p = p.get("prev")
+    if p is not was:
+        with tx() as c:
+            c.execute("UPDATE exp_figures SET proposal=? WHERE research_id=?", (p and json.dumps(p, ensure_ascii=False), rid))
 
 
 def accept_figures(rid, base_rev=None):
