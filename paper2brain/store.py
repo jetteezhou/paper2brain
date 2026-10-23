@@ -2698,9 +2698,12 @@ def _search(terms, op, limit):
                   "原文": p.pop("fulltext")}
         low = {k: v.lower() for k, v in fields.items() if v}
         p["hits"] = [k for k, v in low.items() if any(t.lower() in v for t in terms)]
-        p["_score"] = sum(max((HIT_WEIGHT[k] for k, v in low.items() if t.lower() in v), default=0) for t in terms)
+        n = lambda ks: sum(any(t.lower() in low.get(k, "") for k in ks) for t in terms)
+        # title words first, then abstract words, then everything else by weight
+        p["_score"] = (n(("标题", "缩写", "编号")), n(("摘要",)),
+                       sum(max((HIT_WEIGHT[k] for k, v in low.items() if t.lower() in v), default=0) for t in terms))
         p["tldr"] = card and card.get("tldr")
-    papers = sorted(papers, key=lambda p: -p.pop("_score"))[:limit]
+    papers = sorted(papers, key=lambda p: p.pop("_score"), reverse=True)[:limit]
     for p in papers:
         if "原文" in p["hits"]:
             texts = pages(p["id"])

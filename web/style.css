@@ -405,6 +405,25 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 #selpop:has(.selpop-ans) { width: min(420px, calc(100vw - 16px)); }
 .selpop-ans { max-height: 45vh; overflow: auto; font-size: 13px; line-height: 1.6; border-top: 1px solid var(--line); padding-top: 8px; }
 ::highlight(selpop) { background: rgba(255, 200, 60, .45); }
+
+/* ---------- quick notepad ---------- */
+.np-tab { position: fixed; right: 0; top: 50%; z-index: 90; writing-mode: vertical-rl; border: 1px solid var(--line-strong); border-right: 0; border-radius: 8px 0 0 8px; background: var(--panel); color: var(--muted); padding: 10px 4px; cursor: pointer; font-size: 12.5px; box-shadow: var(--shadow-pop); }
+.np-tab:hover { color: var(--text); }
+.np-tab .n { writing-mode: horizontal-tb; display: block; margin-top: 4px; font-size: 11px; color: var(--accent); font-weight: 600; }
+.notepad { position: fixed; right: 16px; top: 64px; z-index: 90; width: min(340px, calc(100vw - 32px)); max-height: calc(100vh - 96px); display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow-pop); }
+.np-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); }
+.np-head .grow, .np-acts .grow { flex: 1; }
+.np-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0; }
+.np-item { padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.np-quote { font: 13px/1.55 var(--serif); border-left: 2px solid var(--amber); padding-left: 8px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; }
+.np-own { font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
+.np-src { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 2px; }
+.np-src a { color: var(--muted); flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.np-empty { padding: 12px 14px; font-size: 12.5px; line-height: 1.6; }
+.np-input { padding: 8px 10px 10px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.np-input textarea { width: 100%; resize: none; max-height: 30vh; border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 10px; background: var(--panel); color: inherit; font: inherit; font-size: 13px; outline: none; }
+.np-input textarea:focus { border-color: var(--accent); }
+.np-acts { display: flex; align-items: center; gap: 6px; }
 .anchor-head { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .anchor-head .grow { flex: 1; }
 .anchor-quote { margin: 0; padding: 10px 16px; border-left: 3px solid var(--amber); background: var(--amber-soft); font: 13.5px/1.6 var(--serif); max-height: 140px; overflow: auto; flex: none; }

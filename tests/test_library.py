@@ -1655,9 +1655,10 @@ class Search(unittest.TestCase):
             store.add_capture(cid, "x", "web")
             store.upsert_paper("arxiv:2501.00011", "某个方法", abstract="用灵巧手抓取")
             store.upsert_paper("arxiv:2501.00012", "灵巧手抓取")
-            for pid in ("arxiv:2501.00011", "arxiv:2501.00012"):
+            store.upsert_paper("arxiv:2501.00013", "另一个方法", ["灵巧手"])
+            for pid in ("arxiv:2501.00011", "arxiv:2501.00012", "arxiv:2501.00013"):
                 store.link(cid, pid, "rule")
-            self.assertEqual([p["id"] for p in store.search("灵巧手")["papers"]], ["arxiv:2501.00012", "arxiv:2501.00011"])
+            self.assertEqual([p["id"] for p in store.search("灵巧手")["papers"]], ["arxiv:2501.00012", "arxiv:2501.00011", "arxiv:2501.00013"])
             r = store.search("灵巧手的抓取")  # typed without spaces, no literal match
             self.assertEqual((r["loose"], r["papers"][0]["id"]), (True, "arxiv:2501.00012"))
 

@@ -11,6 +11,7 @@ import { CapturesView, PapersView, SearchView, ListDetail, openWebFind, addAndOp
 import { ResearchView, openComposer, researchPicker, showResearch } from './research.js';
 import { DiscussView } from './discuss.js';
 import { Reader, SelectionPopup, Peek } from './reader.js';
+import { Notepad } from './notepad.js';
 
 /** An overlay's value, kept on screen for a moment after it goes away so it can animate out: [shown, leaving]. */
 function useLeaving(v, ms = 160) {
@@ -552,7 +553,7 @@ function Setup() {
 }
 const setupModal = () => appState.value && openModal(html`<${Setup} />`);
 
-// ---------- the one bar (⌘K): capture, search, find papers, jot a thought, start a research, act on this paper, go anywhere ----------
+// ---------- the one bar (⌘K): capture, search, find papers, ask the agent, start a research, act on this paper, go anywhere ----------
 
 const FIND_RE = /^\s*(?:请|麻烦)?\s*(?:帮我|帮忙|给我)\s*(?:找|搜|推荐)|^\s*(?:找|搜)(?:一下|几篇|一些|些)?[^\n]{0,60}(?:论文|paper)/i;
 const accepted = (f) => f.type.startsWith('image/') || f.type === 'application/pdf';
@@ -570,15 +571,6 @@ async function addFiles(files) {
     const data = await readBase64(f);
     cap.value = { ...cap.value, files: [...cap.value.files, { mime: f.type, name: f.name, data }] };
   }
-}
-
-async function jot(text) {
-  clearCap();
-  try {
-    const t = await post('/api/threads', { scope: 'library', text });
-    toast('已记下，开了一段新讨论', '去讨论', () => openThread(t.scope, t.id));
-    refresh();
-  } catch (e) { cap.value = { ...cap.value, text }; fail(e); }
 }
 
 async function ask(text) {
@@ -668,7 +660,6 @@ function paletteItems(t, link, files, hits, ai) {
       h.research.slice(0, 3).forEach((x) => add('库里', `r:${x.id}`, '☆', x.title, '研究', () => openResearch(x.id), true));
     }
     if (appState.value?.agent?.enabled) add('用这段话', 'ask', '◌', `和 agent 讨论：${say}`, '整个论文库，比如改主题树、归纳方向', () => ask(t));
-    add('用这段话', 'jot', '✎', '记成一个想法', '开一段讨论，不叫 agent 回答', () => jot(t));
     if (!FIND_RE.test(t)) find();
     add('用这段话', 'cap', '＋', '收下这段文字', '按标题找原论文', submitCapture);
     add('用这段话', 'res', '☆', '以它开始一个研究', '', startResearch);
@@ -745,7 +736,7 @@ function Palette({ leaving }) {
   return html`<div class=${`pal-bg${leaving ? ' leaving' : ''}`} onMouseDown=${(e) => { if (e.target === e.currentTarget) palOpen.value = false; }}>
     <div class="pal" id="palette" role="dialog" aria-label="收下、搜索、找论文">
       <textarea ref=${ta} rows="1" class="pal-input" value=${text} onInput=${set('text')} onKeyDown=${key}
-        placeholder="粘贴链接、截图或 PDF 收下；输入文字搜索、找论文、记想法、跳转…" aria-label="收下、搜索、找论文"></textarea>
+        placeholder="粘贴链接、截图或 PDF 收下；输入文字搜索、找论文、问 agent、跳转…" aria-label="收下、搜索、找论文"></textarea>
       ${files.length ? html`<div class="pal-files">${files.map((f, j) => html`<div class="thumb">${f.mime === 'application/pdf'
         ? html`<div class="thumb-pdf"><b>PDF</b>${short(f.name, 18)}</div>` : html`<img src=${`data:${f.mime};base64,${f.data}`} alt="" />`}
         <button type="button" aria-label="移除" onClick=${() => { cap.value = { ...cap.value, files: files.filter((_, k) => k !== j) }; }}>×</button></div>`)}</div>` : null}
@@ -907,6 +898,7 @@ function App() {
     ${reading ? html`<div inert=${blocked}><${Reader} /></div>` : null}
     <${SelectionPopup} />
     <${Peek} />
+    <div inert=${blocked}><${Notepad} /></div>
     <${PaletteHost} />
     <${Toast} />
     <${Modal} />`;

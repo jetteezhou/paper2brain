@@ -7,7 +7,7 @@ import {
 import {
   appState, agentOn, selected, useLive, refresh, toast, fail, restoreTrash, go, openReader, openThread, openPaper, openResearch, openCapture, openModal, closeModal, peekPaper,
 } from './state.js';
-import { Chat, ThreadLines, JotForm, scopeLabel } from './discuss.js';
+import { Chat, ThreadLines, scopeLabel } from './discuss.js';
 import { researchPicker, openComposer, ResearchChip, StageChip } from './research.js';
 import { useAnchorMarks, openFigure } from './reader.js';
 
@@ -234,8 +234,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
 export function PaperNotes({ p, flush }) {
   return html`<div class="block" style=${flush ? 'margin-top:0' : ''}><div class="block-title">讨论与笔记<span class="line"></span></div>
       <${ThreadLines} threads=${p.threads} paperId=${p.id} />
-      ${p.notes.map((n) => html`<div class="run" style="margin-top:6px"><${Html} tag="div" s=${mdHtml(n.text)} cls="md" /><div class="hint">${n.by === 'agent' ? 'agent 记录的讨论结论' : '笔记'} · ${ago(n.created_at)}</div></div>`)}
-      <${JotForm} scope=${`paper:${p.id}`} placeholder="记一个想法：开一段关于这篇的讨论（不叫 agent 回答）" /></div>
+      ${p.notes.map((n) => html`<div class="run" style="margin-top:6px"><${Html} tag="div" s=${mdHtml(n.text)} cls="md" /><div class="hint">${n.by === 'agent' ? 'agent 记录的讨论结论' : '笔记'} · ${ago(n.created_at)}</div></div>`)}</div>
     ${p.cited_in?.length ? html`<div class="block"><div class="block-title">引用了这篇的讨论 · ${p.cited_in.length}<span class="line"></span></div>
       ${p.cited_in.map((t) => html`<div class="source" onClick=${() => openThread(t.scope, t.id)}><span class="source-kind">${scopeLabel(t.scope, t.scope_title)}</span>
         <span class="source-label">${t.title || t.first || '一段讨论'}</span></div>`)}</div>` : null}`;
@@ -422,8 +421,7 @@ function CaptureDetail({ id, view }) {
     ${c.attachments.length ? html`<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">${c.attachments.map((a) => a.mime.startsWith('image/')
       ? html`<a href=${`/api/attachments/${a.id}`} target="_blank" class="thumb" style="width:96px;height:96px"><img src=${`/api/attachments/${a.id}`} /></a>`
       : html`<a href=${`/api/attachments/${a.id}`} target="_blank" class="chip">${a.filename.replace(/^\d+-/, '')} ↗</a>`)}</div>` : null}
-    <div class="thoughts"><${ThreadLines} threads=${c.threads} paperId=${papers[0]?.id} />
-      <${JotForm} scope=${`capture:${c.id}`} placeholder=${c.threads.length ? '再补一句…（记下就开一段讨论，不叫 agent 回答）' : '补一句：为什么收它？'} /></div>
+    <div class="thoughts"><${ThreadLines} threads=${c.threads} paperId=${papers[0]?.id} /></div>
     ${notice}
     ${papers.map((p) => html`<${CapturePaper} key=${p.id} pid=${p.id} capture=${c} why=${p.evidence} />`)}
     <${RunsBlock} c=${c} /></div>`;

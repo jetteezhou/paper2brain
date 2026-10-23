@@ -10,6 +10,7 @@ import {
 import { PaperCard, PaperNotes, PdfButton, RunCard, reportState } from './papers.js';
 import { Chat } from './discuss.js';
 import { showResearch } from './research.js';
+import { addNote, sourceOf } from './notepad.js';
 
 // ---------- marking passages ----------
 
@@ -420,20 +421,21 @@ function PeekPdf({ pid, page, q, lang }) {
   return html`<div class="peek-pdf" ref=${host}><div class="pdf-loading"><span class="spin"></span>正在打开 PDF…</div></div>`;
 }
 
-export function Peek() {
-  const pk = peek.value;
-  const [p, reload, err] = useLive(pk ? `/api/papers/${enc(pk.pid)}` : null, { poll: false });
+export const Peek = () => peek.value.map((pk, i) => html`<${PeekWindow} key=${pk.id} pk=${pk} i=${i} />`);
+
+function PeekWindow({ pk, i }) {
+  const set = (next) => { peek.value = peek.value.flatMap((x) => (x.id !== pk.id ? [x] : next ? [{ ...next, id: pk.id }] : [])); };
+  const [p, reload, err] = useLive(`/api/papers/${enc(pk.pid)}`, { poll: false });
   const [pos, setPos] = useState(null);
   const [drag, setDrag] = useState(null);
   const [adding, setAdding] = useState(null);
-  const mine = adding && adding.pid === pk?.pid ? adding : null;
+  const mine = adding && adding.pid === pk.pid ? adding : null;
   useEffect(() => {
-    if (!pk || mine || !(err || p?.listed === false)) return;
+    if (mine || !(err || p?.listed === false)) return;
     setAdding({ pid: pk.pid });
-    addPaper(pk.pid).then((np) => { if (np.id !== pk.pid) peek.value = { ...pk, pid: np.id }; else reload(); })
+    addPaper(pk.pid).then((np) => { if (np.id !== pk.pid) set({ ...pk, pid: np.id }); else reload(); })
       .catch((e) => setAdding({ pid: pk.pid, error: e.message }));
-  }, [pk?.pid, err, p?.listed]);
-  if (!pk) return null;
+  }, [pk.pid, err, p?.listed]);
   const down = (e) => {
     if (e.target.closest('button')) return;
     const r = e.currentTarget.parentElement.getBoundingClientRect();
@@ -441,11 +443,12 @@ export function Peek() {
     setDrag({ dx: e.clientX - r.left, dy: e.clientY - r.top });
   };
   const move = (e) => drag && setPos({ x: Math.max(0, e.clientX - drag.dx), y: Math.max(0, e.clientY - drag.dy) });
-  const full = () => { peek.value = null; openReader(pk.pid, { tab: 'card', page: pk.page, q: pk.q }); };
-  return html`<div class="peek" role="dialog" aria-label="速览论文" style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : null}>
+  const full = () => { set(null); openReader(pk.pid, { tab: 'card', page: pk.page, q: pk.q }); };
+  // new windows cascade so the ones under them stay grabbable
+  return html`<div class="peek" role="dialog" aria-label="速览论文" style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : { top: `${64 + i * 28}px`, right: `${24 + i * 28}px` }}>
     <div class="peek-top" onPointerDown=${down} onPointerMove=${move} onPointerUp=${() => setDrag(null)}>
       <b title=${p?.title}>${p ? short(p.title, 60) : '…'}</b>${pk.page ? html`<span class="hint">p.${pk.page}</span>` : null}<span class="grow"></span>
-      <${LangSwitch} p=${p} /><button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => { peek.value = null; }}>×</button></div>
+      <${LangSwitch} p=${p} /><button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => set(null)}>×</button></div>
     ${pk.q ? html`<div class="peek-q hint" title=${pk.q}>找这句：${short(pk.q, 90)}</div>` : null}
     ${mine?.error && !p ? html`<div class="pdf-missing"><div style="text-align:center">收不下这篇论文：${mine.error}<br />${pk.pid.startsWith('arxiv:') ? html`<a class="btn sm ghost" href=${`https://arxiv.org/abs/${pk.pid.slice(6)}`} target="_blank" rel="noopener">在 arXiv 打开</a>` : null}</div></div>`
       : !p ? html`<div class="pdf-loading"><span class="spin"></span>${mine ? '这篇不在论文库里，正在收下（拉取元数据和 PDF）…' : ''}</div>`
@@ -524,6 +527,7 @@ export function SelectionPopup() {
       ${ans.sources?.length ? html`<div class="hint">网上来源：${ans.sources.map((x) => html`<a href=${x.url} target="_blank">${short(x.title || x.url, 30)}</a>　`)}</div>` : null}`
     : ans.error ? html`<span class="hint" style="color:var(--red)">${ans.error}</span>` : html`<span class="spin"></span> <span class="hint">${ans.web ? '在网上查…' : '几秒内回答…'}</span>`}</div>` : null;
   const keep = (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); };
+  const noteBtn = html`<button class="btn sm ghost" title="先存进快速便签，攒够了再一起带去讨论" onClick=${() => { addNote(ctx.quote, sourceOf(ctx.range.commonAncestorContainer)); done(); }}>存便签</button>`;
   const field = (ph) => html`<form onSubmit=${(e) => { e.preventDefault(); quick(false); }}><input ref=${input} value=${v} onInput=${(e) => setV(e.target.value)} placeholder=${ph} /></form>`;
   const quickBtn = html`<button class="btn sm primary" title="几秒内在这里回答，只看这一页附近的内容，不保存" onClick=${() => quick(false)}>快速问</button>
     ${appState.value?.agent?.search_api ? html`<button class="btn sm" title="可以上网搜索补充，答案带网上来源，不保存（约 5 秒）" onClick=${() => quick(true)}>上网查</button>` : null}`;
@@ -544,7 +548,7 @@ export function SelectionPopup() {
       <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>${field('问点什么，回车快速回答')}${answer}
       <div class="selpop-acts">${quickBtn}
         ${agentOn.value ? html`<button class="btn sm" title="新开一段讨论，让 agent 查这个研究的全部资料来回答" onClick=${deepen}>${ans ? '让 agent 深入' : '新开讨论问 agent'}</button>` : null}
-        <button class="btn sm ghost" title="把这段引用放进右侧讨论的输入框，接着写想怎么改" onClick=${() => { quoting.value = { scope: ctx.scope, text: ctx.quote }; done(); }}>加入讨论</button></div></div>`;
+        <button class="btn sm ghost" title="把这段引用放进右侧讨论的输入框，接着写想怎么改" onClick=${() => { quoting.value = { scope: ctx.scope, text: ctx.quote }; done(); }}>加入讨论</button>${noteBtn}</div></div>`;
   }
   const discuss = async () => {
     const c = ctx, text = question();
@@ -556,16 +560,9 @@ export function SelectionPopup() {
       if (error) toast(`划词已保存，但没能发出问题：${error}`, null, null, true);
     } catch (e) { fail(e); }
   };
-  const jot = async () => {
-    if (!v.trim()) { input.current.placeholder = '先写下你的想法，再点“记下来”'; input.current.focus(); return; }
-    const c = ctx, note = v.trim();
-    done();
-    try { await post('/api/threads', { scope: `paper:${c.pid}`, text: `关于「${short(c.quote, 120)}」：${note}` }); toast('已记下，开了一段关于这篇的讨论'); refresh(); } catch (e) { fail(e); }
-  };
   return html`<div id="selpop" ref=${box} onMouseDown=${keep}>
     <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>${field('围绕这段问点什么，回车快速回答')}${answer}
-    <div class="selpop-acts">${quickBtn}<button class="btn sm" title="新开一段关于这段的讨论，让 agent 翻全文、查库里别的论文来回答" onClick=${discuss}>${ans ? '让 agent 深入' : '讨论这段'}</button>
-      <button class="btn sm ghost" title="只记下，不叫 agent 回答" onClick=${jot}>记下来</button></div></div>`;
+    <div class="selpop-acts">${quickBtn}<button class="btn sm" title="新开一段关于这段的讨论，让 agent 翻全文、查库里别的论文来回答" onClick=${discuss}>${ans ? '让 agent 深入' : '讨论这段'}</button>${noteBtn}</div></div>`;
 }
 
 // ---------- figure lightbox ----------

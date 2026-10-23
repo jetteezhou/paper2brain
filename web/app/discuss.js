@@ -68,15 +68,15 @@ const joinResearch = (t, paperId) => researchPicker({
   links: [{ kind: 'thread', ref: t.id }, ...(paperId ? [{ kind: 'paper', ref: paperId }] : [])],
 });
 
-/** One line that opens a new discussion of a scope with what the user wrote; nobody is asked to answer, unless ask
- * (and the agent is on): then it is the first question to the agent. */
-export function JotForm({ scope, placeholder, onDone, ask }) {
+/** One line that opens a new discussion of a scope with what the user wrote, as the first question to the agent
+ * (with the agent off it is only written down). */
+export function JotForm({ scope, placeholder, onDone }) {
   const [v, setV] = useState('');
   const submit = async (e) => {
     e.preventDefault();
     if (!v.trim()) return;
     try {
-      const asking = ask && agentOn.value;
+      const asking = agentOn.value;
       const t = await post('/api/threads', asking ? { scope } : { scope, text: v.trim() });
       if (asking) await post('/api/chat', { scope, text: v.trim(), thread_id: t.id });
       setV('');
@@ -85,7 +85,7 @@ export function JotForm({ scope, placeholder, onDone, ask }) {
       onDone?.(t);
     } catch (err) { fail(err); }
   };
-  return html`<form class="add-line" onSubmit=${submit}><input value=${v} onInput=${(e) => setV(e.target.value)} placeholder=${placeholder} /><button class="btn sm">记下</button></form>`;
+  return html`<form class="add-line" onSubmit=${submit}><input value=${v} onInput=${(e) => setV(e.target.value)} placeholder=${placeholder} /><button class="btn sm">${agentOn.value ? '发送' : '记下'}</button></form>`;
 }
 
 // ---------- the chat: one discussion read as the whole path from the root ----------
@@ -173,7 +173,7 @@ function TitleLine({ t: thread }) {
     <button class="btn sm ghost" onClick=${() => { setV(threadName(t)); setEditing(true); }}>改标题</button></div>`;
 }
 
-/** The input every discussion ends in: Enter sends to the agent, ⌥Enter (or the button) only jots it down. */
+/** The input every discussion ends in: Enter sends to the agent (with the agent off, only writes it down). */
 export function Composer({ t, reload, draft, setDraft, input }) {
   const on = agentOn.value;
   const [imgs, setImgs] = useState([]);
@@ -204,6 +204,14 @@ export function Composer({ t, reload, draft, setDraft, input }) {
     try { await post('/api/chat', { scope: t.scope, thread_id: t.id, model, redo: true }); setChosen(null); reload(); refresh(); } catch (e) { fail(e); }
   };
   useEffect(() => fit(input.current), [draft]);
+  // a quote with no scope (from the notepad) goes to whichever discussion is on screen
+  useEffect(() => {
+    const q = quoting.value;
+    if (!q || (q.scope && q.scope !== t.scope)) return;
+    quoting.value = null;
+    setDraft((d) => `${d ? d.trimEnd() + '\n' : ''}${q.raw ? q.text : `「${q.text}」\n`}`);
+    setTimeout(() => { const el = input.current; el?.focus(); el?.setSelectionRange(el.value.length, el.value.length); });
+  }, [quoting.value, t.scope]);
   const pick = (e) => { addImgs([...e.target.files]); e.target.value = ''; };
   return html`<form class="chat-input" onSubmit=${(e) => { e.preventDefault(); send(on); }}
     onDragOver=${(e) => on && e.preventDefault()}
@@ -213,17 +221,15 @@ export function Composer({ t, reload, draft, setDraft, input }) {
     ${on ? html`<label class="btn ghost chat-attach" title="附图片（也可以直接粘贴或拖进来），最多 5 张">＋<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange=${pick} /></label>` : null}
     <textarea rows="1" ref=${input} value=${draft} onInput=${(e) => setDraft(e.target.value)}
       onPaste=${(e) => { const fs = [...(e.clipboardData?.files || [])]; if (on && fs.length) { e.preventDefault(); e.stopPropagation(); addImgs(fs); } }}
-      onKeyDown=${(e) => { if (e.key === 'Enter' && !e.isComposing && (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch))) { e.preventDefault(); send(on && !e.altKey); } }}
-      placeholder=${touch ? (on ? '问点什么…' : 'Agent 未连接：先记下，连上后再接着聊') : on ? '问点什么… 回车发送，⌥回车只记下，Shift+回车换行' : 'Agent 未连接：回车只记下，连上后再接着聊'}></textarea>
+      onKeyDown=${(e) => { if (e.key === 'Enter' && !e.isComposing && (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch))) { e.preventDefault(); send(on); } }}
+      placeholder=${touch ? (on ? '问点什么…' : 'Agent 未连接：先记下，连上后再接着聊') : on ? '问点什么… 回车发送，Shift+回车换行' : 'Agent 未连接：回车只记下，连上后再接着聊'}></textarea>
     ${on && models ? html`<select class="chat-model" value=${chosen || key(t.model) || ''} onChange=${(e) => setChosen(e.target.value)}
         title=${switchTo ? '下一句会换到这个模型：新开一个 agent，带上前面说过的' : '这段讨论用的模型'}>
       ${t.model ? null : html`<option value="">默认模型</option>`}
       ${t.model && !models.models.some((m) => key(m) === key(t.model)) ? html`<option value=${key(t.model)}>${t.model.id}</option>` : null}
       ${models.models.map((m) => html`<option value=${key(m)}>${m.displayName || m.id}</option>`)}</select>` : null}
     ${canRedo ? html`<button type="button" class="btn ghost" onClick=${redo}
-      title=${switchTo ? `用 ${switchTo.displayName || switchTo.id} 重新回答上一个问题，替换掉现在的回答` : '重新回答上一个问题，替换掉现在的回答（可以先在左边换个模型）'}>重新生成</button>` : null}
-    ${on ? html`<button type="button" class="btn ghost" title="只记下，不叫 agent 回答" onClick=${() => send(false)}>记下</button>` : null}
-    <button class="btn primary">${on ? '发送' : '记下'}</button></form>`;
+      title=${switchTo ? `用 ${switchTo.displayName || switchTo.id} 重新回答上一个问题，替换掉现在的回答` : '重新回答上一个问题，替换掉现在的回答（可以先在左边换个模型）'}>重新生成</button>` : null}    <button class="btn primary">${on ? '发送' : '记下'}</button></form>`;
 }
 
 /** The opening of an empty discussion: what it is about, plus a few questions to start from. */
@@ -252,13 +258,6 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
   const box = useRef(), input = useRef();
   const n = t?.messages.length || 0;
   useStickToBottom(box, n, t?.id);
-  useEffect(() => {
-    const q = quoting.value;
-    if (!q || q.scope !== t?.scope) return;
-    quoting.value = null;
-    setDraft((d) => `${d ? d.trimEnd() + '\n' : ''}「${q.text}」\n`);
-    setTimeout(() => { const el = input.current; el?.focus(); el?.setSelectionRange(el.value.length, el.value.length); });
-  }, [quoting.value, t?.scope]);
   const switchTo = (id) => { setTid(id); onThread?.(id); };
   if (!t) return html`<div class="chat"><div class="chat-empty"><span class="spin"></span></div></div>`;
   const k = kindOf(t.scope);
@@ -513,7 +512,7 @@ function Outline({ list, selId, onSelect }) {
       <span class="keys"><div class="seg sm"><button class=${pane.value === 'river' ? 'on' : ''} onClick=${() => (pane.value = 'river')}>河流</button>
         <button class=${pane.value === 'map' ? 'on' : ''} onClick=${() => (pane.value = 'map')}>地图</button></div></span></div>
     <div class="ol-tools">
-      <${JotForm} scope="library" ask placeholder=${agentOn.value ? '问 agent…（回车，开一段新讨论）' : '记一个想法…（回车，开一段新讨论）'} onDone=${(t) => onSelect(t.id)} />
+      <${JotForm} scope="library" placeholder=${agentOn.value ? '问 agent…（回车，开一段新讨论）' : '记一个想法…（回车，开一段新讨论）'} onDone=${(t) => onSelect(t.id)} />
       <div class="scope-bar"><span class="hint">新讨论</span>
         <button class="scope" onClick=${() => post('/api/threads', { scope: 'library' }).then((t) => onSelect(t.id)).catch(fail)}>整个论文库</button>
         <select class="scope" onChange=${(e) => { const s = e.target.value; e.target.value = ''; if (s) post('/api/threads', { scope: s }).then((t) => onSelect(t.id)).catch(fail); }}>

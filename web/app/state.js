@@ -103,9 +103,14 @@ export function openReader(pid, intent = {}) {
   readerIntent.value = intent;
   location.hash = `#/read/${enc(pid)}${intent.page ? '@' + intent.page : ''}`;
 }
-/** A paper's PDF in a floating window over whatever is open: { pid, page, q }. */
-export const peek = signal(null);
-export const peekPaper = (pid, page, q) => { peek.value = { pid, page, q }; };
+/** Papers' PDFs in floating windows over whatever is open, newest on top: [{ id, pid, page, q }]. A paper already
+ * open jumps in its own window; past five the oldest closes. */
+export const peek = signal([]);
+let peekSeq = 0;
+export const peekPaper = (pid, page, q) => {
+  const old = peek.value.find((x) => x.pid === pid);
+  peek.value = [...peek.value.filter((x) => x !== old), { id: old?.id ?? ++peekSeq, pid, page, q }].slice(-5);
+};
 /** The message to flash once a discussion is on screen. */
 export const highlight = signal(null);
 /** A passage selected on a page, waiting to be quoted into that scope's discussion input: { scope, text }. */
