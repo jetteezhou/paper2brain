@@ -33,6 +33,7 @@ paper2brain 发给你的任务都以"先读 librarian/""你是 paper2brain"或"�
 ./p2b figures <paper_id>       # 从 PDF 裁出的插图（编号、页码、图注、图片路径）和章节目录
 ./p2b fetch <论文>              # 拉取元数据和全文
 ./p2b link <capture_id> <论文> --evidence "为什么判定是这篇"
+./p2b alias <论文> "GR00T N1.7"     # 加别名：只在用户明确说过"X 就是这篇"时用（见 experiment.md）
 ./p2b card put <arxiv:id> --file /tmp/card.json
 ./p2b report put <arxiv:id> --file /tmp/report.json
 ./p2b topics

@@ -562,6 +562,12 @@ def paper_name(q, body, pid):
     return {"ok": True}
 
 
+@route("POST", "/api/papers/([^/]+)/aliases")
+def paper_aliases(q, body, pid):
+    store.set_aliases(pid, body.get("aliases") if isinstance(body.get("aliases"), list) else [])
+    return {"ok": True}
+
+
 @route("DELETE", "/api/papers/([^/]+)")
 def paper_delete(q, body, pid):
     try:

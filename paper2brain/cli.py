@@ -62,6 +62,10 @@ def run(args):
         store.link(args.capture_id, pid, "agent", evidence=args.evidence)
         store.update_capture(args.capture_id, status="mapped")
         return {"linked": pid, "has_fulltext": bool(store.pages(pid))}
+    if cmd == "alias":
+        pid = to_pid(args.paper)
+        store.set_aliases(pid, [*((store.get_paper(pid, with_anchors=False) or {}).get("aliases") or []), args.name])
+        return {"aliases": store.get_paper(pid, with_anchors=False)["aliases"]}
     if cmd == "unlink":
         store.unlink(args.capture_id, to_pid(args.paper), "agent")
         return {"unlinked": True}
@@ -171,7 +175,7 @@ def run(args):
         named = {r["paper"]: r["name"] for r in ((x.get("related") or {}).get("comparison") or {}).get("rows") or []}
         def words(pid):
             p = store.get_paper(pid, with_anchors=False) or {}
-            return (p.get("short_name"), named.get(pid)), " ".join([p.get("title") or "", named.get(pid, ""), *store.pages(pid)[:2]])
+            return " ".join([p.get("title") or "", named.get(pid, ""), *(p.get("aliases") or []), *store.pages(pid)[:2]])
         design = rules.validate_setup(draft.get("setup"), store.paper_ids(), words)
         figures = rules.validate_figures(draft.get("figures"), "\n".join(filter(None, (x.get("body") or {}).values())), design)
         rules.check_coverage(design, figures)
@@ -350,6 +354,9 @@ def parser(cls=argparse.ArgumentParser):
     s.add_argument("capture_id")
     s.add_argument("paper")
     s.add_argument("--evidence", required=True, help="为什么判定是这篇")
+    s = sub.add_parser("alias", help="给论文加一个别名（没有自己论文的版本或 checkpoint，如 GR00T N1.7 之于 GR00T N1）；只在用户明确说过时用")
+    s.add_argument("paper")
+    s.add_argument("name")
     s = sub.add_parser("unlink")
     s.add_argument("capture_id")
     s.add_argument("paper")

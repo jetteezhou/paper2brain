@@ -217,6 +217,12 @@ export function PaperCard({ paper: p, capture, inReader }) {
     if (v === null) return;
     try { await post(`/api/papers/${enc(p.id)}/name`, { name: v }); refresh(); } catch (err) { fail(err); }
   };
+  const editAliases = async (e) => {
+    e.preventDefault();
+    const v = prompt('别名，用逗号分隔（如没有单独论文的版本 GR00T N1.7）。实验设置里的对比方法可以用别名：', (p.aliases || []).join(', '));
+    if (v === null) return;
+    try { await post(`/api/papers/${enc(p.id)}/aliases`, { aliases: v.split(/[,，]/) }); refresh(); } catch (err) { fail(err); }
+  };
   return html`<article class="paper" data-anchor-surface="card" data-pid=${p.id} ref=${ref}>
     ${inReader ? null : html`<h1 class="paper-title">${p.short_name ? html`<span class="short-name">${p.short_name}</span>` : null}${p.title}</h1>`}
     <div class="paper-meta">${authors(p.authors)}${p.published ? ' · ' + p.published : ''} · ${p.url ? html`<a href=${href(p.url)} target="_blank" rel="noopener">${idLabel(p.id)} ↗</a>` : idLabel(p.id)}
@@ -224,6 +230,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
       ${capture && p.captures?.length > 1 ? html` · <a href="#" onClick=${(e) => { e.preventDefault(); openPaper(p.id); }}>共 ${p.captures.length} 个来源</a>` : null}
       ${capture ? html` · <a href="#" title=${capture.source === 'find' ? '不是你要找的方向' : '这条捕获不是讲这篇'} onClick=${unlink}>${capture.source === 'find' ? '不对路？' : '不是这篇？'}</a>` : null}
       · <a href="#" title=${p.short_name_by === 'user' ? '你起的缩写，点击修改' : '自动识别的缩写，点击修改'} onClick=${rename}>${p.short_name ? `缩写 ${p.short_name}` : '加缩写'}</a>
+      · <a href="#" title="这篇论文方法的其他叫法，点击修改" onClick=${editAliases}>${p.aliases?.length ? `别名 ${p.aliases.join('、')}` : '加别名'}</a>
       · <a href="#" class="danger" title="从库里彻底删除这篇论文及它的卡片、报告、划线、讨论和笔记" onClick=${removePaper}>删除论文</a></div>
     <${TopicsRow} owner=${p} />
     <${Jumps} p=${p} j=${fullJumps(p)} full />

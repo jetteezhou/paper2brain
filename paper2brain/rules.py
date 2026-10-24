@@ -418,13 +418,11 @@ def _named(items, what, errors, extra=(), most=8, least=1):
     return out
 
 
-def _calls_itself(name, words):
-    """Whether a paper calls its method this: words is (the paper's own names, its title and opening pages).
-    "π0 (5Hz)" counts as π0; a release of the method named after it ("GR00T N1.7" for GR00T N1) counts too."""
-    own, text = words
+def _calls_itself(name, text):
+    """Whether a paper's own words (title, opening pages, aliases) use this name for the method; "π0 (5Hz)" counts as π0."""
     core = re.sub(r"\s*\(.*?\)\s*", " ", name).strip().lower()
-    squash = lambda s: re.sub(r"[\s\-_]+", "", (s or "").lower())  # noqa: E731
-    return bool(core) and (squash(core) in squash(text) or any(n and squash(core).startswith(squash(n)) for n in own))
+    squash = lambda s: re.sub(r"[\s\-_]+", "", s.lower())  # noqa: E731
+    return bool(core) and squash(core) in squash(text or "")
 
 
 def validate_setup(setup, known_papers=(), paper_words=None):
@@ -456,8 +454,8 @@ def validate_setup(setup, known_papers=(), paper_words=None):
     if paper_words and not unknown:
         renamed = [f"{b['name']}（{b['paper']}）" for b in out["baselines"] if not _calls_itself(b["name"], paper_words(b["paper"]))]
         if renamed:
-            errors.append(f"setup.baselines 要用论文自己的方法名，这些名字在论文标题和开头几页里找不到，也不是以论文的方法名开头：{renamed}"
-                          "（版本或 checkpoint 写成「论文方法名 + 版本号」，例如 GR00T N1.7；借了论文思路的自己的变体放 controls）")
+            errors.append(f"setup.baselines 要用论文自己的方法名，这些名字在论文标题、开头几页和别名里找不到：{renamed}"
+                          "（没有自己论文的版本或 checkpoint，用户确认后用 ./p2b alias 给论文加别名；借了论文思路的自己的变体放 controls）")
     names = [method] + [x["name"] for k in ("baselines", "controls") for x in out[k]]
     if len(set(names)) < len(names):
         errors.append("method、baselines、controls 的名字不能重复")

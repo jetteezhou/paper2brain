@@ -20,7 +20,7 @@ TOPIC_TREE = [
     ("WAM", ["世界模型", "表征研究", "WAN base", "V-JEPA"]),
 ]
 TRIAGE = ("inbox", "deep", "archived", "ignored")
-JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch", "for_papers", "tasks", "groups", "comparison", "charts", "figures", "cells", "design"}
+JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch", "for_papers", "tasks", "groups", "comparison", "charts", "figures", "cells", "design", "aliases"}
 # WAITING: queued here until there is room to start it; the others are Cursor's own statuses of a live run.
 UNFINISHED = ("WAITING", "CREATING", "RUNNING", "QUEUED")
 _UNFINISHED_SQL = "('WAITING','CREATING','RUNNING','QUEUED')"
@@ -377,13 +377,19 @@ def _v24_who(c):
         c.execute(f"ALTER TABLE {t} ADD COLUMN user_id TEXT")
 
 
+def _v25_aliases(c):
+    """aliases: other names the user accepts for the paper's method (JSON list), e.g. GR00T N1.7 for the GR00T N1
+    paper: a release without a paper of its own. Baselines may use them (rules.validate_setup) and search finds them."""
+    c.execute("ALTER TABLE papers ADD COLUMN aliases TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
               _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything, _v21_owners,
-              _v22_idea_map, _v23_capture_owner, _v24_who]
+              _v22_idea_map, _v23_capture_owner, _v24_who, _v25_aliases]
 
 
 def config():
@@ -1385,6 +1391,16 @@ def set_short_name(pid, name, by):
         if by != "user" and cur["short_name_by"] == "user":
             return
         c.execute("UPDATE papers SET short_name=?, short_name_by=? WHERE id=?", (name, by, pid))
+
+
+def set_aliases(pid, names):
+    """The whole list, as the user wrote it: each trimmed to 40 characters, duplicates dropped, at most 8."""
+    names = list(dict.fromkeys(n for n in (re.sub(r"\s+", " ", str(x)).strip()[:40] for x in names or []) if n))
+    if len(names) > 8:
+        raise rules.Rejected("别名最多 8 个")
+    with tx() as c:
+        if not c.execute("UPDATE papers SET aliases=? WHERE id=?", (json.dumps(names, ensure_ascii=False) if names else None, pid)).rowcount:
+            raise rules.Rejected("这篇论文不存在")
 
 
 def unnamed_papers(limit=8):
@@ -3133,7 +3149,7 @@ def forget_agent(agent_id):
 
 # ---------- search ----------
 
-PAPER_FIELDS = ("p.title", "p.short_name", "p.id", "p.authors", "p.abstract", "p.card", "p.report", "pt.text")
+PAPER_FIELDS = ("p.title", "p.short_name", "p.aliases", "p.id", "p.authors", "p.abstract", "p.card", "p.report", "pt.text")
 
 
 def _every_word(terms, fields, op=" AND "):
@@ -3179,7 +3195,7 @@ def _search(terms, op, limit):
         where, args = _every_word(terms, PAPER_FIELDS, op)
         # ponytail: ranks every matching paper in Python; fine for a personal library, move scoring to FTS5 past ~10k papers.
         papers = _rows(c.execute(
-            f"SELECT p.id, p.title, p.short_name, p.authors, p.abstract, p.card, p.report, pt.text AS fulltext FROM papers p "
+            f"SELECT p.id, p.title, p.short_name, p.aliases, p.authors, p.abstract, p.card, p.report, pt.text AS fulltext FROM papers p "
             f"LEFT JOIN paper_text pt ON pt.paper_id=p.id WHERE {LISTED} AND {where}", args))
         where, args = _every_word(terms, ["raw", "title", "snapshot_text", "author"], op)
         captures = _rows(c.execute(
@@ -3199,7 +3215,7 @@ def _search(terms, op, limit):
                                    f"ORDER BY updated_at DESC LIMIT ?", (*args, limit)))
     for p in papers:
         card, report = p.pop("card"), p.pop("report")
-        fields = {"标题": p["title"], "缩写": p["short_name"], "编号": p["id"], "作者": " ".join(p["authors"] or []), "摘要": p.pop("abstract"),
+        fields = {"标题": p["title"], "缩写": " ".join(filter(None, [p["short_name"], *(p.pop("aliases") or [])])), "编号": p["id"], "作者": " ".join(p["authors"] or []), "摘要": p.pop("abstract"),
                   "快读卡": card and json.dumps(card, ensure_ascii=False), "深读报告": report and json.dumps(report, ensure_ascii=False),
                   "原文": p.pop("fulltext")}
         low = {k: v.lower() for k, v in fields.items() if v}
