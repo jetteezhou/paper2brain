@@ -289,7 +289,6 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
         <button disabled=${si <= 0} onClick=${() => switchTo(sib[si - 1].id)}>‹</button>${t.parent_id ? '分支' : '讨论'} ${si + 1}/${sib.length}<button disabled=${si >= sib.length - 1} onClick=${() => switchTo(sib[si + 1].id)}>›</button></span>` : null}
       <span class="grow"></span>
       ${inWorkbench ? html`<${ScopeOpen} scope=${t.scope} />` : null}
-      ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${() => branch(null)} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
       ${n || t.path.length ? html`<button class="btn sm ghost" onClick=${() => branch(null, true)} title="同一范围，不带前面的上下文，从头开始">发起新讨论</button>` : null}
@@ -382,7 +381,6 @@ function River({ t, reload }) {
       ${t.space ? html`<span class="chip" title="这段讨论在共享空间里，这里只读">共享 · ${t.space.name}</span>
         <button class="btn sm primary" onClick=${() => openInSpace(t.space, 'discuss', t.id)}>去「${t.space.name}」继续 →</button>` : html`
       <${ScopeOpen} scope=${t.scope} />
-      ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${branch} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
       ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => go('discuss', t.parent_id || undefined), () => go('discuss', t.id))} />` : null}`}</div>
