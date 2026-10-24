@@ -153,6 +153,22 @@ function inline(s) {
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/(^|[\s(（])(https?:\/\/[^\s<)）]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 }
+const TABLE_TAGS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col']);
+/** Agent-written HTML tables (merged cells etc.): only table tags and colspan/rowspan survive; cell text gets the usual inline markdown. */
+function htmlTable(src) {
+  const tag = /<\s*(\/?)\s*([a-zA-Z][a-zA-Z0-9]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+  let out = '', last = 0;
+  for (const m of src.matchAll(tag)) {
+    out += inline(src.slice(last, m.index));
+    const name = m[2].toLowerCase();
+    if (TABLE_TAGS.has(name)) {
+      const spans = [...m[3].matchAll(/\b(colspan|rowspan)\s*=\s*"?(\d{1,2})"?/gi)].map((a) => ` ${a[1].toLowerCase()}="${+a[2]}"`).join('');
+      out += m[1] ? `</${name}>` : `<${name}${name === 'table' ? ' class="md-table"' : ''}${spans}>`;
+    }
+    last = m.index + m[0].length;
+  }
+  return `<div class="table-wrap">${out + inline(src.slice(last))}</div>`;
+}
 const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
 function table(rows) {
   const sep = rows.length > 1 && /^[\s|:-]*-[\s|:-]*$/.test(rows[1]);
@@ -167,6 +183,12 @@ function blocks(text) {
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (/^\s*<table[\s>]/i.test(line)) {
+      const buf = [line];
+      while (!/<\/table\s*>/i.test(buf[buf.length - 1]) && i + 1 < lines.length) buf.push(lines[++i]);
+      out.push(htmlTable(buf.join('\n')));
+      continue;
+    }
     // Table rows may be separated by blank lines (agents do this); a blank line only ends the table if no row follows.
     if (/^\s*\|/.test(line)) { rows.push(line); continue; }
     if (rows.length) {
@@ -194,6 +216,32 @@ export const mdHtml = (src) => String(src || '').replace(/\r/g, '').split('```')
   .map((b, i) => (i % 2 ? `<pre><code>${esc(b.replace(/^\w*\n/, ''))}</code></pre>` : blocks(b))).join('');
 /** Agent-written Markdown. Buttons inside it carry data-action, handled by the app-wide click delegate. */
 export const Md = ({ text, class: cls = '' }) => html`<div class=${`md ${cls}`} dangerouslySetInnerHTML=${{ __html: mdHtml(text) }} />`;
+
+/** Click an .md-table header row to sort by that column (numbers compare as numbers); click again to flip.
+ * The header is a th-only row in the thead, or the table's first row when the source had no thead. */
+document.addEventListener('click', (e) => {
+  const th = e.target.closest?.('.md-table th');
+  if (!th) return;
+  const row = th.parentElement, table = th.closest('table');
+  if ([...row.cells].some((c) => c.tagName !== 'TH')) return;
+  const inBody = row.parentElement.tagName === 'TBODY';
+  if (inBody && row !== table.tBodies[0].rows[0]) return;  // 只在表头行上排序
+  const rows = [...table.tBodies[0].rows].slice(inBody ? 1 : 0);
+  if (rows.length < 2) return;
+  const col = [...row.cells].indexOf(th), asc = th.dataset.dir !== 'asc';
+  const val = (r) => {
+    const t = (r.cells[col]?.textContent || '').trim(), numeric = /^[-+]?[\d,.%]+$/.test(t);
+    return { numeric, t, v: numeric ? parseFloat(t.replace(/[, %]/g, '')) : 0 };
+  };
+  rows.sort((a, b) => {
+    const x = val(a), y = val(b);
+    if (x.numeric && y.numeric) return (x.v - y.v) * (asc ? 1 : -1);
+    if (x.numeric !== y.numeric) return x.numeric ? 1 : -1;  // 数字排在非数字后面
+    return x.t.localeCompare(y.t, 'zh-Hans-CN') * (asc ? 1 : -1);
+  }).forEach((r) => table.tBodies[0].appendChild(r));
+  table.querySelectorAll('th').forEach((h) => delete h.dataset.dir);
+  th.dataset.dir = asc ? 'asc' : 'desc';
+});
 
 // ---------- icons ----------
 

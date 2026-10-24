@@ -129,6 +129,8 @@ def run(args):
     if cmd == "diagram":
         if args.action == "list":
             return [{**d, "html": str(store.diagram_dir(args.id, d["name"]) / "figure.html")} for d in store.diagrams(args.id)]
+        if args.action == "chart":
+            return diagram.render_chart(args.id, args.name)
         return diagram.render(args.id, args.name, args.file, args.title, args.caption, args.kind)
     if cmd == "experiment":
         if args.action == "add":
@@ -188,6 +190,8 @@ def run(args):
             raise rules.Rejected("这个研究没有关联 Overleaf 项目")
         if args.action == "pull":
             overleaf.pull(pid)
+        if args.action == "compile":
+            return overleaf.compile(pid)
         return {"path": str(overleaf.local_dir(pid)), "unpushed_files": overleaf.changes(pid)["files"]}
     if cmd == "research":
         if args.action == "list":
@@ -397,11 +401,11 @@ def parser(cls=argparse.ArgumentParser):
     s.add_argument("--repo", required=True)
     s.add_argument("--paper", required=True)
     s.add_argument("--file", required=True)
-    s = sub.add_parser("diagram", help="论文插图（方法框架图、动机图）：render 把 HTML/SVG 渲染成论文用的 PDF 和预览 PNG；list 看已有的图（见 librarian/diagram.md）")
-    s.add_argument("action", choices=["render", "list"])
+    s = sub.add_parser("diagram", help="论文插图（方法框架图、动机图）：render 把 HTML/SVG 渲染成论文用的 PDF 和预览 PNG；chart 把实验页某张预期图表连数据导成 PDF/PNG；list 看已有的图（见 librarian/diagram.md）")
+    s.add_argument("action", choices=["render", "list", "chart"])
     s.add_argument("id", help="研究 id")
     s.add_argument("--kind", choices=["method", "motivation"], help="method 方法框架图（默认），motivation 动机图；改已有的图时不用写")
-    s.add_argument("--name", help="图的名字（小写英文和连字符），同名覆盖")
+    s.add_argument("--name", help="render：图的名字（小写英文和连字符），同名覆盖；chart：预期图表的 id（见 figures-plan show）")
     s.add_argument("--file", help="HTML 文件")
     s.add_argument("--title", help="简短的中文名，例如“整体框架图”")
     s.add_argument("--caption", help="论文图注（英文）")
@@ -434,8 +438,8 @@ def parser(cls=argparse.ArgumentParser):
     s.add_argument("id", help="研究 id")
     s.add_argument("--file")
     s.add_argument("--base-rev", type=int)
-    s = sub.add_parser("overleaf", help="研究关联的 Overleaf 项目：show 本地目录和未推送的改动 / pull 拉取最新（有未推送改动时拒绝）")
-    s.add_argument("action", choices=["show", "pull"])
+    s = sub.add_parser("overleaf", help="研究关联的 Overleaf 项目：show 本地目录和未推送的改动 / pull 拉取最新（有未推送改动时拒绝）/ compile 本地编译验证改动能过")
+    s.add_argument("action", choices=["show", "pull", "compile"])
     s.add_argument("id", help="研究 id")
 
     s = sub.add_parser("research", help="研究：list / add 新建（构思中）/ show / link 关联素材 / propose 提交修改稿待用户确认")

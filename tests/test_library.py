@@ -3,6 +3,7 @@ import base64
 import os
 import tempfile
 import unittest
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -732,6 +733,30 @@ class Store(unittest.TestCase):
             overleaf.push(pid, "conflict")
         self.assertEqual((path / "main.tex").read_text(), "Hallo\n")
         self.assertEqual(overleaf.changed(pid), 1)
+
+    def test_overleaf_compile_builds_pdf_outside_the_checkout(self):
+        import shutil
+        if not shutil.which("latexmk"):
+            self.skipTest("没装 latexmk")
+        import subprocess
+        from paper2brain import overleaf
+        git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True, capture_output=True, text=True).stdout  # noqa: E731
+        pid = "fedcba9876543210fedcba98"
+        tmp = Path(tempfile.mkdtemp())
+        git("init", "-q", "--bare", "-b", "master", str(tmp / "remote.git"))
+        git("clone", "-q", str(tmp / "remote.git"), str(tmp / "theirs"))
+        (tmp / "theirs" / "main.tex").write_text("\\documentclass{article}\n\\begin{document}\nHello $x^2$.\n\\end{document}\n")
+        git("-C", str(tmp / "theirs"), "add", ".")
+        git("-C", str(tmp / "theirs"), "commit", "-qm", "init")
+        git("-C", str(tmp / "theirs"), "push", "-q", "origin", "HEAD")
+        path = overleaf.clone(pid, str(tmp / "remote.git"))
+        out = overleaf.compile(pid)
+        self.assertTrue(Path(out["pdf"]).is_file())
+        self.assertEqual(overleaf.compiled_pdf(pid), Path(out["pdf"]))
+        self.assertEqual(overleaf.changed(pid), 0, "编译产物不能算未推送改动")
+        (path / "main.tex").write_text("\\documentclass{article}\n\\begin{document}\n\\nosuchmacro\n\\end{document}\n")
+        with self.assertRaisesRegex(rules.Rejected, "编译失败"):
+            overleaf.compile(pid)
 
     def test_latex_export_turns_citations_into_cite(self):
         from paper2brain import export
@@ -1467,6 +1492,109 @@ class Diagrams(unittest.TestCase):
         self.assertTrue(any(w.startswith("连线穿过文字：「Target-step") for w in warnings), warnings)
         store.delete_diagram(rid, "framework")
         self.assertEqual(store.diagrams(rid), [])
+
+    def test_render_chart_exports_a_filled_figure(self):
+        import importlib.util
+        if not importlib.util.find_spec("playwright"):
+            self.skipTest("没装 playwright")
+        import pymupdf
+        from paper2brain import diagram
+        known = {"arxiv:2410.24164", "arxiv:2607.26789"}
+        setup = {"questions": ["Q1"], "method": "ours", "benchmarks": [{"name": "Spatial"}],
+                 "baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA", "paper": "2607.26789"}],
+                 "metrics": [{"name": "SR", "unit": "%", "better": "higher"}]}
+        design = rules.validate_setup(setup, known)
+        rid = store.add_research("chart", "user")
+        figs = rules.validate_figures([
+            {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "SR.", "metric": "SR",
+             "rows": ["pi0", "CheckVLA", "ours"], "series": ["Spatial"]},
+            {"title": "主表", "kind": "table", "section": "ablation", "question": 1, "caption": "SR table.", "metric": "SR",
+             "rows": ["ours", "w/o x"], "series": ["Spatial"]}], "", design)
+        store.update_figures(rid, figs, "user", design=design)
+        eid = store.add_experiment(rid, "pi0 85.0, CheckVLA 88.1, ours 92.3", "user")
+        store.update_experiment(eid, "agent", 1, results=[{"name": f"{m} SR", "value": v}
+                                                          for m, v in (("pi0", "85.0"), ("CheckVLA", "88.1"), ("ours", "92.3"))])
+        fid = figs[0]["id"]
+        cells = [{"figure": fid, "row": m, "series": "Spatial", "experiment": eid, "result": f"{m} SR"}
+                 for m in ("pi0", "CheckVLA", "ours")]
+        store.fill_cells(rid, rules.validate_cells(cells, store.get_figures(rid)["figures"], store.get_research(rid)["experiments"]))
+        try:
+            out = diagram.render_chart(rid, fid)
+        except rules.Rejected as e:
+            self.skipTest(str(e))
+        self.assertEqual((out["kind"], out["figure"], out["title"]), ("chart", fid, "主结果"))
+        with pymupdf.open(out["pdf"]) as d:
+            self.assertEqual(len(d), 1)
+        html = (store.diagram_dir(rid, f"chart-{fid}") / "figure.html").read_text()
+        self.assertIn("92.3", html)
+        with self.assertRaisesRegex(rules.Rejected, "没有找到这张图表"):
+            diagram.render_chart(rid, "no-such-figure")
+        tab = diagram.render_chart(rid, figs[1]["id"])  # 表格：没填的格子是 —，最高值加粗
+        thtml = (store.diagram_dir(rid, f"chart-{figs[1]['id']}") / "figure.html").read_text()
+        self.assertIn("—", thtml)
+        self.assertEqual(store.diagrams(rid)[0]["kind"], "chart")
+        self.assertTrue(Path(tab["png"]).is_file())
+
+    def test_markdown_html_table_keeps_only_table_tags(self):
+        import importlib.util
+        if not importlib.util.find_spec("playwright"):
+            self.skipTest("没装 playwright")
+        from playwright.sync_api import sync_playwright
+        web = Path(__file__).resolve().parent.parent / "web"
+        mime = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}
+
+        def answer(route):
+            path = urllib.parse.urlsplit(route.request.url).path
+            f = (web / path.lstrip("/")).resolve()
+            if f == web:
+                return route.fulfill(content_type="text/html", body="""<!doctype html><script type="importmap">
+                    {"imports": {"preact": "/vendor/preact/preact.mjs", "preact/hooks": "/vendor/preact/hooks.mjs",
+                                 "@preact/signals-core": "/vendor/preact/signals-core.mjs",
+                                 "@preact/signals": "/vendor/preact/signals.mjs", "htm": "/vendor/preact/htm.mjs"}}</script>""")
+            if f.is_file() and web in f.parents:
+                return route.fulfill(path=str(f), content_type=mime.get(f.suffix, "text/plain"))
+            route.abort()
+
+        try:
+            with sync_playwright() as p:
+                page = p.chromium.launch().new_page()
+                page.route("**/*", answer)
+                page.goto("http://p2b.test/")
+                out = page.evaluate("""async () => {
+                    const { mdHtml } = await import('/app/lib.js');
+                    const host = document.createElement('div');
+                    document.body.appendChild(host);
+                    host.innerHTML = mdHtml('| 方法 | SR |\\n| --- | --- |\\n| pi0 | 85.0 |\\n| ours | 92.3 |\\n| CheckVLA | 88.1 |');
+                    const th = host.querySelectorAll('th')[1];
+                    th.click();
+                    const asc = [...host.querySelectorAll('tbody td:first-child')].map((c) => c.textContent);
+                    th.click();
+                    const desc = [...host.querySelectorAll('tbody td:first-child')].map((c) => c.textContent);
+                    const noThead = document.createElement('div');  // agent 的 HTML 表没有 thead 时首行是表头
+                    document.body.appendChild(noThead);
+                    noThead.innerHTML = mdHtml('<table><tr><th>m</th><th>v</th></tr><tr><td>b</td><td>2</td></tr><tr><td>a</td><td>10</td></tr></table>');
+                    noThead.querySelectorAll('th')[1].click();
+                    const noTheadAsc = [...noThead.querySelectorAll('td:first-child')].map((c) => c.textContent);
+                    return {
+                      ok: mdHtml('<table><thead><tr><th colspan="2">结果</th></tr></thead><tr><td>**92.3**</td><td>[arxiv:2410.24164]</td></tr></table>'),
+                      evil: mdHtml('<table onclick="alert(1)" style="x"><tr><td><img src=x onerror="alert(1)">safe</td></tr></table>'),
+                      script: mdHtml('前文<script>alert(2)</scr' + 'ipt>后文'),
+                      asc, desc, noTheadAsc,
+                    };
+                }""")
+        except Exception as e:
+            self.skipTest(f"Chromium 不可用：{str(e)[:120]}")
+        self.assertIn('colspan="2"', out["ok"])
+        self.assertIn("<b>92.3</b>", out["ok"])
+        self.assertIn('data-pid="arxiv:2410.24164"', out["ok"])
+        self.assertIn('class="md-table"', out["ok"])
+        for bad in ("onclick", "onerror", "<img", "style="):
+            self.assertNotIn(bad, out["evil"])
+        self.assertIn("safe", out["evil"])
+        self.assertNotIn("<script", out["script"])
+        self.assertEqual(out["asc"], ["pi0", "CheckVLA", "ours"], "点表头按数值升序")
+        self.assertEqual(out["desc"], ["ours", "CheckVLA", "pi0"], "再点一次降序")
+        self.assertEqual(out["noTheadAsc"], ["b", "a"], "没有 thead 时第一行是表头，不参与排序")
 
 
 class scratch_home:

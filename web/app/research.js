@@ -594,8 +594,16 @@ function cellsOf(x, f) {
 }
 
 function FigureCard({ x, f, d, label, remove }) {
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(false), [exporting, setExporting] = useState(false);
   if (editing) return html`<${FigureForm} x=${x} f=${f} d=${d} done=${() => setEditing(false)} />`;
+  const exported = x.diagrams.find((g) => g.kind === 'chart' && g.figure === f.id);
+  const exportPdf = async () => {
+    setExporting(true);
+    try { await post(`/api/research/${enc(x.id)}/figures/${enc(f.id)}/render`); toast('已导出 PDF/PNG，可放进论文'); refresh(); }
+    catch (e) { fail(e); }
+    setExporting(false);
+  };
+  const exportUrl = (file) => `/api/research/${enc(x.id)}/diagrams/${exported.name}/${file}?v=${encodeURIComponent(exported.at)}`;
   const cells = cellsOf(x, f), at = (r, s) => cells[cellKey(r, s)];
   const n = Object.keys(cells).length, total = f.rows.length * f.series.length;
   const sources = [...new Set(Object.values(cells).map(({ e }) => e.title || short(firstLine(e.raw), 30)))];
@@ -627,11 +635,13 @@ function FigureCard({ x, f, d, label, remove }) {
   return html`<div class="exp-card"><div class="exp-head"><b>${label}</b><span class="quotable">${f.title}</span>
       ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[how]}</span>
       <span class=${`chip ${n === total ? 'green' : ''}`} title="已经有实验结果的格子">已填 ${n}/${total}</span><span class="grow"></span>
-      ${remove ? html`<button class="btn sm ghost" onClick=${() => setEditing(true)}>编辑</button><span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
+      ${remove ? html`<button class="btn sm ghost" disabled=${exporting} title="把这张图连已填的数据渲染成论文用的单页 PDF（同时出 PNG），同名覆盖" onClick=${exportPdf}>${exporting ? html`<${Mark} spin />` : ''}${exported ? '重新导出' : '导出 PDF'}</button>
+        <button class="btn sm ghost" onClick=${() => setEditing(true)}>编辑</button><span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
     ${f.claim ? html`<div class="hint quotable">要证明：<${Html} s=${inlineMd(f.claim)} /></div>` : null}
     ${chart ? html`<${ExpChart} c=${chart} h=${how === 'hbar' ? Math.min(520, 28 * f.rows.length + 48) : null} />` : null}${caption}${grid}
     ${f.target && !chart ? html`<div class="hint">目标：${f.target.label || ''} ${f.target.value}</div>` : null}
-    <div class="hint">${sources.length ? `数字来自：${sources.join('、')}` : '直接在格子里填写。填过的数字会记成实验记录，agent 不会改。'}</div></div>`;
+    <div class="hint">${sources.length ? `数字来自：${sources.join('、')}` : '直接在格子里填写。填过的数字会记成实验记录，agent 不会改。'}</div>
+    ${exported ? html`<div class="hint">已导出 ${ago(exported.at)}：<a href=${exportUrl('figure.pdf')} target="_blank">PDF</a> · <a href=${exportUrl('figure.png')} target="_blank">PNG</a>（格子数据变了点「重新导出」）</div>` : null}</div>`;
 }
 
 function FiguresProposal({ x }) {
@@ -815,6 +825,13 @@ function OverleafChanges({ x }) {
 function Overleaf({ x }) {
   const pid = x.writing.overleaf;
   const [url, setUrl] = useState(''), [busy, setBusy] = useState(false);
+  const [pdf, setPdf] = useState(0), [compiling, setCompiling] = useState(false);
+  const compile = async () => {
+    setCompiling(true);
+    try { await post(`/api/research/${enc(x.id)}/overleaf/compile`); setPdf(Date.now()); toast('编译通过，预览已更新'); }
+    catch (e) { fail(e); }
+    setCompiling(false);
+  };
   const link = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -831,8 +848,10 @@ function Overleaf({ x }) {
   }
   return html`<div class="block"><div class="block-title">Overleaf 项目${viaGithub(pid) ? html`<span class="hint">　经 GitHub 同步：${pid.slice(7)}</span>` : null}<span class="line"></span>
       <a class="btn sm ghost" href=${viaGithub(pid) ? `https://github.com/${pid.slice(7)}` : `https://www.overleaf.com/project/${pid}`} target="_blank">打开 ↗</a>
+      <button class="btn sm ghost" disabled=${compiling} title="用本机 latexmk 编译本地目录（含未推送的改动），产物不放进项目" onClick=${compile}>${compiling ? html`<${Mark} spin />编译中` : '编译预览'}</button>
       <button class="btn sm ghost" disabled=${!!x.overleaf_changed} title=${x.overleaf_changed ? '先推送或放弃未推送的改动' : ''} onClick=${pull}>拉取最新</button>
       <button class="btn sm ghost" onClick=${unlink}>解除关联</button></div>
+    ${pdf ? html`<iframe class="pdf-view" src=${`/api/research/${enc(x.id)}/overleaf/pdf?v=${pdf}`} title="论文 PDF 预览"></iframe>` : null}
     <${OverleafChanges} x=${x} /></div>`;
 }
 

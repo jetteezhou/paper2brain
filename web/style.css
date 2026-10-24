@@ -317,7 +317,9 @@ details.runs summary::-webkit-details-marker { display: none; }
 .md pre code { background: none; padding: 0; }
 .md-table { border-collapse: collapse; margin: .5em 0; font-size: 13px; }
 .md-table th, .md-table td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
-.md-table th { background: var(--bg); font-weight: 600; }
+.md-table th { background: var(--bg); font-weight: 600; cursor: pointer; user-select: none; }
+.md-table th[data-dir="asc"]::after { content: " ↑"; }
+.md-table th[data-dir="desc"]::after { content: " ↓"; }
 .md blockquote { margin: .5em 0; padding-left: 10px; border-left: 3px solid var(--line-strong); color: var(--muted); }
 
 /* related work comparison table */
@@ -533,6 +535,7 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .ol-diff .add { background: rgba(46, 160, 67, .18); }
 .ol-diff .del { background: rgba(248, 81, 73, .18); }
 .ol-diff .hunk { color: var(--muted); }
+.pdf-view { width: 100%; height: 78vh; margin-top: 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; }
 .research-split { display: grid; grid-template-columns: minmax(0, 1fr) var(--dock-w, clamp(320px, 38%, 480px)); height: 100%; }
 .research-split.off { grid-template-columns: minmax(0, 1fr); }
 .research-main { overflow-y: auto; min-height: 0; min-width: 0; }

@@ -1095,6 +1095,7 @@ def overleaf_action(q, body, rid, action):
 
 @route("POST", "/api/research/([^/]+)/overleaf/compile")
 def overleaf_compile(q, body, rid):
+    # ponytail: 编辑成员即可触发（用户决定）；latexmk 能 \input 服务器文件，共享服务器上别把项目交给不信任的人
     out = overleaf.compile(_overleaf(rid))
     return {"log": out["log"]}
 
