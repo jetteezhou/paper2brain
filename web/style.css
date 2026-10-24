@@ -478,7 +478,8 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 
 /* discussion tree */
 .tree-bar { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.msgs > .tree-bar { margin: -16px -16px -8px; flex: none; }
+.msgs > .tree-bar { margin: -16px -16px 0; flex: none; }
+.msgs > .tree-bar + .scope-papers { margin-top: -14px; }
 .tree-title { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
 .tree-title b { min-width: 0; }
 .tree-title .hint, .tree-title .btn { flex: none; white-space: nowrap; }
@@ -818,6 +819,7 @@ input, textarea, select { transition: border-color .15s, box-shadow .2s var(--ea
   .pal-bg { padding-top: 4vh; }
   #body { grid-template-columns: 1fr; }
   #detail { display: none; }
+  #body.single #detail { display: block; }
   #body.show-detail #list { display: none; }
   #body.show-detail #detail { display: flex; flex-direction: column; }
   .detail.thread, .delta { flex: 1; height: auto; min-height: 0; }
