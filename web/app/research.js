@@ -488,7 +488,13 @@ function FigureForm({ x, f, d, done }) {
     const cells = rs.flatMap((r) => ss.map((s) => { const [experiment, result] = (pick[cellKey(r, s)] || '').split('\u0000');
       return { figure: f.id, row: r, series: s, experiment: experiment || null, result: result || null }; }));
     try {
-      await post(`/api/research/${enc(x.id)}/figures`, { figures: x.figures.figures.map((g) => (g.id === f.id ? nf : g)), cells, base_rev: x.figures.revision });
+      const r = await post(`/api/research/${enc(x.id)}/figures`, { figures: x.figures.figures.map((g) => (g.id === f.id ? nf : g)), cells, base_rev: x.figures.revision });
+      if (r.lookup) {
+        toast(`${r.methods.join('、')} 还不在对比方法里。已打开讨论：agent 先在库里找，没有就上网找，找到会入库再跟你确认。这张图还没保存。`);
+        showResearch(x.id, 'experiments', r.thread_id);
+        refresh();
+        return;
+      }
       toast('已保存'); done(); refresh();
     } catch (err) { fail(err); }
   };
@@ -507,7 +513,8 @@ function FigureForm({ x, f, d, done }) {
     ${rs.length && ss.length ? html`<div class="hint">格子：选哪条实验记录的哪个结果填进去（数字改实验记录）</div><div class="table-wrap"><table class="cmap paper"><thead><tr><th></th>${ss.map((s) => html`<th>${s}</th>`)}</tr></thead>
       <tbody>${rs.map((r) => html`<tr><td>${r}</td>${ss.map((s) => html`<td><select value=${pick[cellKey(r, s)] || ''} onChange=${(e) => setPick({ ...pick, [cellKey(r, s)]: e.target.value })}>
         <option value="">—</option>${results.map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select></td>`)}</tr>`)}</tbody></table></div>` : null}
-    <div style="display:flex;gap:8px"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button></div></form>`;
+    <div style="display:flex;gap:8px;align-items:center"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button>
+      <span class="hint">主结果里写了还没有的方法、并且 agent 已连接时，会打开讨论去找论文，这张图先不保存。</span></div></form>`;
 }
 
 /** Two consecutive half-width figures share a row; a full-width one (the default) keeps the row to itself. */
