@@ -169,8 +169,9 @@ def run(args):
             return {"filled": len(cells)}
         draft = draft if isinstance(draft, dict) else {}
         named = {r["paper"]: r["name"] for r in ((x.get("related") or {}).get("comparison") or {}).get("rows") or []}
-        words = lambda pid: " ".join([(store.get_paper(pid, with_anchors=False) or {}).get("title") or "", named.get(pid, ""),
-                                      *store.pages(pid)[:2]])  # noqa: E731
+        def words(pid):
+            p = store.get_paper(pid, with_anchors=False) or {}
+            return (p.get("short_name"), named.get(pid)), " ".join([p.get("title") or "", named.get(pid, ""), *store.pages(pid)[:2]])
         design = rules.validate_setup(draft.get("setup"), store.paper_ids(), words)
         figures = rules.validate_figures(draft.get("figures"), "\n".join(filter(None, (x.get("body") or {}).values())), design)
         rules.check_coverage(design, figures)

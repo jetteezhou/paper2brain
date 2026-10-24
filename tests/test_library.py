@@ -467,8 +467,10 @@ class Store(unittest.TestCase):
                 rules.validate_setup({**setup, **bad}, known)
         design = rules.validate_setup(setup, known)
         self.assertEqual(design["baselines"][1]["paper"], "arxiv:2607.26789")
-        words = {"arxiv:2410.24164": "π0: A Vision-Language-Action Flow Model", "arxiv:2607.26789": "CheckVLA: Execution-Time Verification"}.get
+        words = {"arxiv:2410.24164": (("π0",), "π0: A Vision-Language-Action Flow Model"),
+                 "arxiv:2607.26789": (("CheckVLA",), "CheckVLA: Execution-Time Verification")}.get
         rules.validate_setup({**setup, "baselines": [{"name": "π0 (5Hz)", "paper": "arxiv:2410.24164"}, setup["baselines"][1]]}, known, words)
+        rules.validate_setup({**setup, "baselines": [{"name": "π0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA-1.7", "paper": "2607.26789"}]}, known, words)
         with self.assertRaisesRegex(rules.Rejected, "Independent AC Predictor"):
             rules.validate_setup({**setup, "baselines": [setup["baselines"][0], {"name": "Independent AC Predictor", "paper": "2607.26789"}]}, known, words)
         fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
