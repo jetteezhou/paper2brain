@@ -1897,14 +1897,17 @@ def thread_owners():
 
 
 def pending_map(limit=20):
-    """Titled discussions the map has not read since their latest message (same-second edits count too)."""
+    """Titled discussions the map has not read since their latest message. One still being talked in waits:
+    an unfinished chat, or a message under 10 minutes old (same-second edits still count once it is quiet)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds")
     with tx() as c:
         return _rows(c.execute(
             "SELECT t.id, max(m.created_at) AS last_at, count(m.id) AS n FROM threads t JOIN messages m ON m.thread_id=t.id "
-            "WHERE t.title IS NOT NULL GROUP BY t.id "
-            "HAVING max(m.created_at) > coalesce((SELECT at FROM map_seen s WHERE s.thread_id=t.id), '') "
-            "OR count(m.id) != coalesce((SELECT n FROM map_seen s WHERE s.thread_id=t.id), -1) "
-            "ORDER BY last_at DESC, t.rowid DESC LIMIT ?", (limit,)))
+            f"WHERE t.title IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ref=t.id AND r.kind='chat' AND r.status IN {_UNFINISHED_SQL}) "
+            "GROUP BY t.id "
+            "HAVING (max(m.created_at) > coalesce((SELECT at FROM map_seen s WHERE s.thread_id=t.id), '') "
+            "OR count(m.id) != coalesce((SELECT n FROM map_seen s WHERE s.thread_id=t.id), -1)) "
+            "AND max(m.created_at) <= ? ORDER BY last_at DESC, t.rowid DESC LIMIT ?", (cutoff, limit)))
 
 
 def get_map():
@@ -2612,16 +2615,72 @@ def discard_figures(rid):
 
 
 def fill_cells(rid, cells, by="agent"):
-    """cells: already checked by rules.validate_cells; each replaces whatever filled that cell (experiment None clears it)."""
+    """cells: already checked by rules.validate_cells; each replaces whatever filled that cell (experiment None clears it).
+    A cell already pointing at a user-edited experiment stays: the user typed that number, or edited that record."""
     with tx() as c:
         cur = _row(c.execute("SELECT cells FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
         if not cur:
             raise rules.Rejected("这个研究还没有实验设计")
         key = lambda x: (x["figure"], x["row"], x["series"])  # noqa: E731
+        if by != "user":
+            locked = {r[0] for r in c.execute("SELECT id FROM experiments WHERE research_id=? AND edited_by='user'", (rid,))}
+            owned = {key(x) for x in cur["cells"] if x.get("experiment") in locked}
+            cells = [x for x in cells if key(x) not in owned]
         new = {key(x): x for x in cur["cells"]} | {key(x): x for x in cells}
         c.execute("UPDATE exp_figures SET cells=? WHERE research_id=?",
                   (json.dumps([x for x in new.values() if x["experiment"]], ensure_ascii=False), rid))
         _event(c, by, "figures.fill", rid)
+
+
+def _hand_exp(e):
+    return e.get("edited_by") == "user" and not (e.get("raw") or "").strip()
+
+
+def set_cell_value(rid, figure, row, series, value):
+    """A number the user typed into one cell. It is stored as an experiment result, which is where every other
+    number already lives. ponytail: one hand record per row title, result name = series; two figures sharing a row
+    title share that record. Split them when a row stands for different things on different figures."""
+    value = str(value if value is not None else "").strip()
+    if len(value) > 40:
+        raise rules.Rejected("格子里的结果不超过 40 字")
+    fg = get_figures(rid)
+    fig = next((f for f in fg["figures"] if f["id"] == figure), None)
+    if not fig or row not in fig["rows"] or series not in fig["series"]:
+        raise rules.Rejected("这张图没有这个格子")
+    exps = {e["id"]: e for e in get_research(rid)["experiments"]}
+    cell = next((c for c in fg["cells"]
+                 if c["figure"] == figure and c["row"] == row and c["series"] == series and c.get("experiment") in exps), None)
+
+    def write(e, name):
+        results = [dict(r) for r in (e.get("results") or [])]
+        hit = next((r for r in results if r["name"] == name), None)
+        if hit:
+            hit["value"] = value
+        else:
+            results.append({"name": name, "value": value, "note": None})
+        update_experiment(e["id"], "user", e["revision"], results=results)
+        return e["id"]
+
+    if not value:
+        if not cell:
+            return
+        fill_cells(rid, [{"figure": figure, "row": row, "series": series, "experiment": None, "result": None}], "user")
+        e = exps[cell["experiment"]]
+        if _hand_exp(e):
+            results = [r for r in (e.get("results") or []) if r["name"] != cell["result"]]
+            if results or e.get("setup") or e.get("conclusion_text") or e.get("target"):
+                update_experiment(e["id"], "user", e["revision"], results=results)
+            else:
+                delete_experiment(e["id"])
+        return
+    if cell:
+        write(exps[cell["experiment"]], cell["result"] or series)
+        return
+    e = next((e for e in exps.values() if _hand_exp(e) and e.get("title") == row), None)
+    eid = write(e, series) if e else add_experiment(rid, "", "user", row)
+    if not e:
+        update_experiment(eid, "user", 1, results=[{"name": series, "value": value, "note": None}])
+    fill_cells(rid, [{"figure": figure, "row": row, "series": series, "experiment": eid, "result": series}], "user")
 
 
 def get_related(rid):

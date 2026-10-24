@@ -33,7 +33,7 @@ export const PaperChip = ({ id, title, peek }) => html`<a href="#" class="chip p
 
 export function ListDetail({ list, detail, hasSel, single }) {
   return html`<div id="body" class=${`${hasSel ? 'show-detail' : ''} ${single ? 'single' : ''}`}><section id="list">${list}</section><section id="detail">
-    ${hasSel && !wide() ? html`<button class="btn sm ghost" onClick=${() => (selected.value = null)}>← 返回列表</button>` : null}${detail}</section></div>`;
+    ${hasSel ? html`<button class="btn sm ghost m-back" onClick=${() => (selected.value = null)}>← 返回列表</button>` : null}${detail}</section></div>`;
 }
 
 /** The selected item of this kind, auto-selecting the first one on wide screens when nothing is selected.

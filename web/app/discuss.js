@@ -282,7 +282,7 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
   const empty = !n && !t.path.length;
 
   return html`<div class="chat">
-    <div class="chat-head">范围：${scopeLabel(t.scope, t.scope_title)}
+    <div class="chat-head"><span class="chat-scope" title=${scopeLabel(t.scope, t.scope_title)}>范围：${scopeLabel(t.scope, t.scope_title)}</span>
       ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(k.length + 1)); }}>有修改稿待你确认 →</a>` : null}
       ${sib.length > 1 ? html`<span class="branch-switch" title=${t.parent_id ? '同一处分出的几个分支' : '这个范围里并列的几段讨论'}>
         <button disabled=${si <= 0} onClick=${() => switchTo(sib[si - 1].id)}>‹</button>${t.parent_id ? '分支' : '讨论'} ${si + 1}/${sib.length}<button disabled=${si >= sib.length - 1} onClick=${() => switchTo(sib[si + 1].id)}>›</button></span>` : null}
@@ -293,12 +293,12 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
       ${n ? html`<button class="btn sm ghost" onClick=${() => branch(null)} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
       ${n || t.path.length ? html`<button class="btn sm ghost" onClick=${() => branch(null, true)} title="同一范围，不带前面的上下文，从头开始">发起新讨论</button>` : null}
       ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => switchTo(t.parent_id || sib.find((s) => s.id !== t.id)?.id || null), () => switchTo(t.id))} />` : null}</div>
-    ${n || t.path.length ? html`<div class="tree-bar">
-      ${t.path.length ? html`<div class="crumbs">${t.path.map((s) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(s.id); }}>${short(threadName(s), 24)}</a><span>›</span>`)}</div>` : null}
-      <${TitleLine} t=${t} />
-      ${t.children.filter((c) => !c.fork_message_id).length ? html`<div class="hint">分出去的：${t.children.filter((c) => !c.fork_message_id).map((c) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(c.id); }}>${short(threadName(c), 30)}</a>　`)}</div>` : null}</div>` : null}
-    ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
     <div class="msgs" ref=${box}>
+      ${n || t.path.length ? html`<div class="tree-bar">
+        ${t.path.length ? html`<div class="crumbs">${t.path.map((s) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(s.id); }}>${short(threadName(s), 24)}</a><span>›</span>`)}</div>` : null}
+        <${TitleLine} t=${t} />
+        ${t.children.filter((c) => !c.fork_message_id).length ? html`<div class="hint">分出去的：${t.children.filter((c) => !c.fork_message_id).map((c) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(c.id); }}>${short(threadName(c), 30)}</a>　`)}</div>` : null}</div>` : null}
+      ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
       <${Inherited} path=${t.path} />
       ${empty ? html`<${EmptyChat} t=${t} setDraft=${setDraft} input=${input} />`
         : t.messages.map((m) => html`<${Msg} key=${m.id} m=${m} t=${t} onFork=${branch} />`)}
@@ -319,16 +319,22 @@ function Shelf({ forks, nextId, outflow }) {
 
 /** An ancestor reach: dimmer water already flowed through, the forks still visible where they happened. */
 function UpReach({ seg, nextId, onFork }) {
+  const [open, setOpen] = useState(() => innerWidth > 900);
+  useEffect(() => { if (highlight.value && seg.messages.some((m) => m.id === highlight.value)) setOpen(true); }, [highlight.value]);
   const byMid = {};
   for (const c of seg.children || []) if (c.fork_message_id) (byMid[c.fork_message_id] = byMid[c.fork_message_id] || []).push(c);
   const outflow = (seg.children || []).filter((c) => !c.fork_message_id);
-  return html`<div class="reach up">
-    <button class="reach-head" title="溯洄：把这段讨论变成当前" onClick=${() => go('discuss', seg.id)}>⌃ ${short(threadName(seg), 56)}</button>
-    ${seg.messages.map((m) => html`<div key=${m.id} id=${`m-${m.id}`} class=${`up-msg ${m.role}${highlight.value === m.id ? ' flash' : ''}`}>
+  const forks = (seg.children || []).length;
+  return html`<div class=${`reach up ${open ? '' : 'folded'}`}>
+    <div class="reach-bar">
+      <button class="reach-head" title="溯洄：把这段讨论变成当前" onClick=${() => go('discuss', seg.id)}>⌃ ${short(threadName(seg), 56)}</button>
+      <button class="btn sm ghost reach-toggle" onClick=${() => setOpen(!open)}>${open ? '收起上级' : `展开 ${seg.messages.length} 条${forks > 1 ? ` · ${forks} 分支` : ''}`}</button>
+    </div>
+    ${open ? html`${seg.messages.map((m) => html`<div key=${m.id} id=${`m-${m.id}`} class=${`up-msg ${m.role}${highlight.value === m.id ? ' flash' : ''}`}>
       <div class="up-body">${m.role === 'user' ? m.text : html`<${Md} text=${m.text} />`}</div>
       <button class="btn sm ghost fork-here" title="从这条消息分出一段新讨论" onClick=${() => onFork(m, seg)}>⑂ 分叉</button>
       ${byMid[m.id]?.length ? html`<${Shelf} forks=${byMid[m.id]} nextId=${nextId} />` : null}</div>`)}
-    ${outflow.length ? html`<${Shelf} forks=${outflow} nextId=${nextId} outflow />` : null}
+      ${outflow.length ? html`<${Shelf} forks=${outflow} nextId=${nextId} outflow />` : null}` : null}
   </div>`;
 }
 
@@ -368,7 +374,8 @@ function River({ t, reload }) {
   };
 
   return html`<div class="river">
-    <div class="chat-head">范围：${scopeLabel(t.scope, t.scope_title)}
+    <div class="chat-head"><button class="btn sm ghost m-back" onClick=${() => go('discuss')}>← 列表</button>
+      <span class="chat-scope" title=${scopeLabel(t.scope, t.scope_title)}>范围：${scopeLabel(t.scope, t.scope_title)}</span>
       ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(k.length + 1)); }}>有修改稿待你确认 →</a>` : null}
       <span class="grow"></span>
       <${ScopeOpen} scope=${t.scope} />
@@ -376,8 +383,8 @@ function River({ t, reload }) {
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${branch} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
       ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => go('discuss', t.parent_id || undefined), () => go('discuss', t.id))} />` : null}</div>
-    ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
     <div class="river-flow" ref=${box}>
+      ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
       ${chain.map((seg, i) => i < chain.length - 1
         ? html`<${UpReach} key=${seg.id} seg=${seg} nextId=${chain[i + 1].id} onFork=${fork} />`
         : html`<div class="reach now" key=${seg.id}>
@@ -708,8 +715,7 @@ export function DiscussView({ threadId }) {
   return html`<div id="body" class=${sel || pane.value === 'map' ? 'show-detail' : ''}>
     <section id="list">${list ? html`<${Outline} list=${list} selId=${sel} onSelect=${select} />` : html`<div class="empty"><span class="spin"></span></div>`}</section>
     <section id="detail">
-      ${innerWidth <= 900 && (sel || pane.value === 'map') ? html`<button class="btn sm ghost" onClick=${back}>← 返回列表</button>` : null}
-      ${pane.value === 'map' ? html`<${MapCanvas} onOpen=${select} threads=${list} />`
+      ${pane.value === 'map' ? html`<button class="btn sm ghost m-back" onClick=${back}>← 返回列表</button><${MapCanvas} onOpen=${select} threads=${list} />`
         : sel ? html`<div class="detail thread"><div class="chatbox"><${RiverLoader} key=${sel} id=${sel} /></div></div>`
           : html`<div class="empty" style="padding-top:120px">选择左侧一段讨论</div>`}
     </section></div>`;

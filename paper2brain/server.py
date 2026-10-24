@@ -948,6 +948,13 @@ def _context(rid):
     return "\n".join(filter(None, ((store.get_research(rid) or {}).get("body") or {}).values()))
 
 
+@route("POST", "/api/research/([^/]+)/figures/cell")
+def figures_cell(q, body, rid):
+    """The user typed a result straight into one cell of the experiment design."""
+    store.set_cell_value(rid, body.get("figure"), body.get("row"), body.get("series"), body.get("value"))
+    return {"ok": True}
+
+
 @route("POST", "/api/research/([^/]+)/figures")
 def figures_update(q, body, rid):
     """The user's own edit: the figures, and optionally the setup and which experiment result fills which cell."""

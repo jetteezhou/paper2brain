@@ -2,7 +2,10 @@
 .outline { outline: none; min-height: 100%; display: flex; flex-direction: column; }
 .ol-tools { padding: 8px 18px 6px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--line); }
 .ol-tools .add-line { margin: 0; }
-.ol-filter { margin-left: auto; width: 110px; border: 1px solid var(--line); border-radius: 7px; padding: 2px 8px; background: var(--panel); outline: none; font-size: 12.5px; }
+.ol-tools .scope-bar { flex-wrap: nowrap; }
+.ol-tools .scope { flex: none; padding: 3px 9px; min-height: 30px; font-size: 12.5px !important; }
+.ol-tools select.scope { flex: 0 1 104px; max-width: 104px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ol-filter { flex: 1 1 68px; min-width: 60px; width: auto; min-height: 30px; border: 1px solid var(--line); border-radius: 7px; padding: 2px 8px; background: var(--panel); outline: none; font-size: 12.5px !important; }
 .ol-filter:focus { border-color: var(--accent); }
 .ol-row { display: flex; align-items: flex-start; gap: 4px; padding: 7px 14px 7px 10px; cursor: pointer; border-bottom: 1px solid transparent; position: relative; }
 .ol-row:hover { background: rgba(0,0,0,.025); }
@@ -40,17 +43,20 @@
 .msg-wrap.user .forks { justify-content: flex-end; }
 .chat-input .btn.ghost { flex: none; }
 /* ---------- the river ---------- */
-.river { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.river-flow { flex: 1; overflow-y: auto; padding: 14px 16px 20px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
-.reach { display: flex; flex-direction: column; gap: 10px; }
+.river { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; width: 100%; }
+.river-flow { flex: 1; overflow-y: auto; padding: 14px 16px 20px; display: flex; flex-direction: column; gap: 16px; min-height: 0; min-width: 0; }
+.reach { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .reach.up { opacity: .78; border-left: 2px solid var(--line); padding-left: 14px; margin-left: 2px; }
+.reach.up.folded { padding-left: 10px; }
 .reach.up:hover, .reach.up:focus-within { opacity: 1; }
-.reach-head { align-self: flex-start; border: 0; background: none; padding: 0; cursor: pointer; color: var(--faint); font-size: 12px; font-weight: 560; }
+.reach-bar { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.reach-head { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border: 0; background: none; padding: 0; cursor: pointer; color: var(--faint); font-size: 12px; font-weight: 560; }
 .reach-head:hover { color: var(--accent); }
+.reach-toggle { flex: none; font-size: 12px; padding: 1px 7px; min-height: 24px !important; }
 .up-msg { position: relative; font-size: 13.5px; }
 .up-msg.user .up-body { margin-left: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 10px 10px 3px 10px; padding: 5px 11px; max-width: 80%; white-space: pre-wrap; width: fit-content; }
-.up-msg.bot .up-body .md { font-size: 13.5px; color: var(--muted); }
-.up-msg .fork-here { position: absolute; top: 2px; right: 0; opacity: 0; transition: opacity .15s; }
+.up-msg.bot .up-body .md, .up-msg.assistant .up-body .md { font-size: 13.5px; color: var(--muted); }
+.up-msg .fork-here { position: absolute; top: 2px; right: 0; opacity: 0; transition: opacity .15s; background: var(--panel); box-shadow: var(--shadow); }
 .up-msg:hover .fork-here { opacity: 1; }
 .reach.now { border-top: 1px dashed var(--line-strong); padding-top: 12px; }
 .reach-now { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
@@ -60,7 +66,7 @@
 /* tributary shelves: the forks, right where the stream forks */
 .shelf { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0 2px 10px; padding: 7px 9px; border: 1px dashed var(--line-strong); border-radius: 10px; background: color-mix(in srgb, var(--bg) 55%, transparent); }
 .shelf-tag { flex: none; font-size: 11px; color: var(--faint); padding-right: 2px; }
-.shelf-card { display: flex; align-items: baseline; gap: 6px; max-width: 240px; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 4px 9px; cursor: pointer; color: var(--text); text-align: left; }
+.shelf-card { display: flex; align-items: baseline; gap: 6px; min-width: 0; max-width: min(240px, 100%); border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 4px 9px; cursor: pointer; color: var(--text); text-align: left; }
 .shelf-card b { font-size: 12.5px; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shelf-card span { flex: none; font-size: 10.5px; color: var(--faint); }
 .shelf-card:hover { border-color: var(--accent); }

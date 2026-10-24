@@ -889,7 +889,8 @@ function App() {
   return html`<div id="app" inert=${blocked}>
       <${Sidebar} />
       <main id="main">
-        <nav id="mnav" aria-label="主导航"><${MobileMark} /><${MainNav} /></nav>
+        <nav id="mnav" aria-label="主导航"><${MobileMark} /><${MainNav} /><${Libraries} />
+          <button type="button" class="m-agent" onClick=${setupModal} title="Agent 与账号设置" aria-label="Agent 与账号设置"><span class=${`dot ${appState.value?.agent?.enabled ? 'ok' : ''}`}></span></button></nav>
         <${PalTrigger} cls="mpal" />
         <${Body} />
       </main>

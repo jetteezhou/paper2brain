@@ -25,7 +25,7 @@ export const del = (u) => api('DELETE', u);
 export function fit(el) {
   if (!el?.offsetWidth) return;  // hidden: scrollHeight would be 0
   el.style.height = 'auto';
-  el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+  if (el.value) el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
 }
 /** Phones have no Shift key handy: there Enter is a newline and the button sends. */
 export const touch = matchMedia('(pointer: coarse)').matches;

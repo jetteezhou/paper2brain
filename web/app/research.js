@@ -424,6 +424,12 @@ const FIG_WIDTH = { full: '单栏', half: '双栏' };
 const FIG_SECTION = { main: '主结果', ablation: '消融实验', analysis: '分析', appendix: '附录' };
 const num = (v) => { const n = parseFloat(String(v).replace(/,/g, '')); return Number.isFinite(n) ? n : null; };
 const cellKey = (r, s) => `${r}\u0000${s}`;
+async function saveCell(x, f, row, series, raw, prev) {
+  const value = raw.trim();
+  if (value === (prev || '')) return;
+  try { await post(`/api/research/${enc(x.id)}/figures/cell`, { figure: f.id, row, series, value }); refresh(); }
+  catch (err) { fail(err); }
+}
 const metricOf = (d, name) => d?.metrics.find((m) => m.name === name);
 const arrow = (m) => (m ? (m.better === 'lower' ? '↓' : '↑') : '');
 const metricLabel = (m) => (m ? `${m.name}${m.unit ? ` (${m.unit})` : ''} ${arrow(m)}` : '');
@@ -510,7 +516,7 @@ function FigureForm({ x, f, d, done }) {
     <input name="claim" defaultValue=${f.claim || ''} placeholder="要证明的结论（一句话）" />
     <div style="display:flex;gap:8px"><input name="x_title" defaultValue=${f.x_title || ''} placeholder="横轴标题（可选）" /><input name="y_title" defaultValue=${f.y_title || ''} placeholder="纵轴标题（可选）" /></div>
     <div style="display:flex;gap:8px"><input name="target_value" defaultValue=${f.target?.value ?? ''} placeholder="成功线数值（可选，要出自三要素）" /><input name="target_label" defaultValue=${f.target?.label || ''} placeholder="成功线说明" /></div>
-    ${rs.length && ss.length ? html`<div class="hint">格子：选哪条实验记录的哪个结果填进去（数字改实验记录）</div><div class="table-wrap"><table class="cmap paper"><thead><tr><th></th>${ss.map((s) => html`<th>${s}</th>`)}</tr></thead>
+    ${rs.length && ss.length ? html`<div class="hint">格子：选已有实验记录，或直接在图上的格子里填写</div><div class="table-wrap"><table class="cmap paper"><thead><tr><th></th>${ss.map((s) => html`<th>${s}</th>`)}</tr></thead>
       <tbody>${rs.map((r) => html`<tr><td>${r}</td>${ss.map((s) => html`<td><select value=${pick[cellKey(r, s)] || ''} onChange=${(e) => setPick({ ...pick, [cellKey(r, s)]: e.target.value })}>
         <option value="">—</option>${results.map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select></td>`)}</tr>`)}</tbody></table></div>` : null}
     <div style="display:flex;gap:8px;align-items:center"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button>
@@ -568,19 +574,25 @@ function FigureCard({ x, f, d, label, remove }) {
       : { scales: { x: axis(f.x_title), y: axis(yLabel) } } };
   const caption = f.caption ? html`<div class="fig-caption quotable"><b>${label}:</b> <${Html} s=${inlineMd(f.caption)} /></div>` : null;
   const q = d?.questions[f.question - 1];
+  const typed = (r, s) => {
+    const c = at(r, s), v = c ? c.value : '';
+    if (!remove) return !c ? html`<span class="hint">—</span>` : num(v) === best[s] ? html`<b>${v}</b>` : v;
+    return html`<input class=${`cell-in${c && num(v) === best[s] ? ' best' : ''}`} key=${v} defaultValue=${v} placeholder="填写"
+      title=${c ? `${c.e.title || '实验记录'}${c.note ? ` · ${c.note}` : ''}` : '直接填写这个格子'}
+      onBlur=${(ev) => saveCell(x, f, r, s, ev.target.value, v)}
+      onKeyDown=${(ev) => { if (ev.key === 'Enter') ev.currentTarget.blur(); }} />`;
+  };
+  const grid = html`<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
+      ${f.series.map((s) => html`<th>${s}${!f.metric && colMetric(s) ? ` ${arrow(colMetric(s))}` : ''}</th>`)}</tr></thead>
+    <tbody>${f.rows.map((r) => html`<tr class=${r === d?.method ? 'ours' : ''}><td>${r}</td>${f.series.map((s) => html`<td class="mono">${typed(r, s)}</td>`)}</tr>`)}</tbody></table></div>`;
   return html`<div class="exp-card"><div class="exp-head"><b>${label}</b><span class="quotable">${f.title}</span>
       ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[how]}</span>
       <span class=${`chip ${n === total ? 'green' : ''}`} title="已经有实验结果的格子">已填 ${n}/${total}</span><span class="grow"></span>
       ${remove ? html`<button class="btn sm ghost" onClick=${() => setEditing(true)}>编辑</button><span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
     ${f.claim ? html`<div class="hint quotable">要证明：<${Html} s=${inlineMd(f.claim)} /></div>` : null}
-    ${chart ? html`<${ExpChart} c=${chart} h=${how === 'hbar' ? Math.min(520, 28 * f.rows.length + 48) : null} />${caption}` : html`${caption}<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
-        ${f.series.map((s) => html`<th>${s}${!f.metric && colMetric(s) ? ` ${arrow(colMetric(s))}` : ''}</th>`)}</tr></thead>
-      <tbody>${f.rows.map((r) => html`<tr class=${r === d?.method ? 'ours' : ''}><td>${r}</td>${f.series.map((s) => {
-        const c = at(r, s), v = c && c.value;
-        return html`<td class="mono" title=${c ? `${c.e.title || ''}${c.note ? ` · ${c.note}` : ''}` : '还没有实验结果'}>${!c ? html`<span class="hint">—</span>` : num(v) === best[s] ? html`<b>${v}</b>` : v}</td>`;
-      })}</tr>`)}</tbody></table></div>`}
+    ${chart ? html`<${ExpChart} c=${chart} h=${how === 'hbar' ? Math.min(520, 28 * f.rows.length + 48) : null} />` : null}${caption}${grid}
     ${f.target && !chart ? html`<div class="hint">目标：${f.target.label || ''} ${f.target.value}</div>` : null}
-    <div class="hint">${sources.length ? `数字来自：${sources.join('、')}` : '还没有实验结果填进来；记下实验后 agent 会把对应的结果填进格子。'}</div></div>`;
+    <div class="hint">${sources.length ? `数字来自：${sources.join('、')}` : '直接在格子里填写。填过的数字会记成实验记录，agent 不会改。'}</div></div>`;
 }
 
 function FiguresProposal({ x }) {
