@@ -576,6 +576,16 @@ class Store(unittest.TestCase):
             with self.assertRaisesRegex(rules.Rejected, "caption"):
                 server.figures_update({}, {"figures": [{**named, "caption": ""}], "base_rev": 1}, rid)
         asked.assert_not_called()
+        store.set_aliases("arxiv:2607.26789", ["CheckVLA 1.7"])
+        store.set_cell_value(rid, f0["id"], "Spatial", "CheckVLA", "88.1")
+        rev = store.get_figures(rid)["revision"]
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "discuss", return_value="run") as asked:
+            got = server.figures_update({}, {"figures": [{**f0, "series": ["ours", "pi0", "CheckVLA-1.7"]}], "base_rev": rev}, rid)
+        asked.assert_not_called()
+        fg = store.get_figures(rid)
+        self.assertEqual((got, [b["name"] for b in fg["design"]["baselines"]]), ({"ok": True}, ["pi0", "CheckVLA-1.7"]))
+        self.assertEqual([c["series"] for c in fg["cells"]], ["CheckVLA-1.7"], "the filled cell follows the rename")
 
     def test_accepting_a_caption_edit_does_not_send_the_agent_to_fill_cells(self):
         from unittest import mock

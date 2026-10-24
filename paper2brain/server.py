@@ -1039,6 +1039,12 @@ def figures_update(q, body, rid):
     cur = store.get_figures(rid)
     design = rules.validate_setup(body["setup"], store.paper_ids()) if body.get("setup") else None
     draft, setup = body.get("figures", cur["figures"]), design or cur["design"]
+    renames = _alias_renames(rules.unknown_main_methods(draft, setup), setup)
+    if renames:  # the user wrote a baseline paper's alias: that baseline takes the name everywhere, cells included
+        ren = lambda vs: [renames.get(v, v) for v in vs] if isinstance(vs, list) else vs  # noqa: E731
+        draft = [{**f, "rows": ren(f.get("rows")), "series": ren(f.get("series"))} if isinstance(f, dict) else f for f in draft]
+        setup = design = rules.validate_setup({**setup, "baselines": [{**b, "name": renames.get(b["name"], b["name"])}
+                                                                      for b in setup["baselines"]]}, store.paper_ids())
     try:
         figures = rules.validate_figures(draft, _context(rid), setup)
     except rules.Rejected as err:
@@ -1055,10 +1061,23 @@ def figures_update(q, body, rid):
             return {"ok": False, "lookup": True, "thread_id": tid, "methods": names}
         raise
     cells = rules.validate_cells(body["cells"], figures, store.get_research(rid)["experiments"]) if "cells" in body else None
-    store.update_figures(rid, figures, "user", body.get("base_rev"), design)
+    store.update_figures(rid, figures, "user", body.get("base_rev"), design, renames)
     if cells:
         store.fill_cells(rid, cells, "user")
     return {"ok": True}
+
+
+def _alias_renames(gaps, setup):
+    """{baseline name: new name} for new names that are an alias of that baseline's paper (GR00T N1 -> GR00T N1.7)."""
+    squash = lambda s: re.sub(r"[\s\-_]+", "", s.lower())  # noqa: E731
+    out = {}
+    for name in dict.fromkeys(n for g in gaps for n in g["names"]):
+        for b in (setup or {}).get("baselines") or []:
+            aliases = (store.get_paper(b["paper"], with_anchors=False) or {}).get("aliases") or []
+            if b["name"] not in out and squash(name) in map(squash, aliases):
+                out[b["name"]] = name
+                break
+    return out
 
 
 @route("POST", "/api/research/([^/]+)/figures/proposal")

@@ -2726,14 +2726,17 @@ def get_figures(rid):
     return f or {"research_id": rid, "design": None, "figures": [], "cells": [], "proposal": None, "revision": 0, "updated_at": None, "edited_by": None}
 
 
-def update_figures(rid, figures, by, base_rev=None, design=None):
+def update_figures(rid, figures, by, base_rev=None, design=None, renames=None):
     """figures: already checked by rules.validate_figures; design (rules.validate_setup) None keeps the old setup.
-    Cells of rows, series or figures that are gone are dropped."""
+    renames {old name: new name}: a method renamed everywhere, its cells follow. Cells of rows, series or figures
+    that are gone are dropped."""
     keep = {(f["id"], r, s) for f in figures for r in f["rows"] for s in f["series"]}
+    ren = lambda v: (renames or {}).get(v, v)  # noqa: E731
     with tx() as c:
         cur = _row(c.execute("SELECT revision, cells FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
         rules.check_revision(cur["revision"] if cur else 0, base_rev)
-        cells = [x for x in (cur["cells"] if cur else []) if (x["figure"], x["row"], x["series"]) in keep]
+        cells = [{**x, "row": ren(x["row"]), "series": ren(x["series"])} for x in (cur["cells"] if cur else [])]
+        cells = [x for x in cells if (x["figure"], x["row"], x["series"]) in keep]
         c.execute("INSERT OR IGNORE INTO exp_figures (research_id) VALUES (?)", (rid,))
         c.execute("UPDATE exp_figures SET figures=?, cells=?, design=COALESCE(?, design), updated_at=?, edited_by=?, revision=revision+1 "
                   "WHERE research_id=?", (json.dumps(figures, ensure_ascii=False), json.dumps(cells, ensure_ascii=False),
