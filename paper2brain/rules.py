@@ -437,7 +437,7 @@ def validate_setup(setup, known_papers=(), paper_words=None):
     if not method:
         errors.append("setup.method 写我们的方法在表里的名字")
     out = {"questions": questions, "method": method, "benchmarks": _named(s.get("benchmarks"), "benchmarks", errors, ("note",), 6),
-           "baselines": _named(s.get("baselines"), "baselines", errors, ("paper", "note"), 6, 2),
+           "baselines": _named(s.get("baselines"), "baselines", errors, ("paper", "note"), 12, 2),
            "controls": _named(s.get("controls"), "controls", errors, ("note",), 6, 0),
            "metrics": _named(s.get("metrics"), "metrics", errors, ("unit", "better"), 6),
            "implementation": str(s.get("implementation") or "").strip() or None}

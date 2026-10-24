@@ -84,6 +84,18 @@ def _shared(me):
     return out
 
 
+def _shared_each(me, fn):
+    """fn() in every space this user is in, each result stamped with its space; empty unless they are in their own
+    library. The personal library lists these as pointers: opening one switches to the space."""
+    out = []
+    if store.multi() and me["library"] == me["user"]["library"]:
+        for lib in accounts.libraries(me["user"]["id"]):
+            if lib["kind"] == "space":
+                with store.at_home(store.library_home(lib["id"])), store.viewing(me["user"]):
+                    out += [{**x, "space": {"id": lib["id"], "name": lib["name"]}} for x in fn()]
+    return out
+
+
 def _owner():
     if store.multi() and _me().get("role") != "owner":
         raise rules.Rejected("只有这个空间的所有者能做这一步")
@@ -430,7 +442,16 @@ def attachment(q, body, aid):
 
 @route("GET", "/api/papers")
 def papers(q, body):
-    return store.list_papers("" if q.get("unsorted") else q.get("topic"))
+    """shared=1 in a personal library on the shared server: also the papers this member added or discussed in their
+    spaces, as pointers after the library's own."""
+    out = store.list_papers("" if q.get("unsorted") else q.get("topic"))
+    if q.get("shared") and not q.get("topic") and not q.get("unsorted"):
+        me, have = _me(), {p["id"] for p in out}
+        for p in _shared_each(me, lambda: store.member_papers(me["user"]["id"])):
+            if p["id"] not in have:
+                have.add(p["id"])
+                out.append(p)
+    return out
 
 
 def _paper(pid):
@@ -606,7 +627,11 @@ def thread_get(q, body):
 
 @route("GET", "/api/threads/recent")
 def threads_recent(q, body):
-    return store.recent_threads()
+    """shared=1 in a personal library on the shared server: also this member's own discussions in their spaces."""
+    out = store.recent_threads()
+    if q.get("shared"):
+        out += _shared_each(_me(), store.recent_threads)
+    return out
 
 
 @route("GET", "/api/map")
@@ -930,7 +955,7 @@ def figures_update(q, body, rid):
     cells = rules.validate_cells(body["cells"], figures, store.get_research(rid)["experiments"]) if "cells" in body else None
     store.update_figures(rid, figures, "user", body.get("base_rev"), design)
     if cells:
-        store.fill_cells(rid, cells)
+        store.fill_cells(rid, cells, "user")
     return {"ok": True}
 
 

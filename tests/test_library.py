@@ -445,7 +445,7 @@ class Store(unittest.TestCase):
                  "controls": [{"name": "fixed-rate"}], "metrics": [{"name": "SR", "better": "higher"}]}
         for bad, msg in (({"method": ""}, "setup.method"), ({"controls": [{"name": "ours"}]}, "不能重复"),
                          ({"baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "periodic"}]}, "已发表的方法"),
-                         ({"baselines": setup["baselines"][:1]}, "2-6"), ({"benchmarks": [{"name": "S", "note": "长" * 151}]}, "150 字"),
+                         ({"baselines": setup["baselines"][:1]}, "2-12"), ({"benchmarks": [{"name": "S", "note": "长" * 151}]}, "150 字"),
                          ({"metrics": [{"name": "SR", "better": "up"}]}, "higher / lower"), ({"questions": []}, "questions")):
             with self.assertRaisesRegex(rules.Rejected, msg):
                 rules.validate_setup({**setup, **bad}, known)

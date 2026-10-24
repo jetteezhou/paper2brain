@@ -364,13 +364,19 @@ def _v22_idea_map(c):
     _sync_triggers(c)
 
 
+def _v23_capture_owner(c):
+    """Who brought a capture in (NULL: before this, or the library's own inbox). Captures stay visible to the whole
+    space; a member's personal library reads it to point at "papers I added in a space"."""
+    c.execute("ALTER TABLE captures ADD COLUMN user_id TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
               _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything, _v21_owners,
-              _v22_idea_map]
+              _v22_idea_map, _v23_capture_owner]
 
 
 def config():
@@ -647,7 +653,7 @@ def copy_thread(tid, dst, uid):
     returns its scope, or None when there is no such discussion."""
     src = home()
     with tx() as c:
-        t = c.execute("SELECT scope FROM threads WHERE id=?", (tid,)).fetchone()
+        t = c.execute("SELECT scope FROM main.threads WHERE id=?", (tid,)).fetchone()  # main.: another member's carry reaches past the viewer's private view
     if not t:
         return None
     with at_home(dst), tx() as c:
@@ -657,7 +663,10 @@ def copy_thread(tid, dst, uid):
                             ("runs", f"id IN (SELECT run_id FROM s.messages WHERE thread_id=:t) AND status NOT IN {_UNFINISHED_SQL}")):
             cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({table})"))
             c.execute(f"INSERT OR IGNORE INTO main.{table} ({cols}) SELECT {cols} FROM s.{table} WHERE {cond}", {"t": tid})
-        c.execute("UPDATE main.threads SET user_id=:u, agent_id=NULL, parent_id=NULL, fork_message_id=NULL WHERE id=:t", {"u": uid, "t": tid})
+        c.execute("UPDATE main.threads SET user_id=:u, agent_id=NULL WHERE id=:t", {"u": uid, "t": tid})
+        # a tree carried whole keeps its branches; only parents and fork points left behind are cut
+        c.execute("UPDATE main.threads SET parent_id=NULL WHERE id=:t AND parent_id NOT IN (SELECT id FROM main.threads)", {"t": tid})
+        c.execute("UPDATE main.threads SET fork_message_id=NULL WHERE id=:t AND fork_message_id NOT IN (SELECT id FROM main.messages)", {"t": tid})
         c.execute("UPDATE main.runs SET user_id=:u WHERE id IN (SELECT run_id FROM main.messages WHERE thread_id=:t)", {"u": uid, "t": tid})
         c.commit()
         c.execute("DETACH DATABASE s")
@@ -671,10 +680,41 @@ def own_unowned(uid):
             c.execute(f"UPDATE main.{t} SET user_id=? WHERE user_id IS NULL", (uid,))
 
 
+def carry_threads_home(uid, dst):
+    """A member's own discussions here (and the papers they were about) copied into the library at dst, keeping what
+    is already there; for when they leave a space or the space is archived. Runs here (the space)."""
+    with at_home(dst), tx() as c:
+        have = {r["id"] for r in c.execute("SELECT id FROM main.threads")}
+    with tx() as c:
+        tids = [r["id"] for r in c.execute("SELECT id FROM main.threads WHERE user_id=? ORDER BY created_at, rowid", (uid,))]
+    for tid in tids:
+        if tid in have:
+            continue
+        scope = copy_thread(tid, dst, uid)
+        if scope and scope.startswith("paper:"):
+            copy_paper(scope[len("paper:"):], dst)
+
+
 def research_of_paper(pid):
     """The researches here that use this paper (for a personal library's paper page, from the spaces the user is in)."""
     with tx() as c:
         return _research_for(c, "paper", [pid]).get(pid, [])
+
+
+def member_papers(uid):
+    """The papers a space member added (captures they brought in) or discussed in their own threads; the personal
+    library lists them as pointers into the space. main.: past the viewer's private view."""
+    with tx() as c:
+        pids = {r[0] for r in c.execute("SELECT DISTINCT substr(scope, 7) FROM main.threads WHERE user_id=? AND scope LIKE 'paper:%'", (uid,))}
+        pids |= {r[0] for r in c.execute("SELECT DISTINCT a.paper_id FROM main.threads t JOIN anchors a ON t.scope='anchor:' || a.id WHERE t.user_id=?", (uid,))}
+        pids |= {r[0] for r in c.execute(
+            "SELECT DISTINCT cp.paper_id FROM main.captures cap JOIN capture_papers cp ON cp.capture_id=cap.id "
+            "WHERE cap.user_id=? AND cp.state='confirmed'", (uid,))}
+        if not pids:
+            return []
+        return _rows(c.execute(
+            f"SELECT id, title, short_name, authors, published, created_at AS last_captured FROM papers WHERE id IN ({_qs(pids)}) "
+            "ORDER BY created_at DESC", tuple(pids)))
 
 
 def _migrate(conn):
@@ -732,8 +772,8 @@ def add_capture(capture_id, raw, source, thought=None, images=()):
         existing = c.execute("SELECT id FROM captures WHERE id=?", (capture_id,)).fetchone()
         if not existing:
             c.execute(
-                "INSERT INTO captures (id, created_at, raw, source) VALUES (?,?,?,?)",
-                (capture_id, now(), raw, source),
+                "INSERT INTO captures (id, created_at, raw, source, user_id) VALUES (?,?,?,?,?)",
+                (capture_id, now(), raw, source, _owner()),
             )
             if (thought or "").strip():
                 _start_thread(c, f"capture:{capture_id}", thought)
@@ -2510,6 +2550,9 @@ def discard_plan(rid):
 def get_figures(rid):
     with tx() as c:
         f = _row(c.execute("SELECT * FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
+        if f:
+            f["events"] = _rows(c.execute("SELECT at, actor, action FROM events WHERE target=? AND action LIKE 'figures.%' "
+                                          "ORDER BY at DESC LIMIT 5", (rid,)))
     return f or {"research_id": rid, "design": None, "figures": [], "cells": [], "proposal": None, "revision": 0, "updated_at": None, "edited_by": None}
 
 
@@ -2525,6 +2568,7 @@ def update_figures(rid, figures, by, base_rev=None, design=None):
         c.execute("UPDATE exp_figures SET figures=?, cells=?, design=COALESCE(?, design), updated_at=?, edited_by=?, revision=revision+1 "
                   "WHERE research_id=?", (json.dumps(figures, ensure_ascii=False), json.dumps(cells, ensure_ascii=False),
                                           json.dumps(design, ensure_ascii=False) if design else None, now(), by, rid))
+        _event(c, by, "figures.update", rid)
         return (cur["revision"] if cur else 0) + 1
 
 
@@ -2541,6 +2585,7 @@ def propose_figures(rid, figures, note, by, base_rev=None, design=None):
         c.execute("UPDATE exp_figures SET proposal=? WHERE research_id=?",
                   (json.dumps({"design": design, "figures": figures, "note": note, "by": by, "at": now(),
                                "prev": _last(cur and cur["proposal"])}, ensure_ascii=False), rid))
+        _event(c, by, "figures.propose", rid)
 
 
 def rollback_figures(rid, since):
@@ -2566,7 +2611,7 @@ def discard_figures(rid):
         c.execute("UPDATE exp_figures SET proposal=NULL WHERE research_id=?", (rid,))
 
 
-def fill_cells(rid, cells):
+def fill_cells(rid, cells, by="agent"):
     """cells: already checked by rules.validate_cells; each replaces whatever filled that cell (experiment None clears it)."""
     with tx() as c:
         cur = _row(c.execute("SELECT cells FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
@@ -2576,6 +2621,7 @@ def fill_cells(rid, cells):
         new = {key(x): x for x in cur["cells"]} | {key(x): x for x in cells}
         c.execute("UPDATE exp_figures SET cells=? WHERE research_id=?",
                   (json.dumps([x for x in new.values() if x["experiment"]], ensure_ascii=False), rid))
+        _event(c, by, "figures.fill", rid)
 
 
 def get_related(rid):
