@@ -72,32 +72,18 @@
 .delta svg:active { cursor: grabbing; }
 .delta-tools { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; }
 .delta-hint { position: absolute; left: 12px; bottom: 10px; font-size: 11.5px; pointer-events: none; }
-.delta .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; pointer-events: none; }
-.map-layer { position: absolute; inset: 0; transform-origin: 0 0; pointer-events: none; }
-.map-region { fill: color-mix(in srgb, var(--bg) 70%, transparent); stroke: var(--line); }
-.map-region-name { fill: var(--muted); font-size: 12.5px; font-weight: 560; }
-.map-edge { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
-.map-edge.contra { stroke-dasharray: 4 3; }
-.map-edge.on { stroke: var(--accent); stroke-width: 2; }
-.map-tag { fill: var(--muted); font-size: 11px; }
-.map-tag-bg { fill: var(--panel); stroke: var(--line); }
-#map-arrow path { fill: var(--line-strong); }
-.map-card { position: absolute; box-sizing: border-box; width: 244px; height: 70px; pointer-events: auto; text-align: left;
-  border: 1px solid var(--line-strong); background: var(--panel); border-radius: 10px; padding: 8px 10px 8px 28px; color: var(--text); cursor: pointer; }
-.map-card.conclusion { background: var(--accent-soft); }
-.map-card .k { position: absolute; left: 8px; top: 8px; font-size: 11px; color: var(--faint); }
-.map-card .t { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.map-card .n, .map-card .mine { position: absolute; right: 8px; bottom: 4px; font-size: 10px; color: var(--faint); }
-.map-card .mine { left: 8px; right: auto; }
-.map-card.on { border-color: var(--accent); }
-.map-card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.map-bar { position: absolute; left: 12px; right: 12px; bottom: 36px; z-index: 2; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-  padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); }
-.map-bar p { margin: 0; flex: 1 1 220px; font-size: 13.5px; line-height: 1.45; }
-.map-bar form { display: flex; gap: 6px; flex: 1 1 280px; align-items: flex-start; }
-.map-bar textarea { flex: 1; border: 1px solid var(--accent); border-radius: 8px; padding: 4px 8px; background: var(--bg); color: var(--text); resize: none; }
-.map-bar .srcs { display: flex; flex-wrap: wrap; gap: 6px; }
-.map-hidden { position: relative; }
-.map-hidden summary { cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; }
-.map-hidden button { display: block; width: 100%; text-align: left; border: 0; background: var(--panel); padding: 4px 8px; cursor: pointer; font-size: 12px; }
-.map-hidden[open] { position: absolute; right: 0; top: 28px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 180px; z-index: 3; }
+.tm-edge { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
+.tm-edge.fork { stroke-dasharray: 4 3; }
+.tm-edge.on { stroke: var(--accent); stroke-width: 2; }
+.tm-node { cursor: pointer; }
+.tm-node rect { fill: var(--panel); stroke: var(--line-strong); }
+.tm-node text { fill: var(--text); font-size: 12.5px; }
+.tm-node .tm-n { fill: var(--faint); font-size: 10px; }
+.tm-node.on rect { stroke: var(--accent); }
+.tm-node.sel rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+.tm-node:hover rect { stroke: var(--accent); }
+.tm-node.held { opacity: .35; }
+.tm-node.drop rect { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 3; }
+.tm-ghost { opacity: .85; }
+.tm-ghost rect { fill: var(--accent-soft); stroke: var(--accent); }
+.tm-ghost text { fill: var(--accent); font-size: 12.5px; }

@@ -371,19 +371,6 @@ def threads_recent(q, body):
     return store.recent_threads()
 
 
-@route("GET", "/api/map")
-def map_get(q, body):
-    return store.get_map()
-
-
-@route("POST", "/api/map/nodes/([^/]+)")
-def map_node_edit(q, body, nid):
-    if "text" not in body and "hidden" not in body:
-        raise rules.Rejected("没有要改的")
-    store.set_map_node(nid, body["text"] if "text" in body else None, bool(body["hidden"]) if "hidden" in body else None)
-    return store.get_map()
-
-
 @route("GET", "/api/messages/([^/]+)")
 def message_get(q, body, mid):
     return store.message(mid)
@@ -964,7 +951,7 @@ def _poll_inbox():
     while True:
         held = handoff.holder()
         for job in (store.backup, cursor_api.expire_stale, structure.backfill, sync.run, lambda: bg(handoff.auto_push),
-                    *((inbox.drain, cursor_api.distill_pending, cursor_api.map_pending, cursor_api.name_pending, cursor_api.deepread_pending,
+                    *((inbox.drain, cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending,
                        cursor_api.card_pending) if held else ())):
             try:
                 job()

@@ -83,12 +83,6 @@ def run(args):
         pid = to_pid(args.paper)
         store.set_topics(pid, args.paths, "agent")
         return {"paper": pid, "topics": args.paths}
-    if cmd == "map":
-        if args.action == "show":
-            return store.get_map()
-        if not args.file:
-            raise rules.Rejected("用法：./p2b map put --file /tmp/map.json")
-        return store.put_map(_read_json(args.file))
     if cmd == "threads":
         return [{k: t[k] for k in ("id", "parent_id", "title", "first", "scope", "scope_title", "n", "last_at")}
                 for t in store.recent_threads()]
@@ -299,10 +293,6 @@ def parser():
     s.add_argument("--parent", help="propose：放在哪个一级主题下（不写就是一级主题）")
     s.add_argument("--why", help="propose：为什么现有主题放不下")
     s.add_argument("--paper", dest="paper_for", action="append", default=[], help="propose：采用后归进去的论文")
-
-    s = sub.add_parser("map", help="讨论地图：问题和结论，不是讨论树（见 librarian/discuss.md）")
-    s.add_argument("action", choices=["show", "put"])
-    s.add_argument("--file", help="put：JSON 文件，- 表示标准输入")
 
     sub.add_parser("threads", help="讨论树：每段讨论的 id、上级（parent_id）、标题或开头一句、范围、最近活动")
     s = sub.add_parser("thread", help="讨论：show 查看消息、上级和下级 / title 起标题 / move 挂到另一段讨论下面")

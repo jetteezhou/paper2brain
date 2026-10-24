@@ -182,7 +182,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line-strong); border-botto
 .list-head { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 14px 18px 10px; display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--line); }
 .list-head h2 { margin: 0; font-size: 16px; font-weight: 650; white-space: nowrap; }
 .list-head .sub { color: var(--faint); font-size: 12.5px; white-space: nowrap; }
-.list-head .keys, .list-head .pane-switch { margin-left: auto; }
+.list-head .keys { margin-left: auto; }
 .item { padding: 13px 18px; border-bottom: 1px solid var(--line); cursor: pointer; position: relative; }
 .item:hover { background: rgba(0,0,0,.025); }
 .item.on { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); }

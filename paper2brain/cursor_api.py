@@ -90,11 +90,11 @@ MODULES = {
     "discuss": "讨论：论文、主题、论文库、划词、找论文",
     "capture": "收下：整理收下的内容、写快读卡",
     "deepread": "深读报告",
-    "distill": "给讨论起标题、整理讨论地图",
+    "distill": "给讨论起标题",
     "search": "快速搜索：没配下面的搜索接口时，搜索框第一条的 AI 推荐用的模型（只能用 TCodex 模型；默认 deepseek-v4.1-flash）",
 }
 KIND_MODULE = {"draft": "research", "writing": "research", "plan": "research", "related": "research", "codemap": "research", "experiment": "research",
-               "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill", "map": "distill"}
+               "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill"}
 
 
 def model_for(module):
@@ -199,8 +199,6 @@ def _bind(kind, ref, agent_id):
         store.set_thread_agent(store.thread_for(f"find:{ref}")["id"], agent_id)
     if kind == "distill":
         store.kv_set(DISTILL_AGENT, agent_id)
-    if kind == "map":
-        store.kv_set(MAP_AGENT, agent_id)
 
 
 def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, module=None, model=None):
@@ -1017,35 +1015,6 @@ def distill_pending():
 
 
 _distill_lock = threading.Lock()
-
-MAP_AGENT, MAP_TRIED = "map_agent", "map_tried"
-
-
-def map_pending():
-    """Fold newly titled discussions into the idea map, six at a time. Each signature (last message time and
-    count) is tried at most twice. No fast-API shortcut: the agent has to read the threads and run ./p2b map put.
-    ponytail: `edges` only touches the pairs it names, so a batch cannot wipe cross edges it never read."""
-    if not status()["enabled"] or any(r["kind"] == "map" for r in store.unfinished_runs()):
-        return
-    tried = json.loads(store.kv_get(MAP_TRIED) or "{}")
-    due = []
-    for row in store.pending_map(6):
-        sig = f"{row['last_at']}:{row['n']}"
-        rec = tried.get(row["id"]) or {}
-        n = rec.get("n", 0) if rec.get("sig") == sig else 0
-        if n < 2:
-            due.append((row["id"], sig, n))
-    if not due:
-        return
-    last = store.last_run("map")
-    if last and last["status"] == "ERROR" and "agent_busy" not in (last["error"] or ""):
-        store.kv_set(MAP_AGENT, "")
-    for tid, sig, n in due:
-        tried[tid] = {"sig": sig, "n": n + 1}
-    store.kv_set(MAP_TRIED, json.dumps(tried))
-    ids = " ".join(tid for tid, _, _ in due)
-    text = f"先读 librarian/README.md 和 librarian/discuss.md，按「整理地图」一节处理这些讨论：{ids}"
-    start_async("map", "threads", text, name="整理讨论地图", agent_id=store.kv_get(MAP_AGENT) or None)
 
 
 def _scope_label(scope):
