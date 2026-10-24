@@ -14,7 +14,9 @@ from unittest import mock
 
 os.environ.setdefault("P2B_HOME", tempfile.mkdtemp(prefix="p2b-test-"))
 
-from paper2brain import accounts, cursor_api, overleaf, repos, rules, server, sources, store  # noqa: E402
+import pymupdf  # noqa: E402
+
+from paper2brain import accounts, cursor_api, overleaf, pipeline, repos, rules, server, sources, store  # noqa: E402
 
 
 class Multi(unittest.TestCase):
@@ -319,6 +321,37 @@ class Multi(unittest.TestCase):
         with store.at_home(store.library_home(b["library"])):
             self.assertEqual(store.thread_for(thread_id=btid)["messages"][0]["text"], "这篇对路吗")
             self.assertTrue(store.get_paper("arxiv:2501.00001"))
+
+    def test_home_copy_pulls_newer_card_report_and_pdf_from_the_space(self):
+        self.url = self.serve()
+        a, ta = self.user("甲")
+        b, tb = self.user("乙")
+        rid, _, _ = self.research_with_material(a["library"])
+        with store.at_home(store.library_home(a["library"])):
+            space = accounts.create_space(a, "组会", rid)
+        accounts.redeem(accounts.invite("join", space, "editor"), user=b)
+        with store.at_home(store.library_home(space)), store.viewing(b):  # 参与即复制回家（此时无卡、一篇连 PDF 都没有）
+            store.new_thread("paper:arxiv:2410.24164", text="怎么看")
+            store.upsert_paper("arxiv:2503.00003", "只有元数据")
+            store.new_thread("paper:arxiv:2503.00003", text="这篇呢")
+        home_b = f"p2b_session={tb}"
+        self.assertIsNone(self.call("/api/papers/arxiv:2410.24164", cookie=home_b)[1]["card"])
+        with store.at_home(store.library_home(space)):  # 空间的 agent 写出了卡、报告，补上了 PDF
+            store.put_card("arxiv:2410.24164", {"tldr": "空间里的卡"}, "agent")
+            store.put_report("arxiv:2410.24164", {"sections": []}, "agent")
+            doc = pymupdf.open()
+            doc.new_page().insert_text((72, 72), "Some Paper")
+            pipeline.attach_pdf("arxiv:2503.00003", doc.tobytes())
+        got = self.call("/api/papers/arxiv:2410.24164", cookie=home_b)[1]  # 打开家里的副本：卡和报告拉回来了
+        self.assertEqual(got["card"]["tldr"], "空间里的卡")
+        self.assertTrue(got["report"])
+        self.assertTrue(self.call("/api/papers/arxiv:2503.00003", cookie=home_b)[1]["page_count"])  # PDF 也补上了
+        with store.at_home(store.library_home(b["library"])):  # 家里自己重写得更勤：空间再写不覆盖
+            store.put_card("arxiv:2410.24164", {"tldr": "家里的卡"}, "agent")
+            store.put_card("arxiv:2410.24164", {"tldr": "家里的卡 v2"}, "agent")
+        with store.at_home(store.library_home(space)):
+            store.put_card("arxiv:2410.24164", {"tldr": "空间里的卡 v2"}, "agent")
+        self.assertEqual(self.call("/api/papers/arxiv:2410.24164", cookie=home_b)[1]["card"]["tldr"], "家里的卡 v2")
 
     def test_leaving_a_space_carries_your_discussions_home(self):
         a, ta = self.user("甲")

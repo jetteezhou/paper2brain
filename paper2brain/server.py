@@ -470,6 +470,17 @@ def paper_get(q, body, pid):
         for lib in {x["space"]["id"]: x["space"] for x in shared.values()}.values():
             with store.at_home(store.library_home(lib["id"])), store.viewing(me["user"]):
                 p["research"] += [{**x, "space": lib} for x in store.research_of_paper(pid)]
+        if me["library"] == me["user"]["library"]:  # a copy brought home: pull what the space made newer since
+            spaces = [lib["id"] for lib in accounts.libraries(me["user"]["id"]) if lib["kind"] == "space"]
+            changed, pdf = store.freshen_paper(pid, spaces)
+            if pdf:
+                try:
+                    pipeline.attach_pdf(pid, Path(pdf).read_bytes())
+                    changed = True
+                except Exception:
+                    pass  # 没补上不挡看，下次打开还会再试
+            if changed:
+                p = _paper(pid)
     s = structure.get(pid)
     return {**p, "figures": s["figures"], "key_figures": structure.key_figures(s, p["card"]), "outline": s["outline"],
             "key_sections": s["key"], "zh": translate.status(p)}
@@ -892,6 +903,13 @@ def research_diagram_delete(q, body, rid, name):
     return {"ok": True}
 
 
+@route("POST", "/api/research/([^/]+)/figures/([^/]+)/render")
+def figure_render(q, body, rid, fid):
+    """A planned figure with its filled cells -> PDF/PNG via the diagram pipeline (paper2brain/diagram.py)."""
+    from . import diagram
+    return diagram.render_chart(_research(rid)["id"], fid)
+
+
 @route("POST", "/api/research/([^/]+)/experiments")
 def experiment_add(q, body, rid):
     eid = store.add_experiment(rid, body.get("raw"), "user", body.get("title"))
@@ -1073,6 +1091,20 @@ def overleaf_action(q, body, rid, action):
     else:
         getattr(overleaf, action)(pid)
     return {"ok": True}
+
+
+@route("POST", "/api/research/([^/]+)/overleaf/compile")
+def overleaf_compile(q, body, rid):
+    out = overleaf.compile(_overleaf(rid))
+    return {"log": out["log"]}
+
+
+@route("GET", "/api/research/([^/]+)/overleaf/pdf")
+def overleaf_pdf(q, body, rid):
+    pdf = overleaf.compiled_pdf(_overleaf(rid))
+    if not pdf:
+        raise rules.Rejected("还没有编译好的 PDF：先点「编译预览」")
+    return Reply(pdf, "application/pdf", revalidate=True)
 
 
 @route("GET", "/api/agent/models")

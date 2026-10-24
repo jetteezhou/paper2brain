@@ -701,6 +701,38 @@ def research_of_paper(pid):
         return _research_for(c, "paper", [pid]).get(pid, [])
 
 
+def freshen_paper(pid, space_ids):
+    """A paper in this library that also lives in the given spaces: pull what is newer there — the agent's card and
+    report when the space's revision is higher, and the path of a PDF this library never got. Derived artifacts and
+    immutable content only; topics, short names, notes and anchors here stay untouched. Call in the member's own
+    library. Returns (changed, pdf_path).
+    ponytail: revision counters count writes per library, so "higher" is approximate — a home copy regenerated many
+    times looks newer than a space copy written once but later; in practice cards are written once or twice."""
+    with tx() as c:
+        here = c.execute("SELECT card_rev, report_rev, page_count FROM papers WHERE id=?", (pid,)).fetchone()
+    if not here:
+        return False, None
+    card = report = pdf = None
+    for sid in space_ids:
+        with at_home(library_home(sid)), tx() as c:
+            r = c.execute("SELECT card, card_rev, report, report_rev, pdf_path, page_count FROM papers WHERE id=?", (pid,)).fetchone()
+        if not r:
+            continue
+        if r["card"] and r["card_rev"] > here["card_rev"] and (not card or r["card_rev"] > card[1]):
+            card = (r["card"], r["card_rev"])
+        if r["report"] and r["report_rev"] > here["report_rev"] and (not report or r["report_rev"] > report[1]):
+            report = (r["report"], r["report_rev"])
+        if not here["page_count"] and r["page_count"] and r["pdf_path"]:
+            pdf = pdf or r["pdf_path"]
+    if card or report:
+        with tx() as c:
+            if card:
+                c.execute("UPDATE papers SET card=?, card_rev=? WHERE id=?", (card[0], card[1], pid))
+            if report:
+                c.execute("UPDATE papers SET report=?, report_rev=? WHERE id=?", (report[0], report[1], pid))
+    return bool(card or report), pdf
+
+
 def member_papers(uid):
     """The papers a space member added (captures they brought in) or discussed in their own threads; the personal
     library lists them as pointers into the space. main.: past the viewer's private view."""
