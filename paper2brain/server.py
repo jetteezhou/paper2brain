@@ -1060,9 +1060,14 @@ def figures_proposal(q, body, rid):
     if body.get("action") == "discard":
         store.discard_figures(rid)
         return {"ok": True}
+    # Only cells the draft brings in (a new figure, row or series, or a figure's metric changed) can take results
+    # that are already recorded; a caption or title edit leaves nothing for the agent to fill.
+    slots = lambda fs: {(f["id"], f.get("metric"), r, s) for f in fs for r in f["rows"] for s in f["series"]}  # noqa: E731
+    before = slots(store.get_figures(rid)["figures"])
     store.accept_figures(rid, body.get("base_rev"))
     x = store.get_research(rid)
-    if cursor_api.status()["enabled"] and any(e["results"] for e in x["experiments"]):
+    if (slots(store.get_figures(rid)["figures"]) - before and cursor_api.status()["enabled"]
+            and any(e["results"] for e in x["experiments"])):
         return {"ok": True, "run_id": cursor_api.fill_figures(rid)}
     return {"ok": True}
 

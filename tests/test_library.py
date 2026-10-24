@@ -566,6 +566,32 @@ class Store(unittest.TestCase):
                 server.figures_update({}, {"figures": [{**named, "caption": ""}], "base_rev": 1}, rid)
         asked.assert_not_called()
 
+    def test_accepting_a_caption_edit_does_not_send_the_agent_to_fill_cells(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        known = {"arxiv:2410.24164", "arxiv:2607.26789"}
+        setup = {"questions": ["Does it work?"], "method": "ours", "benchmarks": [{"name": "Spatial"}],
+                 "baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA", "paper": "2607.26789"}],
+                 "metrics": [{"name": "SR", "better": "higher"}]}
+        design = rules.validate_setup(setup, known)
+        fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
+               "rows": ["Spatial"], "series": ["ours", "pi0", "CheckVLA"]}
+        rid = store.add_research("fill", "user")
+        store.propose_figures(rid, rules.validate_figures([fig], "", design), None, "agent", 0, design)
+        store.accept_figures(rid, 0)
+        eid = store.add_experiment(rid, "spatial 0.92", "user")
+        store.update_experiment(eid, "agent", 1, results=[{"name": "Spatial SR", "value": "0.92"}])
+        f0 = store.get_figures(rid)["figures"][0]
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "fill_figures", return_value="run") as fill:
+            store.propose_figures(rid, [{**f0, "caption": "Success rate (%, ↑)."}], None, "agent", 1, design)
+            self.assertNotIn("run_id", server.figures_proposal({}, {"action": "accept", "base_rev": 1}, rid))
+            store.propose_figures(rid, [{**f0, "rows": ["Spatial", "Object"]}], None, "agent", 2, design)
+            self.assertEqual(server.figures_proposal({}, {"action": "accept", "base_rev": 2}, rid)["run_id"], "run")
+        self.assertEqual(fill.call_count, 1)
+
     def test_agent_cannot_overwrite_user_edited_experiment(self):
         rid = store.add_research("exp", "user")
         eid = store.add_experiment(rid, "success=0.9", "user")
