@@ -271,7 +271,8 @@ def _v17_short_names(c):
 # keyed by a local counter) or trash (this Mac's undo).
 SYNCED = ("captures", "attachments", "papers", "capture_papers", "topics", "paper_topics", "notes", "threads", "messages",
           "runs", "research", "research_topics", "research_links", "repos", "research_repos", "code_maps", "experiments",
-          "writing", "research_docs", "anchors", "paper_text", "plans", "related_work", "exp_figures")
+          "writing", "research_docs", "anchors", "paper_text", "plans", "related_work", "exp_figures",
+          "map_groups", "map_nodes", "map_edges", "map_sources", "map_seen")
 
 
 def primary_key(c, table):
@@ -284,6 +285,8 @@ def _sync_triggers(c):
     for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'sync\\_%' ESCAPE '\\'").fetchall():
         c.execute(f"DROP TRIGGER {name}")
     for t in SYNCED:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone():
+            continue  # a later migration creates it, then rebuilds these triggers
         cols = primary_key(c, t)
 
         def log(row):
@@ -335,12 +338,28 @@ def _v18_trash(c):
             shutil.move(str(home() / "trash" / "paper"), str(home() / "trash" / tid))
 
 
+def _v21_idea_map(c):
+    """The map is not the conversation tree. Nodes are questions and conclusions the agent distilled; threads are
+    sources. rel hangs a node under parent_id. Cross edges (对照 / 支撑 / 待证) are separate. map_seen remembers which
+    discussions were already read, so another Mac does not build the map again."""
+    c.execute("CREATE TABLE map_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0)")
+    c.execute("CREATE TABLE map_nodes (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES map_groups(id), "
+              "kind TEXT NOT NULL, text TEXT NOT NULL, parent_id TEXT, rel TEXT, partial INTEGER NOT NULL DEFAULT 0, "
+              "text_by TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    c.execute("CREATE TABLE map_edges (src TEXT NOT NULL REFERENCES map_nodes(id) ON DELETE CASCADE, "
+              "dst TEXT NOT NULL REFERENCES map_nodes(id) ON DELETE CASCADE, rel TEXT NOT NULL, PRIMARY KEY (src, dst, rel))")
+    c.execute("CREATE TABLE map_sources (node_id TEXT NOT NULL REFERENCES map_nodes(id) ON DELETE CASCADE, "
+              "thread_id TEXT NOT NULL, PRIMARY KEY (node_id, thread_id))")
+    c.execute("CREATE TABLE map_seen (thread_id TEXT PRIMARY KEY, at TEXT NOT NULL, n INTEGER NOT NULL)")
+    _sync_triggers(c)
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
-              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything]
+              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything, _v21_idea_map]
 
 
 def config():
@@ -1568,6 +1587,176 @@ def pending_titles(limit=12):
                        "(SELECT 1 FROM messages m WHERE m.thread_id=t.id AND m.role='user') ORDER BY t.created_at LIMIT ?", (limit,))
 
 
+def _live_thread(c, tid):
+    if not c.execute("SELECT 1 FROM messages WHERE thread_id=? LIMIT 1", (tid,)).fetchone():
+        raise rules.Rejected(f"讨论 {tid} 不存在，或还没有消息")
+
+
+def _map_pair(pairs, a, b, label):
+    key = tuple(sorted((a, b)))
+    if key in pairs:
+        raise rules.Rejected(f"「{label}」的两端之间已经有一条关系")
+    pairs.add(key)
+
+
+def pending_map(limit=20):
+    """Titled discussions the map has not read since their latest message (same-second edits count too)."""
+    with tx() as c:
+        return _rows(c.execute(
+            "SELECT t.id, max(m.created_at) AS last_at, count(m.id) AS n FROM threads t JOIN messages m ON m.thread_id=t.id "
+            "WHERE t.title IS NOT NULL GROUP BY t.id "
+            "HAVING max(m.created_at) > coalesce((SELECT at FROM map_seen s WHERE s.thread_id=t.id), '') "
+            "OR count(m.id) != coalesce((SELECT n FROM map_seen s WHERE s.thread_id=t.id), -1) "
+            "ORDER BY last_at DESC, t.rowid DESC LIMIT ?", (limit,)))
+
+
+def get_map():
+    """Groups, nodes and cross edges. A node's sources are the discussions that say that sentence."""
+    with tx() as c:
+        groups = [{"id": r["id"], "name": r["name"]} for r in c.execute("SELECT id, name FROM map_groups ORDER BY position, name")]
+        by_node = {}
+        for s in c.execute(
+                "SELECT s.node_id, s.thread_id, t.title, "
+                "(SELECT text FROM messages u WHERE u.thread_id=t.id AND u.role='user' ORDER BY u.created_at, u.rowid LIMIT 1) AS first "
+                "FROM map_sources s JOIN threads t ON t.id=s.thread_id ORDER BY t.created_at"):
+            by_node.setdefault(s["node_id"], []).append({"id": s["thread_id"], "title": s["title"] or s["first"] or s["thread_id"]})
+        nodes = [{"id": r["id"], "group": r["group_id"], "kind": r["kind"], "text": r["text"], "parent": r["parent_id"],
+                  "rel": r["rel"], "partial": bool(r["partial"]), "text_by": r["text_by"], "hidden": bool(r["hidden"]),
+                  "sources": by_node.get(r["id"], [])}
+                 for r in c.execute("SELECT * FROM map_nodes ORDER BY created_at, rowid")]
+        edges = [{"src": r["src"], "dst": r["dst"], "rel": r["rel"]} for r in c.execute("SELECT src, dst, rel FROM map_edges ORDER BY src, dst")]
+    return {"groups": groups, "nodes": nodes, "edges": edges}
+
+
+def put_map(doc):
+    """Merge an agent update. Omitted nodes stay. `drop` removes an agent node nothing hangs under. `edges` adds or
+    replaces those pairs; `drop_edges` removes those pairs; omit both to leave cross edges. User-edited sentences
+    and hidden nodes stay. `seen` marks threads just read, including ones that produced no node.
+    ponytail: group order is creation order; the agent cannot reorder regions."""
+    doc = rules.validate_map(doc)
+    with tx() as c:
+        existing = {r["id"]: _row(r) for r in c.execute("SELECT * FROM map_nodes")}
+        groups = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM map_groups")}
+        drop, incoming = set(doc["drop"]), {n["id"]: n for n in doc["nodes"]}
+        if drop & incoming.keys():
+            raise rules.Rejected("同一个节点不能又提交又去掉")
+        for nid in drop:
+            cur = existing.get(nid)
+            if not cur:
+                raise rules.Rejected(f"要去掉的节点不在地图上：{nid}")
+            if cur["text_by"] == "user" or cur["hidden"]:
+                raise rules.Rejected(f"用户留着的节点不能去掉：{cur['text']}")
+        final = {nid: {**cur, "sources": None} for nid, cur in existing.items() if nid not in drop}
+        for n in doc["nodes"]:
+            cur = existing.get(n["id"])
+            if cur and cur["hidden"]:
+                if n["text"] != cur["text"] or n["kind"] != cur["kind"]:
+                    raise rules.Rejected(f"节点已藏起，agent 不能改：{cur['text']}")
+                continue
+            if cur and cur["text_by"] == "user" and (n["text"] != cur["text"] or n["kind"] != cur["kind"]):
+                raise rules.Rejected(f"用户已手动改过这句，agent 不能修改：{cur['text']}")
+            for tid in n["sources"]:
+                _live_thread(c, tid)
+            kept = cur and cur["text_by"] == "user"
+            final[n["id"]] = {"id": n["id"], "group_id": n["group"], "kind": cur["kind"] if kept else n["kind"],
+                              "text": cur["text"] if kept else n["text"], "parent_id": n["parent"], "rel": n["rel"],
+                              "partial": int(n["partial"]), "text_by": cur["text_by"] if cur else "agent", "hidden": 0,
+                              "sources": n["sources"], "created_at": cur["created_at"] if cur else None}
+        for g in doc["groups"]:
+            groups[g["id"]] = g["name"]
+        for n in final.values():
+            if n["group_id"] not in groups:
+                raise rules.Rejected(f"节点「{n['text']}」的分组不存在：{n['group_id']}")
+            parent = n["parent_id"]
+            if parent and parent not in final:
+                raise rules.Rejected(f"「{n['text']}」的上级不在地图上")
+            if parent:
+                rules.map_spine(n["rel"], final[parent]["kind"], n["kind"])
+                if n["group_id"] != final[parent]["group_id"]:
+                    raise rules.Rejected(f"「{n['rel']}」的两端要在同一分组，跨分组用对照、支撑或待证")
+            elif n["rel"]:
+                raise rules.Rejected(f"「{n['text']}」没有上级，不能标「{n['rel']}」")
+        for start in final:
+            seen, nid = set(), start
+            while nid:
+                if nid in seen:
+                    raise rules.Rejected("节点互相指成了环")
+                seen.add(nid)
+                nid = final[nid]["parent_id"]
+        pairs = set()
+        for n in final.values():
+            if n["parent_id"]:
+                _map_pair(pairs, n["id"], n["parent_id"], n["text"])
+        by_pair = {tuple(sorted((r["src"], r["dst"]))): {"src": r["src"], "dst": r["dst"], "rel": r["rel"]}
+                   for r in c.execute("SELECT src, dst, rel FROM map_edges") if r["src"] not in drop and r["dst"] not in drop}
+        for e in doc["drop_edges"]:
+            if e["src"] in drop or e["dst"] in drop:
+                continue
+            pair = tuple(sorted((e["src"], e["dst"])))
+            cur = by_pair.get(pair)
+            if not cur or (cur["src"], cur["dst"], cur["rel"]) != (e["src"], e["dst"], e["rel"]):
+                raise rules.Rejected(f"要去掉的跨线不在地图上：{e['src']} {e['rel']} {e['dst']}")
+            del by_pair[pair]
+        for e in doc["edges"]:
+            by_pair[tuple(sorted((e["src"], e["dst"])))] = e
+        cross = list(by_pair.values())
+        for e in cross:
+            if e["src"] not in final or e["dst"] not in final:
+                raise rules.Rejected(f"跨线的两端要是地图上的节点（{e['rel']}）")
+            rules.map_cross(e["rel"], final[e["src"]]["kind"], final[e["dst"]]["kind"])
+            _map_pair(pairs, e["src"], e["dst"], final[e["src"]]["text"])
+        for tid in doc["seen"]:
+            _live_thread(c, tid)
+        stamp, pos = now(), c.execute("SELECT coalesce(max(position), -1) FROM map_groups").fetchone()[0]
+        for g in doc["groups"]:
+            if c.execute("SELECT 1 FROM map_groups WHERE id=?", (g["id"],)).fetchone():
+                c.execute("UPDATE map_groups SET name=? WHERE id=?", (g["name"], g["id"]))
+            else:
+                pos += 1
+                c.execute("INSERT INTO map_groups (id, name, position) VALUES (?,?,?)", (g["id"], g["name"], pos))
+        for nid in drop:
+            c.execute("DELETE FROM map_nodes WHERE id=?", (nid,))
+        for n in doc["nodes"]:
+            if existing.get(n["id"], {}).get("hidden"):
+                continue
+            row = final[n["id"]]
+            if n["id"] in existing:
+                c.execute("UPDATE map_nodes SET group_id=?, kind=?, text=?, parent_id=?, rel=?, partial=?, updated_at=? WHERE id=?",
+                          (row["group_id"], row["kind"], row["text"], row["parent_id"], row["rel"], row["partial"], stamp, n["id"]))
+            else:
+                c.execute("INSERT INTO map_nodes (id, group_id, kind, text, parent_id, rel, partial, text_by, hidden, created_at, updated_at) "
+                          "VALUES (?,?,?,?,?,?,?,'agent',0,?,?)",
+                          (n["id"], row["group_id"], row["kind"], row["text"], row["parent_id"], row["rel"], row["partial"], stamp, stamp))
+            c.execute("DELETE FROM map_sources WHERE node_id=?", (n["id"],))
+            c.executemany("INSERT INTO map_sources (node_id, thread_id) VALUES (?,?)", [(n["id"], t) for t in row["sources"]])
+        if doc["edges"] or doc["drop_edges"]:
+            c.execute("DELETE FROM map_edges")
+            c.executemany("INSERT INTO map_edges (src, dst, rel) VALUES (?,?,?)", [(e["src"], e["dst"], e["rel"]) for e in cross])
+        c.execute("DELETE FROM map_groups WHERE id NOT IN (SELECT group_id FROM map_nodes)")
+        for tid in doc["seen"]:
+            at, nmsg = c.execute("SELECT max(created_at), count(*) FROM messages WHERE thread_id=?", (tid,)).fetchone()
+            # plain update: INSERT ON CONFLICT fires both sync triggers and the second insert collides
+            if c.execute("SELECT 1 FROM map_seen WHERE thread_id=?", (tid,)).fetchone():
+                c.execute("UPDATE map_seen SET at=?, n=? WHERE thread_id=?", (at, nmsg, tid))
+            else:
+                c.execute("INSERT INTO map_seen (thread_id, at, n) VALUES (?,?,?)", (tid, at, nmsg))
+    return {"ok": True, "nodes": len(final), "seen": len(doc["seen"])}
+
+
+def set_map_node(nid, text=None, hidden=None):
+    """The user rewrites a sentence (the agent then leaves it) or hides the node."""
+    if text is None and hidden is None:
+        raise rules.Rejected("没有要改的")
+    with tx() as c:
+        cur = c.execute("SELECT kind FROM map_nodes WHERE id=?", (nid,)).fetchone()
+        if not cur:
+            raise rules.Rejected("这个节点不在地图上")
+        if text is not None:
+            c.execute("UPDATE map_nodes SET text=?, text_by='user', updated_at=? WHERE id=?", (rules.map_sentence(text, cur["kind"]), now(), nid))
+        if hidden is not None:
+            c.execute("UPDATE map_nodes SET hidden=?, updated_at=? WHERE id=?", (1 if hidden else 0, now(), nid))
+
+
 def set_thread_agent(thread_id, agent_id):
     with tx() as c:
         c.execute("UPDATE threads SET agent_id=? WHERE id=?", (agent_id, thread_id))
@@ -2353,6 +2542,8 @@ def _working_item(c, r):
             label, go = "讨论", {"to": "thread", "scope": t["scope"], "id": ref}
     elif kind == "distill":
         label, title, go = "起标题", "给讨论起标题", {"to": "discuss"}
+    elif kind == "map":
+        label, title, go = "整理地图", "把讨论收成问题和结论", {"to": "discuss"}
     else:
         title = ref
     return {"id": r["id"], "label": label, "title": title or label, "status": r["status"], "go": go}

@@ -644,3 +644,147 @@ def check_link(existing, by):
 def check_revision(current, base):
     if base is not None and base != current:
         raise Rejected(f"内容已被修改（当前版本 {current}，你基于 {base}），请重新读取后再提交")
+
+
+# The discussion map. A node is a question or a conclusion; threads are sources, not nodes.
+# Spine relations hang a node under its layout parent. Cross relations are the other edges.
+# (parent kind, child kind) for the spine; (src kind, dst kind) for a cross edge.
+_MAP_SPINE = {"拆开": ("question", "question"), "收窄": ("question", "question"), "引出": ("conclusion", "question"),
+              "回答": ("question", "conclusion"), "前提": ("conclusion", "conclusion")}
+_MAP_CROSS = {"对照": ("conclusion", "conclusion"), "支撑": ("conclusion", "conclusion"), "待证": ("question", "conclusion")}
+_MAP_KIND = {"question": "问题", "conclusion": "结论"}
+_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def _slug(v, what):
+    s = str(v or "").strip()
+    if not _SLUG.match(s):
+        raise Rejected(f"{what} 的 id 要用英文、数字和连字符：{s[:40]}")
+    return s
+
+
+def map_sentence(text, kind):
+    """One sentence the map can show. A question asks; a conclusion states."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if kind not in _MAP_KIND:
+        raise Rejected("节点种类只能是 question（问题）或 conclusion（结论）")
+    if not 4 <= len(text) <= 80:
+        raise Rejected(f"节点要写成 4 到 80 字的一句话：{text[:40]}")
+    if kind == "question" and not text.endswith(("？", "?")):
+        raise Rejected(f"问题要写成问句，以？结尾：{text}")
+    if kind == "conclusion" and text.endswith(("？", "?")):
+        raise Rejected(f"结论要写成判断句，不要以问号结尾：{text}")
+    return text
+
+
+def map_spine(rel, parent_kind, child_kind):
+    want = _MAP_SPINE.get(rel)
+    if not want:
+        raise Rejected("挂在上级下面的关系只能是拆开、收窄、引出、回答、前提")
+    if (parent_kind, child_kind) != want:
+        raise Rejected(f"「{rel}」的上级要是{_MAP_KIND[want[0]]}、下级要是{_MAP_KIND[want[1]]}"
+                       f"（现在是{_MAP_KIND.get(parent_kind, parent_kind)} → {_MAP_KIND.get(child_kind, child_kind)}）")
+
+
+def map_cross(rel, src_kind, dst_kind):
+    want = _MAP_CROSS.get(rel)
+    if not want:
+        raise Rejected("跨线只能是对照、支撑、待证")
+    if (src_kind, dst_kind) != want:
+        raise Rejected(f"「{rel}」要从{_MAP_KIND[want[0]]}指向{_MAP_KIND[want[1]]}"
+                       f"（现在是{_MAP_KIND.get(src_kind, src_kind)} → {_MAP_KIND.get(dst_kind, dst_kind)}）")
+
+
+def _map_pair(pairs, a, b):
+    key = tuple(sorted((a, b)))
+    if key in pairs:
+        raise Rejected(f"{a} 和 {b} 之间已经有一条关系")
+    pairs.add(key)
+
+
+def _map_edge(e):
+    if not isinstance(e, dict):
+        raise Rejected("跨线要是对象")
+    rel, src, dst = e.get("rel"), _slug(e.get("src"), "跨线"), _slug(e.get("dst"), "跨线")
+    if rel not in _MAP_CROSS:
+        raise Rejected("跨线只能是对照、支撑、待证")
+    if src == dst:
+        raise Rejected("跨线的两端不能是同一个节点")
+    if rel == "对照" and src > dst:
+        src, dst = dst, src
+    return {"src": src, "dst": dst, "rel": rel}
+
+
+def _map_edge_list(raw, what):
+    if not isinstance(raw, list):
+        raise Rejected(f"{what} 要是数组")
+    edges, pairs = [], set()
+    for e in raw:
+        edge = _map_edge(e)
+        _map_pair(pairs, edge["src"], edge["dst"])
+        edges.append(edge)
+    return edges
+
+
+def validate_map(doc):
+    """The agent's map update. `edges` adds or replaces those pairs; `drop_edges` removes those pairs.
+    Omit both to leave cross edges alone. Nodes not listed are left for the store to keep. Does not look at the database."""
+    if not isinstance(doc, dict):
+        raise Rejected("地图要一个 JSON 对象")
+    groups, seen_g = [], set()
+    for g in doc.get("groups") or []:
+        if not isinstance(g, dict):
+            raise Rejected("分组要是对象")
+        gid, name = _slug(g.get("id"), "分组"), re.sub(r"\s+", " ", str(g.get("name") or "")).strip()
+        if gid in seen_g:
+            raise Rejected(f"分组 id 重复：{gid}")
+        if not 1 <= len(name) <= 24:
+            raise Rejected(f"分组名要 1 到 24 字：{name[:30]}")
+        seen_g.add(gid)
+        groups.append({"id": gid, "name": name})
+    nodes, by_id, pairs = [], {}, set()
+    for n in doc.get("nodes") or []:
+        if not isinstance(n, dict):
+            raise Rejected("节点要是对象")
+        nid, kind = _slug(n.get("id"), "节点"), n.get("kind")
+        if nid in by_id:
+            raise Rejected(f"节点 id 重复：{nid}")
+        parent, rel = n.get("parent") or None, n.get("rel") or None
+        if parent:
+            parent = _slug(parent, "上级")
+        if bool(parent) != bool(rel):
+            raise Rejected(f"「{nid}」有上级时要写 rel，没有上级就不要写 rel")
+        if parent == nid:
+            raise Rejected(f"「{nid}」不能挂在自己下面")
+        if n.get("partial") and rel != "回答":
+            raise Rejected("只有「回答」可以标部分")
+        sources = []
+        for s in n.get("sources") or []:
+            sid = s.get("id") if isinstance(s, dict) else s
+            sid = _slug(sid, "讨论")
+            if sid not in sources:
+                sources.append(sid)
+        if not sources:
+            raise Rejected(f"「{nid}」至少要有一段讨论作为出处")
+        text = map_sentence(n.get("text"), kind)
+        group = _slug(n.get("group"), "节点的分组")
+        if parent and parent in by_id:
+            map_spine(rel, by_id[parent]["kind"], kind)
+            _map_pair(pairs, parent, nid)
+        by_id[nid] = {"kind": kind}
+        nodes.append({"id": nid, "group": group, "kind": kind, "text": text, "parent": parent, "rel": rel,
+                      "partial": bool(n.get("partial")), "sources": sources})
+    # A parent listed later in the file: check the pair once both exist.
+    for n in nodes:
+        if n["parent"] and n["parent"] in by_id and tuple(sorted((n["parent"], n["id"]))) not in pairs:
+            map_spine(n["rel"], by_id[n["parent"]]["kind"], n["kind"])
+            _map_pair(pairs, n["parent"], n["id"])
+    edges = _map_edge_list(doc["edges"], "edges") if "edges" in doc else []
+    for e in edges:
+        if e["src"] in by_id and e["dst"] in by_id:
+            map_cross(e["rel"], by_id[e["src"]]["kind"], by_id[e["dst"]]["kind"])
+            _map_pair(pairs, e["src"], e["dst"])
+    drop_edges = _map_edge_list(doc["drop_edges"], "drop_edges") if "drop_edges" in doc else []
+    drop = list(dict.fromkeys(_slug(x, "要去掉的节点") for x in (doc.get("drop") or [])))
+    seen = list(dict.fromkeys(_slug(x, "讨论") for x in (doc.get("seen") or [])))
+    return {"groups": groups, "nodes": nodes, "edges": edges, "drop_edges": drop_edges, "drop": drop, "seen": seen}
