@@ -126,9 +126,9 @@ function Msg({ m, t, onFork, shelf }) {
     researchPicker({ heading: '把这段讨论加入研究', title: firstSentence(s), summary: short(s, 300),
       links: [{ kind: 'message', ref: m.id }, ...(k === 'paper' ? [{ kind: 'paper', ref: ref2 }] : [])], topics: k === 'topic' ? [ref2] : [] });
   };
-  const acts = html`${(m.research || []).map((x) => html`<${ResearchChip} x=${x} />`)}
+  const acts = onFork ? html`${(m.research || []).map((x) => html`<${ResearchChip} x=${x} />`)}
     <button class="btn sm ghost" onClick=${addToResearch} title="作为素材加入研究">加入研究</button>
-    <button class="btn sm ghost" onClick=${() => onFork(m)} title="从这条消息分出一段新讨论，带着到这里为止的上下文">从这里分叉</button>`;
+    <button class="btn sm ghost" onClick=${() => onFork(m)} title="从这条消息分出一段新讨论，带着到这里为止的上下文">从这里分叉</button>` : null;
   const forks = shelf !== undefined ? shelf
     : m.forks?.length ? html`<div class="forks">↳ 从这里分出：${m.forks.map((f) => html`<a href="#" onClick=${(e) => { e.preventDefault(); openThread(f.scope, f.id); }}>${short(threadName(f), 30)}</a>`)}</div>` : null;
   if (m.role === 'user') {
@@ -161,6 +161,7 @@ function TitleLine({ t: thread }) {
   const [editing, setEditing] = useState(false);
   const [v, setV] = useState('');
   const t = { ...thread, first: thread.messages.find((m) => m.role === 'user')?.text };
+  if (t.space) return html`<div class="tree-title"><b>${t.title || threadName(t)}</b></div>`; // read through from a space: no renaming here
   const save = async (e) => {
     e.preventDefault();
     try { await post(`/api/threads/${enc(t.id)}`, { title: v }); setEditing(false); toast('已保存标题'); refresh(); } catch (err) { fail(err); }
@@ -332,7 +333,7 @@ function UpReach({ seg, nextId, onFork }) {
     </div>
     ${open ? html`${seg.messages.map((m) => html`<div key=${m.id} id=${`m-${m.id}`} class=${`up-msg ${m.role}${highlight.value === m.id ? ' flash' : ''}`}>
       <div class="up-body">${m.role === 'user' ? m.text : html`<${Md} text=${m.text} />`}</div>
-      <button class="btn sm ghost fork-here" title="从这条消息分出一段新讨论" onClick=${() => onFork(m, seg)}>⑂ 分叉</button>
+      ${onFork ? html`<button class="btn sm ghost fork-here" title="从这条消息分出一段新讨论" onClick=${() => onFork(m, seg)}>⑂ 分叉</button>` : null}
       ${byMid[m.id]?.length ? html`<${Shelf} forks=${byMid[m.id]} nextId=${nextId} />` : null}</div>`)}
       ${outflow.length ? html`<${Shelf} forks=${outflow} nextId=${nextId} outflow />` : null}` : null}
   </div>`;
@@ -378,24 +379,27 @@ function River({ t, reload }) {
       <span class="chat-scope" title=${scopeLabel(t.scope, t.scope_title)}>范围：${scopeLabel(t.scope, t.scope_title)}</span>
       ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(k.length + 1)); }}>有修改稿待你确认 →</a>` : null}
       <span class="grow"></span>
+      ${t.space ? html`<span class="chip" title="这段讨论在共享空间里，这里只读">共享 · ${t.space.name}</span>
+        <button class="btn sm primary" onClick=${() => openInSpace(t.space, 'discuss', t.id)}>去「${t.space.name}」继续 →</button>` : html`
       <${ScopeOpen} scope=${t.scope} />
       ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${branch} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
-      ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => go('discuss', t.parent_id || undefined), () => go('discuss', t.id))} />` : null}</div>
+      ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => go('discuss', t.parent_id || undefined), () => go('discuss', t.id))} />` : null}`}</div>
     <div class="river-flow" ref=${box}>
       ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
       ${chain.map((seg, i) => i < chain.length - 1
-        ? html`<${UpReach} key=${seg.id} seg=${seg} nextId=${chain[i + 1].id} onFork=${fork} />`
+        ? html`<${UpReach} key=${seg.id} seg=${seg} nextId=${chain[i + 1].id} onFork=${t.space ? null : fork} />`
         : html`<div class="reach now" key=${seg.id}>
           ${n || chain.length > 1 ? html`<div class="reach-now">${chain.length > 1 ? html`<span class="reach-tag">下游 · 当前</span>` : null}<${TitleLine} t=${seg} /></div>` : null}
           ${empty ? html`<${EmptyChat} t=${seg} setDraft=${setDraft} input=${input} />`
-            : seg.messages.map((m) => html`<${Msg} key=${m.id} m=${m} t=${seg} onFork=${(mm) => fork(mm)} shelf=${m.forks?.length ? html`<${Shelf} forks=${m.forks} />` : null} />`)}
+            : seg.messages.map((m) => html`<${Msg} key=${m.id} m=${m} t=${seg} onFork=${t.space ? null : (mm) => fork(mm)} shelf=${m.forks?.length ? html`<${Shelf} forks=${m.forks} />` : null} />`)}
           ${!n && t.path.length ? html`<div class="chat-empty"><b>从这里接着想</b><p class="hint">这段分支带着上面的上下文，问点什么，或者先记一句。</p></div>` : null}
           ${outflow.length ? html`<${Shelf} forks=${outflow} outflow />` : null}
         </div>`)}
     </div>
-    <${Composer} t=${t} reload=${reload} draft=${draft} setDraft=${setDraft} input=${input} /></div>`;
+    ${t.space ? html`<div class="chat-empty"><p class="hint">只读：这段讨论在共享空间「${t.space.name}」里，内容随空间实时更新。要继续讨论，点上面的按钮进入那个空间。</p></div>`
+      : html`<${Composer} t=${t} reload=${reload} draft=${draft} setDraft=${setDraft} input=${input} />`}</div>`;
 }
 
 function RiverLoader({ id }) {
@@ -462,7 +466,7 @@ function Row({ t, depth, sel, onSelect, tree, renaming, setRenaming, drag, setDr
         ? html`<form onSubmit=${rename}><input class="ol-rename" value=${v} ref=${(el) => { if (el && !el.dataset.f) { el.dataset.f = 1; el.focus(); el.select(); } }}
             onInput=${(e) => setV(e.target.value)} onBlur=${rename} onKeyDown=${(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRenaming(null); } }} /></form>`
         : html`<div class="ol-title" onDblClick=${(e) => { e.stopPropagation(); if (t.space) return; setV(threadName(t)); setRenaming(t.id); }}>${threadName(t)}</div>`}
-      <div class="ol-meta"><span class="chip">${SCOPE_KIND[k] || k}</span>${t.space ? html`<span class="chip" title="在共享空间「${t.space.name}」里，点开进入那个空间">共享 · ${t.space.name}</span>` : null}${k !== 'library' && t.scope_title ? html`<span class="src">${short(plain(t.scope_title), 28)}</span>` : null}
+      <div class="ol-meta"><span class="chip">${SCOPE_KIND[k] || k}</span>${t.space ? html`<span class="chip" title="在共享空间「${t.space.name}」里；这里只读，进去才能继续">共享 · ${t.space.name}</span>` : null}${k !== 'library' && t.scope_title ? html`<span class="src">${short(plain(t.scope_title), 28)}</span>` : null}
         <span>${t.n} 条</span><time>${ago(t.last_at)}</time>${kids && isFolded ? html`<span>· ${kids} 个分支</span>` : null}
         ${t.parent_by === 'agent' ? html`<span class="chip violet" title="agent 觉得它接着上一段；点 × 放回顶层">agent 挂的<button class="x" onClick=${(e) => { e.stopPropagation(); move(t.id, null); }}>×</button></span>` : null}</div>
     </div></div>`;
@@ -685,7 +689,7 @@ function MapCanvas({ onOpen, threads }) {
     </div>` : null}
     <div class="delta-tools">
       ${spaceThreads.length ? html`<details class="map-hidden"><summary>空间里你的讨论 ${spaceThreads.length}</summary>
-        ${spaceThreads.map((t) => html`<button key=${t.id} title=${`共享 · ${t.space.name}，点开进入那个空间`} onClick=${() => onOpen(t.id)}>${short(threadName(t), 22)}</button>`)}</details>` : null}
+        ${spaceThreads.map((t) => html`<button key=${t.id} title=${`共享 · ${t.space.name}；这里只读`} onClick=${() => onOpen(t.id)}>${short(threadName(t), 22)}</button>`)}</details>` : null}
       ${hidden.length ? html`<details class="map-hidden"><summary>藏起 ${hidden.length}</summary>
         ${hidden.map((n) => html`<button key=${n.id} onClick=${() => restore(n.id)}>${short(n.text, 22)}</button>`)}</details>` : null}
       <button class="btn sm" onClick=${() => zoomBy(1.3, box.current.clientWidth / 2, box.current.clientHeight / 2)}>＋</button>
@@ -700,16 +704,11 @@ function MapCanvas({ onOpen, threads }) {
 export function DiscussView({ threadId }) {
   const [list] = useLive('/api/threads/recent?shared=1');
   const sel = threadId || null;
-  const select = (id) => {
-    const t = (list || []).find((x) => x.id === id);
-    if (t?.space) return openInSpace(t.space, 'discuss', id); // a pointer: open it where it lives
-    pane.value = 'river'; go('discuss', id);
-  };
+  const select = (id) => { pane.value = 'river'; go('discuss', id); }; // space threads read through at home; entering the space is a deliberate choice there
   useEffect(() => {
     const want = takeSwitchIntent('discuss');
     if (want) { go('discuss', want.id); return; }
-    const first = list && buildTree(list).roots.find((t) => !t.space);
-    if (!sel && first && innerWidth > 900) go('discuss', first.id);
+    if (!sel && list?.length && innerWidth > 900) go('discuss', buildTree(list).roots[0]?.id);
   }, [list?.length, sel]);
   const back = () => { pane.value = 'river'; go('discuss'); };
   return html`<div id="body" class=${sel || pane.value === 'map' ? 'show-detail' : ''}>

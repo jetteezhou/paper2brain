@@ -1382,6 +1382,29 @@ def link(capture_id, pid, by, state="confirmed", evidence=None):
         c.execute(
             "INSERT OR REPLACE INTO capture_papers VALUES (?,?,?,?,?,?)", (capture_id, pid, state, by, evidence, now())
         )
+    if state == "confirmed":
+        _take_home(pid)
+
+
+def _take_home(pid):
+    """Engaging with a paper in a shared space also files it in the engager's own library (a capture keeps it listed
+    there). Papers are immutable content; the copies then drift only in what agents derive from them.
+    ponytail: a failure here is swallowed — going home must never block the space's own work; the next engagement retries."""
+    viewer = _viewer.get()
+    if not viewer or not multi():
+        return
+    try:
+        dst = library_home(viewer["library"])
+        if str(dst) == str(home()):
+            return
+        copy_paper(pid, dst)
+        with at_home(dst):
+            if not get_paper(pid)["listed"]:
+                cap, _ = add_capture(new_id(), rules.id_label(pid), "space")
+                link(cap["id"], pid, "user", evidence="在共享空间里添加或讨论的")
+                update_capture(cap["id"], status="mapped")
+    except Exception:
+        pass
         _event(c, by, "link", capture_id, paper=pid, state=state)
 
 
@@ -1820,7 +1843,16 @@ def new_thread(scope, parent_id=None, text=None, tid=None, fork=None):
             parent_id = r["thread_id"]
         if parent_id and not c.execute("SELECT 1 FROM threads WHERE id=?", (parent_id,)).fetchone():
             raise rules.Rejected("要接着的那段讨论不存在了")
-        return _start_thread(c, scope, text, parent_id, tid, fork)
+        out = _start_thread(c, scope, text, parent_id, tid, fork)
+    kind, _, ref = scope.partition(":")  # discussing a paper in a space engages with it too: it comes home
+    if kind == "paper":
+        _take_home(ref)
+    elif kind == "anchor":
+        with tx() as c:
+            r = c.execute("SELECT paper_id FROM anchors WHERE id=?", (ref,)).fetchone()
+        if r:
+            _take_home(r["paper_id"])
+    return out
 
 
 def set_thread_title(tid, title, by):

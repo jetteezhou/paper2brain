@@ -475,7 +475,7 @@ function Account() {
       : html`<p class="hint">只有超级管理员能生成邀请链接，需要加人时找 ta。</p>`}
       ${got.invite ? html`<p class="hint">一次有效，7 天内用：</p><${Copyable} text=${joinLink(got.invite.code)} />` : null}`
       : html`<p><button class="btn sm ghost danger" onClick=${leave}>离开这个空间</button></p>`}`
-  : html`<p class="hint" style="margin-top:0">把一个研究放进一个新的共享空间，再邀请别人一起改。研究本身（三要素、素材、实验、文档、写作）在空间里只有一份，大家都改这一份；每个人的讨论和 agent 只有自己看得到，用的是自己 Mac 上的 agent。你个人库里留下一个指向它的入口：研究列表里标着“共享”，论文页上仍显示被它用到，点开就进入空间。你在空间里添加或讨论过的论文、你写的讨论，也以“共享”标记出现在你个人库的论文和讨论列表里；你离开空间或空间归档时，你的讨论会复制回你的个人库。你作为所有者随时可以在研究页上把它移回个人库。</p>
+  : html`<p class="hint" style="margin-top:0">把一个研究放进一个新的共享空间，再邀请别人一起改。研究本身（三要素、素材、实验、文档、写作）在空间里只有一份，大家都改这一份；每个人的讨论和 agent 只有自己看得到，用的是自己 Mac 上的 agent。你个人库里留下一个指向它的入口：研究列表里标着“共享”，论文页上仍显示被它用到，点开就进入空间。你在空间里添加或讨论过的论文，会连着快读卡复制进你的个人库；你写的讨论在你个人库的讨论列表里也看得到（这里只读，想继续点“去空间继续”）；你离开空间或空间归档时，你的讨论会复制回你的个人库。你作为所有者随时可以在研究页上把它移回个人库。</p>
     <form class="research-create" onSubmit=${share}>
       <select name="research_id" aria-label="要共享的研究"><option value="">选一个研究…</option>${(researches || []).map((x) => html`<option value=${x.id}>${x.title}</option>`)}</select>
       <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />

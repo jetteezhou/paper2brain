@@ -639,7 +639,22 @@ def note_add(q, body):
 
 @route("GET", "/api/threads")
 def thread_get(q, body):
-    return store.thread_for(q.get("scope"), q.get("id"))
+    """A discussion by scope or id. An id may name one of the member's own discussions in a space (from their
+    personal library's aggregated list): then it is read through from the space, stamped with it."""
+    try:
+        return store.thread_for(q.get("scope"), q.get("id"))
+    except rules.Rejected:
+        if q.get("id") and store.multi():
+            me = _me()
+            if me.get("library") and me["library"] == me["user"]["library"]:
+                for lib in accounts.libraries(me["user"]["id"]):
+                    if lib["kind"] == "space":
+                        with store.at_home(store.library_home(lib["id"])), store.viewing(me["user"]):
+                            try:
+                                return {**store.thread_for(None, q["id"]), "space": {"id": lib["id"], "name": lib["name"]}}
+                            except rules.Rejected:
+                                pass
+        raise
 
 
 @route("GET", "/api/threads/recent")

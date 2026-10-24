@@ -292,16 +292,21 @@ class Multi(unittest.TestCase):
             cap, _ = store.add_capture("cap-old", "https://arxiv.org/abs/2502.00002", "find")
             store.link(cap["id"], "arxiv:2502.00002", "agent")
         home_b = f"p2b_session={tb}"
-        got = self.call("/api/papers?shared=1", cookie=home_b)[1]  # 个人库里看到空间论文的指针
-        self.assertEqual([p["space"]["name"] for p in got if p["id"] == "arxiv:2501.00001"], ["组会"])
-        self.assertIn("arxiv:2502.00002", [p["id"] for p in got])
-        self.assertFalse([p for p in self.call("/api/papers", cookie=home_b)[1] if p["id"] == "arxiv:2501.00001"])  # 不带 shared 没有
+        # 参与即复制：乙添加并讨论过的论文已经真的进了乙的个人库，不是指针
+        self.assertIn("arxiv:2501.00001", [p["id"] for p in self.call("/api/papers", cookie=home_b)[1]])
+        got = self.call("/api/papers?shared=1", cookie=home_b)[1]
+        self.assertFalse([p for p in got if p["id"] == "arxiv:2501.00001" and p.get("space")])  # 已在家，不再是指针
+        self.assertIn("arxiv:2502.00002", [p["id"] for p in got])  # 存量（归属为空）的仍是指针
         got_a = self.call("/api/papers?shared=1", cookie=f"p2b_session={ta}")[1]
-        self.assertFalse([p for p in got_a if p["id"] == "arxiv:2501.00001"])  # 甲看不到乙添加的
+        self.assertFalse([p for p in got_a if p["id"] == "arxiv:2501.00001"])  # 甲没有乙添加的
         self.assertIn("arxiv:2502.00002", [p["id"] for p in got_a])  # 但存量共享的两边都有
         got = self.call("/api/threads/recent?shared=1", cookie=home_b)[1]
         self.assertEqual([t["space"]["name"] for t in got if t["id"] == btid], ["组会"])
         self.assertFalse([t for t in self.call("/api/threads/recent?shared=1", cookie=f"p2b_session={ta}")[1] if t["id"] == btid])
+        code, got, _ = self.call(f"/api/threads?id={btid}", cookie=home_b)  # 空间的讨论在个人库里只读直读
+        self.assertEqual((code, got["space"]["name"]), (200, "组会"))
+        self.assertEqual(got["messages"][0]["text"], "这篇对路吗")
+        self.assertEqual(self.call(f"/api/threads?id={btid}", cookie=f"p2b_session={ta}")[0], 400)  # 甲读不到乙的
         self.assertEqual(self.call("/api/papers/arxiv:2501.00001/copy-home", {}, cookie=home_b)[0], 400)  # 已在个人库
         self.assertEqual(self.call("/api/papers/arxiv:2501.00001/copy-home", {}, cookie=f"{home_b}; p2b_lib={space}")[0], 200)
         with store.at_home(store.library_home(b["library"])):
