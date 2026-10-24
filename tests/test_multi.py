@@ -287,11 +287,18 @@ class Multi(unittest.TestCase):
             store.link(cap["id"], "arxiv:2501.00001", "user")
             btid = store.new_thread("paper:arxiv:2501.00001", text="这篇对路吗")
             child = store.new_thread("paper:arxiv:2501.00001", parent_id=btid, text="接着说")
+        with store.at_home(store.library_home(space)):  # 归属记录之前收下的（user_id 为空）：全空间共享
+            store.upsert_paper("arxiv:2502.00002", "早年收下的")
+            cap, _ = store.add_capture("cap-old", "https://arxiv.org/abs/2502.00002", "find")
+            store.link(cap["id"], "arxiv:2502.00002", "agent")
         home_b = f"p2b_session={tb}"
         got = self.call("/api/papers?shared=1", cookie=home_b)[1]  # 个人库里看到空间论文的指针
         self.assertEqual([p["space"]["name"] for p in got if p["id"] == "arxiv:2501.00001"], ["组会"])
+        self.assertIn("arxiv:2502.00002", [p["id"] for p in got])
         self.assertFalse([p for p in self.call("/api/papers", cookie=home_b)[1] if p["id"] == "arxiv:2501.00001"])  # 不带 shared 没有
-        self.assertFalse([p for p in self.call("/api/papers?shared=1", cookie=f"p2b_session={ta}")[1] if p["id"] == "arxiv:2501.00001"])  # 甲看不到乙的
+        got_a = self.call("/api/papers?shared=1", cookie=f"p2b_session={ta}")[1]
+        self.assertFalse([p for p in got_a if p["id"] == "arxiv:2501.00001"])  # 甲看不到乙添加的
+        self.assertIn("arxiv:2502.00002", [p["id"] for p in got_a])  # 但存量共享的两边都有
         got = self.call("/api/threads/recent?shared=1", cookie=home_b)[1]
         self.assertEqual([t["space"]["name"] for t in got if t["id"] == btid], ["组会"])
         self.assertFalse([t for t in self.call("/api/threads/recent?shared=1", cookie=f"p2b_session={ta}")[1] if t["id"] == btid])

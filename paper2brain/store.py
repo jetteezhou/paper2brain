@@ -709,7 +709,7 @@ def member_papers(uid):
         pids |= {r[0] for r in c.execute("SELECT DISTINCT a.paper_id FROM main.threads t JOIN anchors a ON t.scope='anchor:' || a.id WHERE t.user_id=?", (uid,))}
         pids |= {r[0] for r in c.execute(
             "SELECT DISTINCT cp.paper_id FROM main.captures cap JOIN capture_papers cp ON cp.capture_id=cap.id "
-            "WHERE cap.user_id=? AND cp.state='confirmed'", (uid,))}
+            "WHERE (cap.user_id=? OR cap.user_id IS NULL) AND cp.state='confirmed'", (uid,))}  # NULL: 记录归属之前收下的，全空间共享
         if not pids:
             return []
         return _rows(c.execute(

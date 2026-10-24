@@ -516,8 +516,10 @@ export function PapersView({ view, topic }) {
   const head = html`<${ListHead} title=${title} sub=${list?.length ? `${list.length} 条` : ''}
       keys=${list?.length ? html`<a href="#" onClick=${(e) => { e.preventDefault(); setPicking(picking ? null : new Set()); }}>${picking ? '退出多选' : '多选'}</a>` : null} />
     ${topic ? html`<${TopicTabs} topic=${topic} on="papers" papers=${list?.length} research=${research?.length} />` : null}${bar}`;
+  const ptrs = (list || []).filter((p) => p.space), own = (list || []).filter((p) => !p.space);
+  const item = (p) => html`<${PaperItem} key=${p.id} p=${p} on=${p.id === sel} picked=${picking?.has(p.id)} onPick=${picking ? pick : null} />`;
   const body = !list ? html`<div class="empty"><span class="spin"></span></div>` : !list.length ? html`<${Empty} e=${v.empty} />`
-    : list.map((p) => html`<${PaperItem} key=${p.id} p=${p} on=${p.id === sel} picked=${picking?.has(p.id)} onPick=${picking ? pick : null} />`);
+    : html`${ptrs.length ? html`<div class="group-label">共享空间里与你相关 · ${ptrs.length} 篇</div>${ptrs.map(item)}` : null}${own.map(item)}`;
   return html`<${ListDetail} hasSel=${!!sel} list=${html`${head}${body}`}
     detail=${sel ? html`<${PaperDetail} key=${sel} pid=${sel} />` : list?.length ? html`<div class="empty" style="padding-top:120px">选择左侧一条查看</div>` : null} />`;
 }
