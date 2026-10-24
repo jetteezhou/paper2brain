@@ -50,7 +50,19 @@ function RunsBlock({ runs, label, spec }) {
 
 // ---------- overview: the three elements ----------
 
-const Diff = ({ a, b }) => html`<div class="diff">${diffText(a, b).map(([op, t]) => (op === '=' ? t : html`<${op === '+' ? 'ins' : 'del'}>${t}<//>`))}</div>`;
+/** Changed sentences only. Unchanged stretches collapse to ···, the way a diff shows hunks and not the whole text. */
+const Diff = ({ a, b }) => {
+  const nodes = [];
+  let skip = false;
+  for (const [op, t] of diffText(a, b)) {
+    if (op === '=') { skip = true; continue; }
+    if (skip) nodes.push(html`<span class="diff-skip"> ··· </span>`);
+    skip = false;
+    nodes.push(html`<${op === '+' ? 'ins' : 'del'}>${t}<//>`);
+  }
+  if (skip && nodes.length) nodes.push(html`<span class="diff-skip"> ··· </span>`);
+  return html`<div class="diff">${nodes}</div>`;
+};
 
 /** One row per changed part of a draft: what is there now against what the agent proposes, ticked to take it. */
 function DraftRows({ rows, cur, p, pick, setPick }) {
@@ -191,11 +203,38 @@ function Materials({ x }) {
 
 const linkTitles = (x) => Object.fromEntries(x.links.filter((l) => l.kind === 'paper').map((l) => [l.ref, l.label]));
 
+const workCell = (r, title) => (r.paper === 'ours' ? html`<b>${r.name || '我们'}</b>` : html`${r.name ? html`<b>${r.name}</b><br />` : null}<${PaperChip} peek id=${r.paper} title=${title[r.paper] || idLabel(r.paper)} />`);
+
 function Comparison({ t, title }) {
   return html`<div class="cmp-wrap"><table class="cmp"><thead><tr><th>工作</th>${t.columns.map((c) => html`<th>${c}</th>`)}</tr></thead>
     <tbody>${t.rows.map((r) => html`<tr class=${r.paper === 'ours' ? 'ours' : ''}>
-      <td>${r.paper === 'ours' ? html`<b>${r.name || '我们'}</b>` : html`${r.name ? html`<b>${r.name}</b><br />` : null}<${PaperChip} peek id=${r.paper} title=${title[r.paper] || idLabel(r.paper)} />`}</td>
+      <td>${workCell(r, title)}</td>
       ${r.cells.map((c) => html`<td>${c}</td>`)}</tr>`)}</tbody></table></div>`;
+}
+
+/** A changed comparison: only rows and cells that differ. A new table is shown whole, once. */
+function ComparisonDiff({ prev, next, title }) {
+  if (!prev) return html`<${Comparison} t=${next} title=${title} />`;
+  const prevRow = Object.fromEntries(prev.rows.map((r) => [r.paper, r]));
+  const nextIds = new Set(next.rows.map((r) => r.paper));
+  const was = (row, col) => { const i = prev.columns.indexOf(col); return i < 0 ? '' : (row.cells[i] || ''); };
+  const changed = next.rows.filter((r) => {
+    const o = prevRow[r.paper];
+    return !o || (o.name || '') !== (r.name || '') || next.columns.some((c, i) => was(o, c) !== (r.cells[i] || ''));
+  });
+  const gone = prev.rows.filter((r) => !nextIds.has(r.paper)).map((r) => r.name || (r.paper === 'ours' ? '我们' : (title[r.paper] || idLabel(r.paper))));
+  const dropped = prev.columns.filter((c) => !next.columns.includes(c));
+  return html`<div class="cmp-wrap"><table class="cmp"><thead><tr><th>工作</th>${next.columns.map((c) => html`<th>${prev.columns.includes(c) ? c : html`<ins>${c}</ins>`}</th>`)}</tr></thead>
+    <tbody>${changed.map((r) => {
+      const o = prevRow[r.paper];
+      return html`<tr class=${r.paper === 'ours' ? 'ours' : ''}><td>${o && (o.name || '') !== (r.name || '') ? html`<del>${o.name || '—'}</del> ` : null}${workCell(r, title)}</td>
+        ${r.cells.map((c, i) => {
+          const old = o ? was(o, next.columns[i]) : null;
+          return html`<td>${old == null ? html`<ins>${c || ''}</ins>` : old === (c || '') ? c : html`<del>${old || '—'}</del> <ins>${c || '—'}</ins>`}</td>`;
+        })}</tr>`;
+    })}</tbody></table>
+    ${gone.length ? html`<div class="hint">删行：${gone.join('、')}</div>` : null}
+    ${dropped.length ? html`<div class="hint">删列：${dropped.join('、')}</div>` : null}</div>`;
 }
 
 function RelatedProposal({ x }) {
@@ -213,7 +252,7 @@ function RelatedProposal({ x }) {
           ${g.diff ? html`<div class="hint">我们的区别：<${Html} s=${inlineMd(g.diff)} /></div>` : null}<div class="hint">${g.papers.length} 篇论文</div></div>`}</div>`)
       : newTable ? null : html`<div class="hint">和现在的一样。</div>`}
     ${newTable ? html`<div class="pr-row"><label class="pr-label"><b>对比表</b><span class="chip">${r.comparison ? '修改' : '新增'}</span></label>
-      <${Comparison} t=${newTable} title=${linkTitles(x)} /></div>` : null}
+      <${ComparisonDiff} prev=${r.comparison} next=${newTable} title=${linkTitles(x)} /></div>` : null}
     <div class="proposal-acts"><button class="btn primary" onClick=${() => decide('accept')}>采用</button>
       <button class="btn" onClick=${talk}>继续调整（在右侧讨论里说）</button><button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>`;
 }
@@ -626,8 +665,7 @@ function FiguresProposal({ x }) {
     ${rows.length ? rows.map(([k, cls, f, why]) => html`<div class="task-diff"><span class=${`chip ${cls}`}>${k}</span><span class=${`quotable ${k === '删除' ? 'struck' : ''}`}>${f.title}</span>
         <span class="hint">${why.length ? why.join('；') : k === '修改' ? '' : shape(f)}</span></div>
       ${k === '修改' ? texts(cur[f.id], f).map(([t, l]) => html`<div class="exp-row"><span class="hint">${l}</span><${Diff} a=${cur[f.id][t] || ''} b=${f[t] || ''} /></div>`) : null}`) : design ? null : html`<div class="hint">和现在的实验设计一样。</div>`}
-    ${design || rows.length ? html`<details><summary class="hint">预览采用后的实验部分</summary>${p.design ? html`<${DesignView} d=${p.design} />` : null}
-      <${Sections} x=${x} d=${p.design || fg.design} figs=${p.figures} /></details>` : null}
+    ${design && !fg.design ? html`<${DesignView} d=${p.design} />` : null}
     <div class="proposal-acts"><button class="btn primary" onClick=${() => decide('accept')}>采用</button>
       <button class="btn" onClick=${talk}>继续调整（去讨论）</button><button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>`;
 }
@@ -655,14 +693,20 @@ function Figures({ x }) {
 function Experiments({ x }) {
   const exps = x.experiments;
   const [raw, setRaw] = useState('');
+  const box = useRef();
+  useEffect(() => { if (!raw && box.current) box.current.style.height = ''; }, [raw]);
   const add = async (e) => {
     e.preventDefault();
     if (!raw.trim()) return;
-    try { await post(`/api/research/${enc(x.id)}/experiments`, { raw: raw.trim() }); setRaw(''); toast(agentOn.value ? '已记下，agent 正在整理' : '已记下'); refresh(); } catch (err) { fail(err); }
+    try {
+      await post(`/api/research/${enc(x.id)}/experiments`, { raw: raw.trim() });
+      setRaw('');
+      toast(agentOn.value ? '已记下，agent 正在整理' : '已记下'); refresh();
+    } catch (err) { fail(err); }
   };
   const metrics = [...new Set(exps.flatMap((e) => (e.results || []).map((r) => r.name)))].slice(0, 8);
   return html`<form class="exp-add" onSubmit=${add}>
-      <textarea rows="3" value=${raw} onInput=${(e) => setRaw(e.target.value)} placeholder="贴实验结果：评测日志、终端输出、wandb 汇总，或者一句话“LIBERO 跑完了 92.3，比 baseline 高 4 个点”"></textarea>
+      <textarea ref=${box} rows="3" value=${raw} onInput=${(e) => setRaw(e.target.value)} placeholder="贴实验结果：评测日志、终端输出、wandb 汇总，或者一句话“LIBERO 跑完了 92.3，比 baseline 高 4 个点”"></textarea>
       <div style="display:flex;gap:8px;align-items:center"><button class="btn primary sm">记下</button>
       <span class="hint">${agentOn.value ? 'agent 会整理成结构化记录，数字必须出自你贴的原文，并把结果填进实验设计的图表；结论和三要素冲突时会提交修改稿。' : '连接 agent 后会自动整理；现在可以先记下，再手动编辑。'}</span></div></form>
     <${Figures} x=${x} />

@@ -535,7 +535,7 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .ol-diff .hunk { color: var(--muted); }
 .research-split { display: grid; grid-template-columns: minmax(0, 1fr) var(--dock-w, clamp(320px, 38%, 480px)); height: 100%; }
 .research-split.off { grid-template-columns: minmax(0, 1fr); }
-.research-main { overflow-y: auto; min-height: 0; }
+.research-main { overflow-y: auto; min-height: 0; min-width: 0; }
 .research-main .detail { max-width: 1080px; }
 .research-dock { position: relative; min-height: 0; border-left: 1px solid var(--line); background: var(--panel); }
 .dock-grip { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 5; touch-action: none; }
@@ -552,8 +552,9 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .pr-row.off .pr-new { opacity: .45; }
 .pr-label input { margin: 0 2px 0 0; vertical-align: -2px; }
 .diff { white-space: pre-wrap; font-size: 13.5px; line-height: 1.7; }
-.diff ins { text-decoration: none; background: rgba(80, 170, 90, .28); border-radius: 3px; }
-.diff del { color: var(--red); background: var(--red-soft); border-radius: 3px; }
+.diff-skip { color: var(--faint); }
+:is(.diff, .cmp) ins { text-decoration: none; background: rgba(80, 170, 90, .28); border-radius: 3px; }
+:is(.diff, .cmp) del { color: var(--red); background: var(--red-soft); border-radius: 3px; }
 .role-select { flex: none; border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; font-size: 12px; background: var(--panel); color: var(--muted); }
 .find-why { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-top: 18px; padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; }
 .find-why .btn { margin-left: auto; }
@@ -621,8 +622,9 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .cmap th { text-align: left; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
 .cmap td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .cmap pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--bg); padding: 8px; border-radius: 6px; margin: 6px 0 0; }
-.exp-add { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.exp-add { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; max-width: 100%; }
 .exp-add textarea, .exp-form input, .exp-form textarea, .writing-form textarea { border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px 11px; background: var(--panel); outline: none; resize: vertical; font: inherit; line-height: 1.55; }
+.exp-add textarea { width: 100%; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .exp-add textarea:focus, .exp-form input:focus, .exp-form textarea:focus, .writing-form textarea:focus { border-color: var(--accent); }
 .writing-form textarea { width: 100%; font: 13.5px/1.6 var(--mono); }
 .exp-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; background: var(--panel); }
@@ -643,7 +645,7 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .fig-caption { font-size: 12.5px; line-height: 1.5; margin: 6px 0; }
 .design ol { margin: 0; padding-left: 18px; }
 .cmap.paper tr.ours td { background: var(--accent-soft); }
-.exp-card pre { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--bg); padding: 8px; border-radius: 6px; max-height: 220px; overflow: auto; }
+.exp-card pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 var(--mono); background: var(--bg); padding: 8px; border-radius: 6px; max-height: 220px; overflow: auto; }
 .exp-acts { display: flex; gap: 4px; margin-top: 6px; }
 
 /* ---------- start a research ---------- */
