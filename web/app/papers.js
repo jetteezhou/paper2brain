@@ -6,6 +6,7 @@ import {
 } from './lib.js';
 import {
   appState, agentOn, selected, useLive, refresh, toast, fail, restoreTrash, go, openReader, openThread, openPaper, openResearch, openCapture, openModal, closeModal, peekPaper,
+  openInSpace, takeSwitchIntent,
 } from './state.js';
 import { Chat, ThreadLines, scopeLabel } from './discuss.js';
 import { researchPicker, openComposer, ResearchChip, StageChip } from './research.js';
@@ -36,12 +37,14 @@ export function ListDetail({ list, detail, hasSel, single }) {
 }
 
 /** The selected item of this kind, auto-selecting the first one on wide screens when nothing is selected.
- * A selection missing from the list is kept: the list may not have refreshed yet (a paper just taken in from a citation). */
+ * A selection missing from the list is kept: the list may not have refreshed yet (a paper just taken in from a citation).
+ * Items with `space` are pointers into a shared space and never auto-selected: they open by switching libraries. */
 function useSel(kind, items) {
   const s = selected.value;
   const id = s?.kind === kind ? s.id : null;
   useEffect(() => {
-    if (items && items.length && !id && wide()) selected.value = { kind, id: items[0].id };
+    const first = (items || []).find((x) => !x.space);
+    if (items && items.length && !id && wide() && first) selected.value = { kind, id: first.id };
   }, [items, id]);
   return id;
 }
@@ -159,6 +162,11 @@ export function PaperCard({ paper: p, capture, inReader }) {
   const deepRun = p.runs?.find((r) => live(r.status));
   const capRun = capture?.runs.find((r) => live(r.status));
   const deep = p.captures?.some((c) => c.triage === 'deep');
+  const acc = appState.value?.account;
+  const inSpace = acc && acc.role !== 'viewer' && acc.library !== acc.libraries.find((l) => l.kind === 'personal')?.id;
+  const copyHome = async () => {
+    try { await post(`/api/papers/${enc(p.id)}/copy-home`); toast('已复制到你的个人库（两边之后各自更新）'); } catch (err) { fail(err); }
+  };
   let body;
   if (card) {
     const res = card.resources || {};
@@ -226,6 +234,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
     ${inReader ? null : html`<div class="paper-actions">
       <${DeepButton} p=${p} />
       <button class="btn" onClick=${() => openReader(p.id, { tab: 'chat' })}>讨论这篇</button>
+      ${inSpace ? html`<button class="btn" title="在你的个人库里也放一份（这边的还在）" onClick=${copyHome}>复制到个人库</button>` : null}
       <button class="btn" title=${deep ? '移回收件箱' : 'agent 会先把深读报告写好，你有空时直接看'} onClick=${toggleDeep}>${deep ? '✓ 已在稍后深读' : '稍后深读'}</button></div>`}
   </article>`;
 }
@@ -466,8 +475,8 @@ export function CapturesView({ view }) {
 
 export function PaperItem({ p, on, picked, onPick }) {
   return html`<div class=${`item ${on ? 'on' : ''}${picked ? ' picked' : ''}`} data-id=${p.id}
-      onClick=${() => (onPick ? onPick(p.id) : (selected.value = { kind: 'paper', id: p.id }))}>
-    <div class="item-meta"><span class="src">${idLabel(p.id)}</span>${p.published ? html`<span>· ${p.published.slice(0, 7)}</span>` : null}<time>${ago(p.last_captured)}</time></div>
+      onClick=${() => (p.space ? openInSpace(p.space, 'papers', p.id) : onPick ? onPick(p.id) : (selected.value = { kind: 'paper', id: p.id }))}>
+    <div class="item-meta"><span class="src">${idLabel(p.id)}</span>${p.space ? html`<span class="chip" title="在共享空间「${p.space.name}」里，点开进入那个空间">共享 · ${p.space.name}</span>` : null}${p.published ? html`<span>· ${p.published.slice(0, 7)}</span>` : null}<time>${ago(p.last_captured)}</time></div>
     <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${p.short_name ? html`<b class="short-name">${p.short_name}</b>` : null}${p.title}</div>
     <div class="item-meta" style="margin:3px 0 0">${authors(p.authors)}</div>
     ${p.tldr ? html`<div class="item-tldr">${p.tldr}</div>` : null}
@@ -484,11 +493,15 @@ export function TopicTabs({ topic, on, papers, research }) {
 }
 
 export function PapersView({ view, topic }) {
-  const q = view === 'topic' ? `?topic=${enc(topic)}` : view === 'unsorted' ? '?unsorted=1' : '';
+  const q = view === 'topic' ? `?topic=${enc(topic)}` : view === 'unsorted' ? '?unsorted=1' : '?shared=1';
   const [list] = useLive('/api/papers' + q);
   const [research] = useLive(topic ? `/api/research?topic=${enc(topic)}` : null);
   const [picking, setPicking] = useState(null);
   useEffect(() => setPicking(null), [view, topic]);
+  useEffect(() => {
+    const want = takeSwitchIntent('papers'); // back from a shared space, with a paper to open
+    if (want) selected.value = { kind: 'paper', id: want.id };
+  }, []);
   const sel = useSel('paper', list);
   const pick = (id) => { const s = new Set(picking); s.has(id) ? s.delete(id) : s.add(id); setPicking(s); };
   const chosen = () => list.filter((x) => picking.has(x.id));

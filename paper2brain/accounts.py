@@ -273,6 +273,13 @@ def _space(c, library):
         raise rules.Rejected("个人论文库不能加成员；先把研究共享到一个空间")
 
 
+def _carry_threads(space, user_library, user_id):
+    """A member's own discussions of a space are theirs to keep: when they leave or the space is archived, a copy
+    (with the papers they were about) waits in their personal library."""
+    with store.at_home(store.library_home(space)):
+        store.carry_threads_home(user_id, store.library_home(user_library))
+
+
 def set_role(library, user_id, new_role):
     """new_role None removes the member. A space always keeps an owner."""
     if new_role not in (None, *ROLES):
@@ -286,6 +293,9 @@ def set_role(library, user_id, new_role):
             c.execute("UPDATE members SET role=? WHERE library=? AND user_id=?", (new_role, library, user_id))
         else:
             c.execute("DELETE FROM members WHERE library=? AND user_id=?", (library, user_id))
+            home_lib = c.execute("SELECT library FROM users WHERE id=?", (user_id,)).fetchone()["library"]
+    if new_role is None:
+        _carry_threads(library, home_lib, user_id)
     if agent_member(library) == user_id and new_role not in ("editor", "owner"):
         set_agent(library, next(m["id"] for m in members(library) if m["role"] == "owner"))
 
@@ -347,7 +357,10 @@ def move_home(user, space, research_id):
     store.delete_research(research_id)
     if not store.list_research():
         with _db() as c:
+            rows = c.execute("SELECT m.user_id, u.library FROM members m JOIN users u ON u.id=m.user_id WHERE m.library=?", (space,)).fetchall()
             c.execute("DELETE FROM libraries WHERE id=?", (space,))
+        for uid, lib in rows:  # the space goes cold; nobody's own discussions go cold with it
+            _carry_threads(space, lib, uid)
         (root() / "archive").mkdir(exist_ok=True)
         shutil.move(str(store.library_home(space)), str(root() / "archive" / space))
     return user["library"]

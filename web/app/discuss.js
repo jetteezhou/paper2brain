@@ -7,6 +7,7 @@ import { signal } from '@preact/signals';
 import { html, get, post, del, ago, short, plain, threadName, live, Md, firstSentence, enc, fit, touch, Mark, readBase64 } from './lib.js';
 import {
   appState, agentOn, useLive, refresh, toast, fail, restoreTrash, openThread, openReader, openCapture, openResearch, highlight, go, quoting,
+  openInSpace, takeSwitchIntent,
 } from './state.js';
 import { researchPicker, openComposer, ResearchChip } from './research.js';
 import { PaperChip } from './papers.js';
@@ -442,9 +443,9 @@ function Row({ t, depth, sel, onSelect, tree, renaming, setRenaming, drag, setDr
   const k = kindOf(t.scope);
   const over = drag && drag.over === t.id;
   return html`<div class=${`ol-row ${sel ? 'on' : ''} ${over ? 'drop' : ''}`} style=${`padding-left:${10 + depth * 18}px`} data-id=${t.id}
-      draggable=${true} onDragStart=${(e) => { e.dataTransfer.setData('text/x-thread', t.id); e.dataTransfer.effectAllowed = 'move'; setDrag({ id: t.id }); }}
-      onDragOver=${(e) => { if (drag && drag.id !== t.id && !under(tree.byId, t.id, drag.id)) { e.preventDefault(); if (drag.over !== t.id) setDrag({ ...drag, over: t.id }); } }}
-      onDrop=${(e) => { e.preventDefault(); e.stopPropagation(); const id = drag?.id; setDrag(null); if (id && id !== t.id && tree.byId[id].parent_id !== t.id) move(id, t.id, threadName(t)); }}
+      draggable=${!t.space} onDragStart=${(e) => { if (t.space) return; e.dataTransfer.setData('text/x-thread', t.id); e.dataTransfer.effectAllowed = 'move'; setDrag({ id: t.id }); }}
+      onDragOver=${(e) => { if (!t.space && drag && drag.id !== t.id && !under(tree.byId, t.id, drag.id)) { e.preventDefault(); if (drag.over !== t.id) setDrag({ ...drag, over: t.id }); } }}
+      onDrop=${(e) => { e.preventDefault(); e.stopPropagation(); const id = drag?.id; setDrag(null); if (!t.space && id && id !== t.id && tree.byId[id].parent_id !== t.id) move(id, t.id, threadName(t)); }}
       onDragEnd=${() => setDrag(null)}
       onClick=${() => onSelect(t.id)}>
     <span class=${`ol-caret ${kids ? '' : 'leaf'} ${isFolded ? '' : 'open'}`} onClick=${(e) => { e.stopPropagation(); if (kids) setFold(t.id, !isFolded); }}>${kids ? '▸' : ''}</span>
@@ -453,8 +454,8 @@ function Row({ t, depth, sel, onSelect, tree, renaming, setRenaming, drag, setDr
       ${renaming === t.id
         ? html`<form onSubmit=${rename}><input class="ol-rename" value=${v} ref=${(el) => { if (el && !el.dataset.f) { el.dataset.f = 1; el.focus(); el.select(); } }}
             onInput=${(e) => setV(e.target.value)} onBlur=${rename} onKeyDown=${(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRenaming(null); } }} /></form>`
-        : html`<div class="ol-title" onDblClick=${(e) => { e.stopPropagation(); setV(threadName(t)); setRenaming(t.id); }}>${threadName(t)}</div>`}
-      <div class="ol-meta"><span class="chip">${SCOPE_KIND[k] || k}</span>${k !== 'library' && t.scope_title ? html`<span class="src">${short(plain(t.scope_title), 28)}</span>` : null}
+        : html`<div class="ol-title" onDblClick=${(e) => { e.stopPropagation(); if (t.space) return; setV(threadName(t)); setRenaming(t.id); }}>${threadName(t)}</div>`}
+      <div class="ol-meta"><span class="chip">${SCOPE_KIND[k] || k}</span>${t.space ? html`<span class="chip" title="在共享空间「${t.space.name}」里，点开进入那个空间">共享 · ${t.space.name}</span>` : null}${k !== 'library' && t.scope_title ? html`<span class="src">${short(plain(t.scope_title), 28)}</span>` : null}
         <span>${t.n} 条</span><time>${ago(t.last_at)}</time>${kids && isFolded ? html`<span>· ${kids} 个分支</span>` : null}
         ${t.parent_by === 'agent' ? html`<span class="chip violet" title="agent 觉得它接着上一段；点 × 放回顶层">agent 挂的<button class="x" onClick=${(e) => { e.stopPropagation(); move(t.id, null); }}>×</button></span>` : null}</div>
     </div></div>`;
@@ -586,8 +587,9 @@ function edgeEnds(pos, a, b) {
   return { d, x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
 }
 
-function MapCanvas({ onOpen }) {
+function MapCanvas({ onOpen, threads }) {
   const [map, , err] = useLive('/api/map');
+  const spaceThreads = (threads || []).filter((t) => t.space);
   const lay = useMemo(() => layoutMap(map || { groups: [], nodes: [] }), [map]);
   const shown = (map?.nodes || []).filter((n) => !n.hidden);
   const hidden = (map?.nodes || []).filter((n) => n.hidden);
@@ -675,6 +677,8 @@ function MapCanvas({ onOpen }) {
       <span class="srcs">${node.sources.map((s) => html`<button key=${s.id} class="btn sm" onClick=${() => onOpen(s.id)}>${short(s.title, 28)}</button>`)}</span>
     </div>` : null}
     <div class="delta-tools">
+      ${spaceThreads.length ? html`<details class="map-hidden"><summary>空间里你的讨论 ${spaceThreads.length}</summary>
+        ${spaceThreads.map((t) => html`<button key=${t.id} title=${`共享 · ${t.space.name}，点开进入那个空间`} onClick=${() => onOpen(t.id)}>${short(threadName(t), 22)}</button>`)}</details>` : null}
       ${hidden.length ? html`<details class="map-hidden"><summary>藏起 ${hidden.length}</summary>
         ${hidden.map((n) => html`<button key=${n.id} onClick=${() => restore(n.id)}>${short(n.text, 22)}</button>`)}</details>` : null}
       <button class="btn sm" onClick=${() => zoomBy(1.3, box.current.clientWidth / 2, box.current.clientHeight / 2)}>＋</button>
@@ -687,16 +691,25 @@ function MapCanvas({ onOpen }) {
 // ---------- the view ----------
 
 export function DiscussView({ threadId }) {
-  const [list] = useLive('/api/threads/recent');
+  const [list] = useLive('/api/threads/recent?shared=1');
   const sel = threadId || null;
-  const select = (id) => { pane.value = 'river'; go('discuss', id); };
-  useEffect(() => { if (!sel && list?.length && innerWidth > 900) go('discuss', buildTree(list).roots[0]?.id); }, [list?.length, sel]);
+  const select = (id) => {
+    const t = (list || []).find((x) => x.id === id);
+    if (t?.space) return openInSpace(t.space, 'discuss', id); // a pointer: open it where it lives
+    pane.value = 'river'; go('discuss', id);
+  };
+  useEffect(() => {
+    const want = takeSwitchIntent('discuss');
+    if (want) { go('discuss', want.id); return; }
+    const first = list && buildTree(list).roots.find((t) => !t.space);
+    if (!sel && first && innerWidth > 900) go('discuss', first.id);
+  }, [list?.length, sel]);
   const back = () => { pane.value = 'river'; go('discuss'); };
   return html`<div id="body" class=${sel || pane.value === 'map' ? 'show-detail' : ''}>
     <section id="list">${list ? html`<${Outline} list=${list} selId=${sel} onSelect=${select} />` : html`<div class="empty"><span class="spin"></span></div>`}</section>
     <section id="detail">
       ${innerWidth <= 900 && (sel || pane.value === 'map') ? html`<button class="btn sm ghost" onClick=${back}>← 返回列表</button>` : null}
-      ${pane.value === 'map' ? html`<${MapCanvas} onOpen=${select} />`
+      ${pane.value === 'map' ? html`<${MapCanvas} onOpen=${select} threads=${list} />`
         : sel ? html`<div class="detail thread"><div class="chatbox"><${RiverLoader} key=${sel} id=${sel} /></div></div>`
           : html`<div class="empty" style="padding-top:120px">选择左侧一段讨论</div>`}
     </section></div>`;

@@ -273,6 +273,56 @@ class Multi(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertIn("组会", got["error"])
 
+    def test_space_papers_and_discussions_point_home_and_come_back(self):
+        self.url = self.serve()
+        a, ta = self.user("甲")
+        b, tb = self.user("乙")
+        rid, _, _ = self.research_with_material(a["library"])
+        with store.at_home(store.library_home(a["library"])):
+            space = accounts.create_space(a, "组会", rid)
+        accounts.redeem(accounts.invite("join", space, "editor"), user=b)
+        with store.at_home(store.library_home(space)), store.viewing(b):  # 乙在空间里收下一篇论文并讨论它
+            store.upsert_paper("arxiv:2501.00001", "乙发现的")
+            cap, _ = store.add_capture("cap-b", "https://arxiv.org/abs/2501.00001", "web")
+            store.link(cap["id"], "arxiv:2501.00001", "user")
+            btid = store.new_thread("paper:arxiv:2501.00001", text="这篇对路吗")
+            child = store.new_thread("paper:arxiv:2501.00001", parent_id=btid, text="接着说")
+        home_b = f"p2b_session={tb}"
+        got = self.call("/api/papers?shared=1", cookie=home_b)[1]  # 个人库里看到空间论文的指针
+        self.assertEqual([p["space"]["name"] for p in got if p["id"] == "arxiv:2501.00001"], ["组会"])
+        self.assertFalse([p for p in self.call("/api/papers", cookie=home_b)[1] if p["id"] == "arxiv:2501.00001"])  # 不带 shared 没有
+        self.assertFalse([p for p in self.call("/api/papers?shared=1", cookie=f"p2b_session={ta}")[1] if p["id"] == "arxiv:2501.00001"])  # 甲看不到乙的
+        got = self.call("/api/threads/recent?shared=1", cookie=home_b)[1]
+        self.assertEqual([t["space"]["name"] for t in got if t["id"] == btid], ["组会"])
+        self.assertFalse([t for t in self.call("/api/threads/recent?shared=1", cookie=f"p2b_session={ta}")[1] if t["id"] == btid])
+        self.assertEqual(self.call("/api/papers/arxiv:2501.00001/copy-home", {}, cookie=home_b)[0], 400)  # 已在个人库
+        self.assertEqual(self.call("/api/papers/arxiv:2501.00001/copy-home", {}, cookie=f"{home_b}; p2b_lib={space}")[0], 200)
+        with store.at_home(store.library_home(b["library"])):
+            self.assertTrue(store.get_paper("arxiv:2501.00001")["listed"])
+        code, _, _ = self.call(f"/api/research/{rid}/move-home", {}, cookie=f"p2b_session={ta}; p2b_lib={space}")
+        self.assertEqual(code, 200)  # 空间随之归档：乙的讨论（连同论文）复制回乙的个人库，树形还在
+        self.assertNotIn(space, accounts.all_libraries())
+        with store.at_home(store.library_home(b["library"])), store.tx() as c:
+            self.assertEqual(c.execute("SELECT parent_id FROM threads WHERE id=?", (child,)).fetchone()[0], btid)
+        with store.at_home(store.library_home(b["library"])):
+            self.assertEqual(store.thread_for(thread_id=btid)["messages"][0]["text"], "这篇对路吗")
+            self.assertTrue(store.get_paper("arxiv:2501.00001"))
+
+    def test_leaving_a_space_carries_your_discussions_home(self):
+        a, ta = self.user("甲")
+        b, tb = self.user("乙")
+        rid, _, _ = self.research_with_material(a["library"])
+        with store.at_home(store.library_home(a["library"])):
+            space = accounts.create_space(a, "组会", rid)
+        accounts.redeem(accounts.invite("join", space, "editor"), user=b)
+        with store.at_home(store.library_home(space)), store.viewing(b):
+            btid = store.new_thread("library", text="乙在空间里的想法")
+        accounts.set_role(space, b["id"], None)
+        with store.at_home(store.library_home(b["library"])):
+            self.assertEqual(store.thread_for(thread_id=btid)["messages"][0]["text"], "乙在空间里的想法")
+        with store.at_home(store.library_home(space)), store.viewing(b):
+            self.assertEqual(store.thread_for(thread_id=btid)["messages"][0]["text"], "乙在空间里的想法")  # 原件也还在
+
     def test_http_sign_in_isolation_and_roles(self):
         self.url = self.serve()
         a, ta = self.user("甲")

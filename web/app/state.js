@@ -138,6 +138,24 @@ export async function openPaper(pid) {
 export const openResearch = (id) => openItem('research', id, 'research');
 export const openCapture = (id) => openItem('capture', id, 'inbox');
 
+/** Open something that lives in a shared space: switch libraries, reload, then open it there. */
+export async function openInSpace(space, view, id) {
+  try { await post('/api/libraries/switch', { library: space.id }); } catch (e) { return fail(e); }
+  sessionStorage.setItem('p2b.openAfterSwitch', JSON.stringify({ view, id }));
+  location.hash = `#/${view}`;
+  location.reload();
+}
+/** The { view, id } openInSpace left across the reload, consumed once — and only by the view it is for. */
+export function takeSwitchIntent(view) {
+  const raw = sessionStorage.getItem('p2b.openAfterSwitch');
+  try {
+    const intent = raw ? JSON.parse(raw) : null;
+    if (!intent || intent.view !== view) return null;
+    sessionStorage.removeItem('p2b.openAfterSwitch');
+    return intent;
+  } catch { return null; }
+}
+
 // on a research page a citation is checked in place: the peek window, which can still open the reader
 registerAction('open-paper', (el) => (route.value.view === 'research' ? peekPaper(el.dataset.pid) : openPaper(el.dataset.pid)));
 registerAction('cite', (el) => openReader(el.dataset.pid, { page: +el.dataset.page, q: el.getAttribute('title') }));

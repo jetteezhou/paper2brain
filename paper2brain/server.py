@@ -489,6 +489,23 @@ def paper_add(q, body, pid):
     return {**store.get_paper(p["id"], with_anchors=False), "added": True}
 
 
+@route("POST", "/api/papers/([^/]+)/copy-home")
+def paper_copy_home(q, body, pid):
+    """From a space: a copy of this paper in the member's own library (a capture keeps it listed there); what that
+    library already has stays as it is, and the two copies drift apart from here."""
+    me = _me()
+    if me["library"] == me["user"]["library"]:
+        raise rules.Rejected("这篇已经在你的个人库里了")
+    p, dst = _paper(pid), store.library_home(me["user"]["library"])
+    store.copy_paper(p["id"], dst)
+    with store.at_home(dst):
+        if not store.get_paper(p["id"])["listed"]:
+            cap, _ = store.add_capture(str(uuid.uuid4()), rules.id_label(p["id"]), "web")
+            store.link(cap["id"], p["id"], "user", evidence="从共享空间带回")
+            store.update_capture(cap["id"], status="mapped")
+    return {"ok": True}
+
+
 @route("POST", "/api/papers/([^/]+)/name")
 def paper_name(q, body, pid):
     store.set_short_name(pid, body.get("name"), "user")
