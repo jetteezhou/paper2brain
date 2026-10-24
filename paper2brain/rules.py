@@ -402,15 +402,16 @@ FIGURE_SECTIONS = ("main", "ablation", "analysis", "appendix")
 
 def _named(items, what, errors, extra=(), most=8, least=1):
     """[{name, ...}] with unique non-empty names; extra: the other keys kept (stripped strings). A note is a line in
-    the paper's setup, not an essay."""
+    the paper's setup, not an essay. most None: no upper bound."""
     out = []
     for it in items if isinstance(items, list) else []:
         name = str((it or {}).get("name") or "").strip()[:60] if isinstance(it, dict) else ""
         if name:
             out.append({"name": name, **{k: str(it.get(k) or "").strip() or None for k in extra}})
     names = [x["name"] for x in out]
-    if not least <= len(out) <= most or len(set(names)) < len(names):
-        errors.append(f"setup.{what} 要有 {least}-{most} 项，name 不能重复")
+    if len(out) < least or (most is not None and len(out) > most) or len(set(names)) < len(names):
+        errors.append(f"setup.{what} 至少 {least} 项，name 不能重复" if most is None
+                      else f"setup.{what} 要有 {least}-{most} 项，name 不能重复")
     long = [x["name"] for x in out if len(x.get("note") or "") > 150]
     if long:
         errors.append(f"setup.{what} 的 note 每条不超过 150 字（论文里的一句话），过长：{long}")
@@ -437,7 +438,7 @@ def validate_setup(setup, known_papers=(), paper_words=None):
     if not method:
         errors.append("setup.method 写我们的方法在表里的名字")
     out = {"questions": questions, "method": method, "benchmarks": _named(s.get("benchmarks"), "benchmarks", errors, ("note",), 6),
-           "baselines": _named(s.get("baselines"), "baselines", errors, ("paper", "note"), 12, 2),
+           "baselines": _named(s.get("baselines"), "baselines", errors, ("paper", "note"), None, 2),
            "controls": _named(s.get("controls"), "controls", errors, ("note",), 6, 0),
            "metrics": _named(s.get("metrics"), "metrics", errors, ("unit", "better"), 6),
            "implementation": str(s.get("implementation") or "").strip() or None}
@@ -521,8 +522,8 @@ def validate_figures(figures, context="", setup=None):
         if not str(f.get("caption") or "").strip():
             errors.append(f"「{title}」缺少 caption（论文里的图注 / 表注）")
         rows, series = ([str(v).strip()[:60] for v in f.get(k) or []] if isinstance(f.get(k), list) else [] for k in ("rows", "series"))
-        if not 1 <= len(rows) <= 40 or not all(rows) or len(set(rows)) < len(rows):
-            errors.append(f"「{title}」rows 要有 1-40 个不重复的非空名字")
+        if not 1 <= len(rows) <= 50 or not all(rows) or len(set(rows)) < len(rows):
+            errors.append(f"「{title}」rows 要有 1-50 个不重复的非空名字")
         if not 1 <= len(series) <= 12 or not all(series) or len(set(series)) < len(series):
             errors.append(f"「{title}」series 要有 1-12 个不重复的非空名字")
         metric = f.get("metric") or None

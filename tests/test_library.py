@@ -3,6 +3,7 @@ import base64
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ["P2B_HOME"] = tempfile.mkdtemp(prefix="p2b-test-")
@@ -445,7 +446,7 @@ class Store(unittest.TestCase):
                  "controls": [{"name": "fixed-rate"}], "metrics": [{"name": "SR", "better": "higher"}]}
         for bad, msg in (({"method": ""}, "setup.method"), ({"controls": [{"name": "ours"}]}, "不能重复"),
                          ({"baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "periodic"}]}, "已发表的方法"),
-                         ({"baselines": setup["baselines"][:1]}, "2-12"), ({"benchmarks": [{"name": "S", "note": "长" * 151}]}, "150 字"),
+                         ({"baselines": setup["baselines"][:1]}, "至少 2"), ({"benchmarks": [{"name": "S", "note": "长" * 151}]}, "150 字"),
                          ({"metrics": [{"name": "SR", "better": "up"}]}, "higher / lower"), ({"questions": []}, "questions")):
             with self.assertRaisesRegex(rules.Rejected, msg):
                 rules.validate_setup({**setup, **bad}, known)
@@ -498,6 +499,22 @@ class Store(unittest.TestCase):
         self.assertEqual((fg["design"]["questions"][1], fg["figures"][0]["question"], [c["row"] for c in fg["cells"]]), ("Q two", 2, ["Object"]))
         with self.assertRaisesRegex(rules.Rejected, "rows"):
             server.figures_update({}, {"figures": [{**f0, "rows": []}], "base_rev": 3}, rid)
+        store.set_cell_value(rid, fid, "Object", "pi0", "0.71")
+        store.set_cell_value(rid, fid, "Object", "CheckVLA", "0.50")
+        hand = next(e for e in store.get_research(rid)["experiments"] if e["title"] == "Object")
+        self.assertEqual(sorted((r["name"], r["value"]) for r in hand["results"]), [("CheckVLA", "0.50"), ("pi0", "0.71")])
+        store.fill_cells(rid, [{"figure": fid, "row": "Object", "series": "pi0", "experiment": eid, "result": "Spatial 成功率"}])
+        self.assertEqual(next(c["experiment"] for c in store.get_figures(rid)["cells"] if c["series"] == "pi0"), hand["id"])
+        store.set_cell_value(rid, fid, "Object", "ours", "0.99")
+        self.assertEqual(store.get_experiment(eid)["results"][0]["value"], "0.99")
+        store.fill_cells(rid, [{"figure": fid, "row": "Object", "series": "ours", "experiment": hand["id"], "result": "pi0"}])
+        self.assertEqual(next(c["experiment"] for c in store.get_figures(rid)["cells"] if c["series"] == "ours"), eid)
+        store.set_cell_value(rid, fid, "Object", "pi0", "")
+        store.set_cell_value(rid, fid, "Object", "CheckVLA", "")
+        self.assertIsNone(store.get_experiment(hand["id"]))
+        self.assertFalse(any(c["series"] == "pi0" for c in store.get_figures(rid)["cells"]))
+        with self.assertRaisesRegex(rules.Rejected, "没有这个格子"):
+            store.set_cell_value(rid, fid, "Spatial", "pi0", "1")
 
     def test_saving_a_chart_with_an_unknown_method_asks_the_agent_to_find_it(self):
         from unittest import mock
@@ -1068,6 +1085,14 @@ class Store(unittest.TestCase):
             chore = store.new_thread("library", text="再找一遍代码")
             store.set_thread_title(a, "PatchWAM 相对 FastWAM 大涨的原因", "agent")
             store.set_thread_title(b, "C2C 与 C2R 不是同一个原因", "agent")
+            self.assertEqual(store.pending_map(), [])
+            old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat(timespec="seconds")
+            with store.tx() as c:
+                c.execute("UPDATE messages SET created_at=?", (old,))
+            self.assertEqual({t["id"] for t in store.pending_map()}, {a, b})
+            store.add_run("live", "", "chat", a, "", "RUNNING")
+            self.assertEqual([t["id"] for t in store.pending_map()], [b])
+            store.update_run("live", status="FINISHED")
             self.assertEqual({t["id"] for t in store.pending_map()}, {a, b})
             why = {"id": "why", "group": "pw", "kind": "question", "text": "PatchWAM 相对 FastWAM 大涨的原因是什么？", "sources": [a]}
             split = {"id": "split", "group": "pw", "kind": "conclusion", "text": "C2C 和 C2R 的涨幅不是同一个原因", "parent": "why", "rel": "回答", "partial": True, "sources": [b]}
@@ -1100,6 +1125,9 @@ class Store(unittest.TestCase):
             with self.assertRaisesRegex(rules.Rejected, "不在地图上"):
                 store.put_map({"drop_edges": [{"src": "split", "dst": "third", "rel": "对照"}]})
             store.add_message(a, "user", "再问一句")
+            self.assertEqual(store.pending_map(), [])
+            with store.tx() as c:
+                c.execute("UPDATE messages SET created_at=? WHERE thread_id=?", (old, a))
             self.assertEqual([t["id"] for t in store.pending_map()], [a])
             kept = "PatchWAM 大涨究竟是什么原因？"
             with self.assertRaisesRegex(rules.Rejected, "环"):
