@@ -95,6 +95,9 @@
 .map-card .t { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .map-card .n, .map-card .mine { position: absolute; right: 8px; bottom: 4px; font-size: 10px; color: var(--faint); }
 .map-card .mine { left: 8px; right: auto; }
+.map-card .more { color: var(--accent); }
+.map-card.root { border-width: 2px; }
+.map-card.root .t { font-weight: 600; }
 .map-card.on { border-color: var(--accent); }
 .map-card.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .map-bar { position: absolute; left: 12px; right: 12px; bottom: 36px; z-index: 2; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;

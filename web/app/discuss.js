@@ -600,10 +600,19 @@ function edgeEnds(pos, a, b) {
 
 function MapCanvas({ onOpen, threads }) {
   const [map, , err] = useLive('/api/map');
+  const [open, setOpen] = useState(() => new Set());
   const spaceThreads = (threads || []).filter((t) => t.space);
-  const lay = useMemo(() => layoutMap(map || { groups: [], nodes: [] }), [map]);
-  const shown = (map?.nodes || []).filter((n) => !n.hidden);
+  const kept = (map?.nodes || []).filter((n) => !n.hidden);
+  const all = Object.fromEntries(kept.map((n) => [n.id, n]));
+  const kidsOf = {};
+  for (const n of kept) if (all[n.parent]) (kidsOf[n.parent] = kidsOf[n.parent] || []).push(n);
+  // the trunk shows: each root and what hangs right under it; deeper levels wait until their parent is opened
+  const isRoot = (n) => !all[n.parent];
+  const visible = (n) => isRoot(n) || (visible(all[n.parent]) && (isRoot(all[n.parent]) || open.has(n.parent)));
+  const shown = kept.filter(visible);
+  const lay = useMemo(() => layoutMap({ ...(map || { groups: [] }), nodes: shown }), [map, open]);
   const hidden = (map?.nodes || []).filter((n) => n.hidden);
+  const toggle = (id) => setOpen((s) => { const t = new Set(s); t.has(id) ? t.delete(id) : t.add(id); return t; });
   const byId = Object.fromEntries(shown.map((n) => [n.id, n]));
   const box = useRef();
   const [view, setView] = useState({ x: 24, y: 24, k: 1 });
@@ -671,13 +680,17 @@ function MapCanvas({ onOpen, threads }) {
           <text class="map-tag" x=${c.x} y=${c.y + 4} text-anchor="middle">${c.label}</text></g>`)}
       </g></svg>
     <div class="map-layer" style=${`transform:translate(${view.x}px,${view.y}px) scale(${view.k})`}>
-      ${shown.map((n) => html`<button key=${n.id} class=${`map-card ${n.kind}${n.id === sel ? ' sel' : ''}${onPath.has(n.id) ? ' on' : ''}`}
-          style=${`left:${lay.pos[n.id].x}px;top:${lay.pos[n.id].y}px`} onClick=${(e) => { e.stopPropagation(); pick(n.id); }}>
+      ${shown.map((n) => {
+        const deeper = !isRoot(n) && kidsOf[n.id]?.length;
+        return html`<button key=${n.id} class=${`map-card ${n.kind}${isRoot(n) ? ' root' : ''}${n.id === sel ? ' sel' : ''}${onPath.has(n.id) ? ' on' : ''}`}
+          style=${`left:${lay.pos[n.id].x}px;top:${lay.pos[n.id].y}px`} onClick=${(e) => { e.stopPropagation(); pick(n.id); if (deeper) toggle(n.id); }}>
         <span class="k">${n.kind === 'question' ? '问' : '结'}</span>
         <span class="t">${n.text}</span>
-        ${n.sources.length > 1 ? html`<span class="n">${n.sources.length} 段</span>` : null}
+        ${deeper ? html`<span class="n more">${open.has(n.id) ? '收起' : `展开 ${kidsOf[n.id].length}`}</span>`
+          : n.sources.length > 1 ? html`<span class="n">${n.sources.length} 段</span>` : null}
         ${n.text_by === 'user' ? html`<span class="mine" title="你改过，agent 不再改这句">改</span>` : null}
-      </button>`)}
+      </button>`;
+      })}
     </div>
     ${!shown.length ? html`<div class="empty"><b>${hidden.length ? '节点都藏起来了' : '地图还空着'}</b><p class="hint">${hidden.length ? '右上角可以恢复。' : '能收成问题或结论的讨论，agent 会整理到这里。找论文、改分类这种不会出现。'}</p></div>` : null}
     ${node ? html`<div class="map-bar">

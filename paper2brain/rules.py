@@ -684,6 +684,7 @@ _MAP_SPINE = {"拆开": ("question", "question"), "收窄": ("question", "questi
               "回答": ("question", "conclusion"), "前提": ("conclusion", "conclusion")}
 _MAP_CROSS = {"对照": ("conclusion", "conclusion"), "支撑": ("conclusion", "conclusion"), "待证": ("question", "conclusion")}
 _MAP_KIND = {"question": "问题", "conclusion": "结论"}
+MAP_GROUP_MAX = 8  # a region stays readable at a glance; past this the agent has to merge
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 

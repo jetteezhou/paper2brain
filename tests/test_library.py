@@ -1173,15 +1173,20 @@ class Store(unittest.TestCase):
                 store.put_map({"drop": ["why"]})
             with self.assertRaisesRegex(rules.Rejected, "同一分组"):
                 store.put_map({"groups": [{"id": "other", "name": "别处"}], "nodes": [{**split, "group": "other"}]})
-            store.put_map({"nodes": [{"id": "other", "group": "pw", "kind": "conclusion", "text": "涨幅来自动作写成 patch", "sources": [b]}],
+            other = {"id": "other", "group": "pw", "kind": "conclusion", "text": "涨幅来自动作写成 patch", "sources": [b]}
+            with self.assertRaisesRegex(rules.Rejected, "要挂在"):
+                store.put_map({"nodes": [other]})
+            store.put_map({"nodes": [{**other, "parent": "why", "rel": "回答"}],
                            "edges": [{"src": "split", "dst": "other", "rel": "对照"}]})
             store.put_map({"seen": [a]})
             store.put_map({"edges": []})
             self.assertEqual(store.get_map()["edges"], [{"src": "other", "dst": "split", "rel": "对照"}])
-            third = {"id": "third", "group": "pw", "kind": "conclusion", "text": "涨幅来自视频没去噪完", "sources": [b]}
+            third = {"id": "third", "group": "pw", "kind": "conclusion", "text": "涨幅来自视频没去噪完", "parent": "why", "rel": "回答", "sources": [b]}
             store.put_map({"nodes": [third], "edges": [{"src": "third", "dst": "split", "rel": "支撑"}]})
             self.assertEqual({(e["src"], e["dst"], e["rel"]) for e in store.get_map()["edges"]},
                              {("other", "split", "对照"), ("third", "split", "支撑")})
+            with self.assertRaisesRegex(rules.Rejected, "最多 8 个"):
+                store.put_map({"nodes": [{**third, "id": f"more-{i}", "text": f"涨幅的第 {i} 个细节"} for i in range(5)]})
             store.put_map({"edges": [{"src": "third", "dst": "split", "rel": "对照"}]})
             self.assertEqual({(e["src"], e["dst"], e["rel"]) for e in store.get_map()["edges"]},
                              {("other", "split", "对照"), ("split", "third", "对照")})
@@ -1209,7 +1214,7 @@ class Store(unittest.TestCase):
             with self.assertRaisesRegex(rules.Rejected, "藏起"):
                 store.put_map({"nodes": [{**split, "text": "另一句已经定下的结论"}]})
             with self.assertRaisesRegex(rules.Rejected, "不存在"):
-                store.put_map({"nodes": [{"id": "x", "group": "pw", "kind": "conclusion", "text": "库里没有这段讨论", "sources": ["missing-thread"]}]})
+                store.put_map({"nodes": [{"id": "x", "group": "pw", "kind": "conclusion", "text": "库里没有这段讨论", "parent": "why", "rel": "回答", "sources": ["missing-thread"]}]})
 
 
 class Server(unittest.TestCase):

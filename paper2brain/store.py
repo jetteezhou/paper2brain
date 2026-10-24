@@ -2124,6 +2124,17 @@ def put_map(doc):
                     raise rules.Rejected("节点互相指成了环")
                 seen.add(nid)
                 nid = final[nid]["parent_id"]
+        # only what this update touches: older flat nodes and groups do not block it
+        for n in doc["nodes"]:
+            row = final[n["id"]]
+            if row["kind"] == "conclusion" and not row["parent_id"] and not row["hidden"]:
+                raise rules.Rejected(f"结论「{row['text']}」要挂在它回答的问题下面（回答），或作另一条结论的前提；"
+                                     "这组还没有主问题就先补一个")
+        for gid in {final[n["id"]]["group_id"] for n in doc["nodes"]}:
+            k = sum(1 for x in final.values() if x["group_id"] == gid and not x["hidden"])
+            if k > rules.MAP_GROUP_MAX:
+                raise rules.Rejected(f"分组「{groups[gid]}」有 {k} 个节点，最多 {rules.MAP_GROUP_MAX} 个："
+                                     "把说同一件事的合成一句，次要的细节放进 drop，留在讨论里")
         pairs = set()
         for n in final.values():
             if n["parent_id"]:
