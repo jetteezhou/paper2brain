@@ -224,12 +224,14 @@ export function Composer({ t, reload, draft, setDraft, input }) {
     <textarea rows="1" ref=${input} value=${draft} onInput=${(e) => setDraft(e.target.value)}
       onPaste=${(e) => { const fs = [...(e.clipboardData?.files || [])]; if (on && fs.length) { e.preventDefault(); e.stopPropagation(); addImgs(fs); } }}
       onKeyDown=${(e) => { if (e.key === 'Enter' && !e.isComposing && (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch))) { e.preventDefault(); send(on); } }}
-      placeholder=${touch ? (on ? '问点什么…' : 'Agent 未连接：先记下，连上后再接着聊') : on ? '问点什么… 回车发送，Shift+回车换行' : 'Agent 未连接：回车只记下，连上后再接着聊'}></textarea>
+      placeholder=${on ? '问点什么…' : 'Agent 未连接，先记下来'}
+      title=${on ? (touch ? '点发送' : '回车发送，Shift+回车换行') : 'Agent 未连接：先记下，连上后再接着聊'}></textarea>
     ${on && models ? html`<select class="chat-model" value=${chosen || key(t.model) || ''} onChange=${(e) => setChosen(e.target.value)}
         title=${switchTo ? '下一句会换到这个模型：新开一个 agent，带上前面说过的' : '这段讨论用的模型'}>
       ${t.model ? null : html`<option value="">默认模型</option>`}
       ${t.model && !models.models.some((m) => key(m) === key(t.model)) ? html`<option value=${key(t.model)}>${t.model.id}</option>` : null}
       ${models.models.map((m) => html`<option value=${key(m)}>${m.displayName || m.id}</option>`)}</select>` : null}
+    <span class="grow"></span>
     ${canRedo ? html`<button type="button" class="btn ghost" onClick=${redo}
       title=${switchTo ? `用 ${switchTo.displayName || switchTo.id} 重新回答上一个问题，替换掉现在的回答` : '重新回答上一个问题，替换掉现在的回答（可以先在左边换个模型）'}>重新生成</button>` : null}    <button class="btn primary">${on ? '发送' : '记下'}</button></form>`;
 }

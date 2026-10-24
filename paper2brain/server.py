@@ -46,7 +46,7 @@ class Reply:
 def state(q, body):
     agent = {**cursor_api.status(), "home": str(store.home()), "repo_dir": str(WEB.parent), "repo": cursor_api.config()["repo"]}
     return {"counts": store.counts(), "topics": store.topic_tree(), "topic_proposals": store.topic_proposals(), "agent": agent,
-            "activity": store.activity(), "working": store.working(), "recent": store.recent_work(),
+            "activity": _activity(), "working": store.working(), "recent": store.recent_work(),
             "account": _account() if store.multi() else None}
 
 
@@ -306,9 +306,48 @@ def topic_decide(q, body):
     return {"ok": True}
 
 
+def _own_spaces():
+    """(user id, spaces) when this request is that user's personal library. None in a space or off the shared server."""
+    if not store.multi():
+        return None
+    me = _me()
+    user = me.get("user") or {}
+    if not user or me.get("library") != user.get("library"):
+        return None
+    spaces = [lib for lib in accounts.libraries(user["id"]) if lib["kind"] == "space"]
+    return (user["id"], spaces) if spaces else None
+
+
+def _activity():
+    """The personal heatmap also counts what this user did in shared spaces. A discussion copied in when a research
+    was shared is already in the personal library, so those messages are not counted again."""
+    found = _own_spaces()
+    if not found:
+        return store.activity()
+    uid, spaces = found
+    seen = store.user_message_ids()
+    days = dict(store.activity()["days"])
+    for lib in spaces:
+        with store.at_home(store.library_home(lib["id"])):
+            for k, n in store.activity(uid=uid, skip_messages=seen)["days"].items():
+                days[k] = days.get(k, 0) + n
+    return store.activity_summary(days)
+
+
 @route("GET", r"/api/activity/(\d{4}-\d{2}-\d{2})")
 def activity_day(q, body, day):
-    return store.activity_day(day)
+    rows = store.activity_day(day)
+    found = _own_spaces()
+    if not found:
+        return rows
+    uid, spaces = found
+    seen = store.user_message_ids()
+    for lib in spaces:
+        with store.at_home(store.library_home(lib["id"])):
+            for r in store.activity_day(day, uid, seen):
+                rows.append({**r, "space_id": lib["id"], "space_name": lib["name"]})
+    rows.sort(key=lambda r: r["at"])
+    return rows
 
 
 @route("GET", "/api/search")

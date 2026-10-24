@@ -5,7 +5,7 @@ import { signal } from '@preact/signals';
 import { html, get, post, del, enc, short, ago, readBase64, idLabel, threadName, Icon, fit, Mark, workHot, openWork } from './lib.js';
 import {
   route, baseRoute, go, appState, loadState, refresh, toast, toastSig, fail, restoreTrash, modalSig, openModal, closeModal,
-  selected, openThread, openCapture, openReader, openPaper, openResearch, useLive, peekPaper,
+  selected, openThread, openCapture, openReader, openPaper, openResearch, openInSpace, useLive, peekPaper,
 } from './state.js';
 import { CapturesView, PapersView, SearchView, ListDetail, openWebFind, addAndOpen } from './papers.js';
 import { ResearchView, openComposer, researchPicker, showResearch } from './research.js';
@@ -106,16 +106,37 @@ const TRIAGE_LABEL = { deep: '稍后深读', archived: '存档', ignored: '忽�
 /** One action of the day: what it was, and where clicking takes you. */
 function activityRow(x) {
   const jump = (fn) => () => { closeModal(); fn(); };
+  const space = x.space_id ? { id: x.space_id, name: x.space_name } : null;
+  const there = (view, id) => jump(() => openInSpace(space, view, id));
+  const research = (id) => (space ? jump(async () => {
+    try { await post('/api/libraries/switch', { library: space.id }); } catch (e) { return fail(e); }
+    sessionStorage.setItem('p2b.openResearch', id);
+    location.hash = '#/research';
+    location.reload();
+  }) : jump(() => openResearch(id)));
+  const paper = (id) => (space ? there('papers', id) : jump(() => openPaper(id)));
+  const said = (verb, title) => (title ? `${verb}《${title}》` : verb);
   const row = {
-    capture: ['收下', x.text, jump(() => openCapture(x.ref))],
-    message: ['讨论', x.text, jump(() => openThread(x.extra, x.ref))],
-    anchor: ['划词', `“${x.text}”${x.extra ? ` · ${x.extra}` : ''}`, jump(() => openReader(x.ref, { tab: 'anchors' }))],
-    note: ['笔记', x.text, x.ref ? jump(() => openPaper(x.ref)) : null],
-    triage: [TRIAGE_LABEL[x.text] || '分拣', x.extra, jump(() => openCapture(x.ref))],
-    read: ['阅读', x.extra || x.ref, jump(() => openReader(x.ref))],
+    capture: ['收下', x.text, space ? there('inbox', x.ref) : jump(() => openCapture(x.ref))],
+    message: ['讨论', x.text, space ? there('discuss', x.ref) : jump(() => openThread(x.extra, x.ref))],
+    anchor: ['划词', `“${x.text}”${x.extra ? ` · ${x.extra}` : ''}`, space ? there('papers', x.ref) : jump(() => openReader(x.ref, { tab: 'anchors' }))],
+    note: ['笔记', x.text, x.ref ? paper(x.ref) : null],
+    triage: [TRIAGE_LABEL[x.text] || '分拣', x.extra, space ? there('inbox', x.ref) : jump(() => openCapture(x.ref))],
+    read: ['阅读', x.extra || x.ref, space ? there('papers', x.ref) : jump(() => openReader(x.ref))],
+    research: ['研究', said(x.text, x.extra), research(x.ref)],
+    experiment: ['实验', said(x.text, x.extra), x.ref ? research(x.ref) : null],
+    topics: ['归类', x.extra || x.ref, paper(x.ref)],
+    link: ['关联', x.extra || x.text, space ? there('inbox', x.ref) : jump(() => openCapture(x.ref))],
+    topic: ['主题', x.extra || x.text, space ? null : jump(() => go('topic', x.ref))],
+    move: ['整理', x.extra || '一段讨论', space ? there('discuss', x.ref) : jump(() => openThread(null, x.ref))],
+    figures: ['图表', x.extra, research(x.ref)],
+    material: ['素材', x.extra ? `${x.text || '素材'} · 《${x.extra}》` : x.text, research(x.ref)],
+    writing: ['写作', said(x.text, x.extra), research(x.ref)],
+    plan: ['计划', x.extra ? `采纳《${x.extra}》` : '采纳计划', research(x.ref)],
   }[x.kind];
+  if (!row) return null;
   return html`<div class=${`act-row ${row[2] ? '' : 'static'}`} role=${row[2] ? 'link' : null} tabIndex=${row[2] ? 0 : null} onClick=${row[2]}><time>${new Date(x.at).toTimeString().slice(0, 5)}</time>
-    <span class="chip">${row[0]}</span><span class="act-text">${short(row[1] || '', 90)}</span></div>`;
+    <span class="chip">${row[0]}</span>${space ? html`<span class="chip" title="在共享空间里做的">${space.name}</span>` : null}<span class="act-text">${short(row[1] || '', 90)}</span></div>`;
 }
 
 function Activity({ day: first }) {

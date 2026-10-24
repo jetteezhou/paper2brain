@@ -370,13 +370,20 @@ def _v23_capture_owner(c):
     c.execute("ALTER TABLE captures ADD COLUMN user_id TEXT")
 
 
+def _v24_who(c):
+    """Who wrote a note, a highlight or a logged action (NULL: a personal library, or from before this), so one
+    member's heatmap can count what they did in a shared space without taking anyone else's."""
+    for t in ("events", "notes", "anchors"):
+        c.execute(f"ALTER TABLE {t} ADD COLUMN user_id TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
               _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything, _v21_owners,
-              _v22_idea_map, _v23_capture_owner]
+              _v22_idea_map, _v23_capture_owner, _v24_who]
 
 
 def config():
@@ -787,8 +794,9 @@ def tx():
 
 def _event(conn, actor, action, target, **detail):
     conn.execute(
-        "INSERT INTO events (at, actor, action, target, detail) VALUES (?,?,?,?,?)",
-        (now(), actor, action, target, json.dumps(detail, ensure_ascii=False) if detail else None),
+        "INSERT INTO events (at, actor, action, target, detail, user_id) VALUES (?,?,?,?,?,?)",
+        (now(), actor, action, target, json.dumps(detail, ensure_ascii=False) if detail else None,
+         _owner() if actor == "user" else None),
     )
 
 
@@ -1247,25 +1255,70 @@ def counts():
     return out
 
 
-# Your own actions: (at, kind, ref, text, extra). A paper read counts once per paper per day.
-_ACTIVITY = (
-    "SELECT created_at at, 'capture' kind, id ref, COALESCE(title, raw) text, NULL extra FROM captures UNION ALL "
-    "SELECT created_at, 'message', thread_id, text, (SELECT scope FROM threads t WHERE t.id=thread_id) FROM messages WHERE role='user' UNION ALL "
-    "SELECT created_at, 'anchor', paper_id, quote, (SELECT title FROM papers p WHERE p.id=paper_id) FROM anchors WHERE by='user' UNION ALL "
-    "SELECT created_at, 'note', paper_id, text, (SELECT title FROM papers p WHERE p.id=paper_id) FROM notes WHERE by='user' UNION ALL "
-    "SELECT at, 'triage', target, json_extract(detail, '$.triage'), (SELECT COALESCE(title, raw) FROM captures c WHERE c.id=target) "
-    "FROM events WHERE actor='user' AND action='capture.triage' UNION ALL "
-    "SELECT min(at), 'read', target, NULL, (SELECT title FROM papers p WHERE p.id=target) "
-    "FROM events WHERE actor='user' AND action='paper.read' GROUP BY target, date(at, 'localtime')"
-)
+def _activity_sql(uid, seen):
+    """Rows of (at, kind, ref, text, extra). uid set: only that member (a shared space). seen: hide user messages
+    already counted in their personal library, so a discussion copied into a space is not counted twice.
+    A paper read counts once per paper per day."""
+    w = " AND user_id=?" if uid else ""
+    bound = (uid,) if uid else ()
+    msg = " AND thread_id IN (SELECT id FROM threads WHERE user_id=?)" if uid else ""
+    hide = " AND id NOT IN (SELECT id FROM activity_seen)" if seen else ""
+    branches = [
+        f"SELECT created_at at, 'capture' kind, id ref, COALESCE(title, raw) text, NULL extra FROM captures{(' WHERE user_id=?' if uid else '')}",
+        f"SELECT created_at, 'message', thread_id, text, (SELECT scope FROM threads t WHERE t.id=thread_id) FROM messages WHERE role='user'{msg}{hide}",
+        f"SELECT created_at, 'anchor', paper_id, quote, (SELECT title FROM papers p WHERE p.id=paper_id) FROM anchors WHERE by='user'{w}",
+        f"SELECT created_at, 'note', paper_id, text, (SELECT title FROM papers p WHERE p.id=paper_id) FROM notes WHERE by='user'{w}",
+        f"SELECT at, 'triage', target, json_extract(detail, '$.triage'), (SELECT COALESCE(title, raw) FROM captures c WHERE c.id=target) "
+        f"FROM events WHERE actor='user' AND action='capture.triage'{w}",
+        f"SELECT min(at), 'read', target, NULL, (SELECT title FROM papers p WHERE p.id=target) "
+        f"FROM events WHERE actor='user' AND action='paper.read'{w} GROUP BY target, date(at, 'localtime')",
+        f"SELECT at, 'research', target, CASE action WHEN 'research.add' THEN '新建' WHEN 'research.update' THEN '修改' "
+        f"WHEN 'research.accept' THEN '采纳修改稿' WHEN 'research.establish' THEN '确立' ELSE '重新打开' END, "
+        f"(SELECT title FROM research r WHERE r.id=target) FROM events WHERE actor='user' AND action IN "
+        f"('research.add','research.update','research.accept','research.establish','research.reopen'){w}",
+        f"SELECT at, 'experiment', (SELECT research_id FROM experiments e WHERE e.id=target), "
+        f"CASE action WHEN 'experiment.add' THEN '记下' ELSE '修改' END, "
+        f"(SELECT coalesce(nullif(title, ''), substr(raw, 1, 80)) FROM experiments e WHERE e.id=target) "
+        f"FROM events WHERE actor='user' AND action IN ('experiment.add','experiment.edit'){w}",
+        f"SELECT at, 'topics', target, NULL, (SELECT title FROM papers p WHERE p.id=target) "
+        f"FROM events WHERE actor='user' AND action='topics.set'{w}",
+        f"SELECT at, 'link', target, json_extract(detail, '$.paper'), (SELECT coalesce(title, raw) FROM captures c WHERE c.id=target) "
+        f"FROM events WHERE actor='user' AND action='link'{w}",
+        f"SELECT at, 'topic', target, CASE action WHEN 'topic.add' THEN '新建' ELSE '采纳' END, target "
+        f"FROM events WHERE actor='user' AND action IN ('topic.add','topic.accept'){w}",
+        f"SELECT at, 'move', target, NULL, (SELECT coalesce(title, scope) FROM threads t WHERE t.id=target) "
+        f"FROM events WHERE actor='user' AND action='thread.move'{w}",
+        f"SELECT at, 'figures', target, NULL, (SELECT title FROM research r WHERE r.id=target) "
+        f"FROM events WHERE actor='user' AND action='figures.update'{w}",
+        f"SELECT at, 'material', target, CASE json_extract(detail, '$.kind') WHEN 'paper' THEN '论文' WHEN 'thread' THEN '讨论' "
+        f"WHEN 'message' THEN '消息' WHEN 'note' THEN '笔记' WHEN 'capture' THEN '捕获' WHEN 'doc' THEN '文档' "
+        f"ELSE json_extract(detail, '$.kind') END, (SELECT title FROM research r WHERE r.id=target) "
+        f"FROM events WHERE actor='user' AND action='research.link'{w}",
+        f"SELECT at, 'writing', target, CASE action WHEN 'writing.save' THEN '保存' ELSE '采纳修改稿' END, "
+        f"(SELECT title FROM research r WHERE r.id=target) FROM events WHERE actor='user' AND action IN ('writing.save','writing.accept'){w}",
+        f"SELECT at, 'plan', target, NULL, (SELECT title FROM research r WHERE r.id=target) "
+        f"FROM events WHERE actor='user' AND action='plan.accept'{w}",
+    ]
+    sql = " UNION ALL ".join(branches)
+    return sql, bound * sql.count("?")
 
 
-def activity(days=371):
-    """Actions per local day over the last year, the current streak (today may still be empty) and the longest one."""
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+def _activity_ready(c, uid, skip_messages):
+    if uid is None:
+        uid = _owner()
+    if skip_messages:
+        c.execute("CREATE TEMP TABLE activity_seen (id TEXT PRIMARY KEY)")
+        c.executemany("INSERT OR IGNORE INTO activity_seen VALUES (?)", [(i,) for i in skip_messages])
+    return _activity_sql(uid, bool(skip_messages))
+
+
+def user_message_ids():
     with tx() as c:
-        counts = dict(c.execute(
-            f"SELECT date(at, 'localtime') d, count(*) FROM ({_ACTIVITY}) WHERE at >= ? GROUP BY d", (since,)).fetchall())
+        return [r[0] for r in c.execute("SELECT id FROM messages WHERE role='user'")]
+
+
+def activity_summary(counts):
+    """Streak and longest run from a {local day: count} map. Today may still be empty."""
     day = date.today()
     if day.isoformat() not in counts:
         day -= timedelta(days=1)
@@ -1281,10 +1334,23 @@ def activity(days=371):
     return {"days": counts, "streak": streak, "best": best}
 
 
-def activity_day(day):
+def activity(days=371, uid=None, skip_messages=()):
+    """Actions per local day over the last year. uid and skip_messages: one member's work in a shared space,
+    without the discussions already counted at home."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    with tx() as c:
+        sql, args = _activity_ready(c, uid, skip_messages)
+        counts = dict(c.execute(
+            f"SELECT date(at, 'localtime') d, count(*) FROM ({sql}) WHERE at >= ? GROUP BY d", (*args, since)).fetchall())
+    return activity_summary(counts)
+
+
+def activity_day(day, uid=None, skip_messages=()):
     """What you did on one local day (YYYY-MM-DD), oldest first."""
     with tx() as c:
-        return [dict(r) for r in c.execute(f"SELECT * FROM ({_ACTIVITY}) WHERE date(at, 'localtime')=? ORDER BY at", (day,))]
+        sql, args = _activity_ready(c, uid, skip_messages)
+        return [dict(r) for r in c.execute(
+            f"SELECT * FROM ({sql}) WHERE date(at, 'localtime')=? ORDER BY at", (*args, day))]
 
 
 def mark_read(pid):
@@ -1414,6 +1480,7 @@ def link(capture_id, pid, by, state="confirmed", evidence=None):
         c.execute(
             "INSERT OR REPLACE INTO capture_papers VALUES (?,?,?,?,?,?)", (capture_id, pid, state, by, evidence, now())
         )
+        _event(c, by, "link", capture_id, paper=pid, state=state)
     if state == "confirmed":
         _take_home(pid)
 
@@ -1437,7 +1504,6 @@ def _take_home(pid):
                 update_capture(cap["id"], status="mapped")
     except Exception:
         pass
-        _event(c, by, "link", capture_id, paper=pid, state=state)
 
 
 def unlink(capture_id, pid, by):
@@ -1670,7 +1736,8 @@ def add_note(text, by, paper_id=None, topic=None, thread_id=None):
         raise rules.Rejected("笔记不能为空")
     nid = new_id()
     with tx() as c:
-        c.execute("INSERT INTO notes VALUES (?,?,?,?,?,?,?)", (nid, now(), text.strip(), by, paper_id, topic, thread_id))
+        c.execute("INSERT INTO notes (id, created_at, text, by, paper_id, topic, thread_id, user_id) VALUES (?,?,?,?,?,?,?,?)",
+                  (nid, now(), text.strip(), by, paper_id, topic, thread_id, _owner() if by == "user" else None))
     return nid
 
 
@@ -2312,6 +2379,8 @@ def link_research(rid, kind, ref, by, role=None):
         if role is not None:
             c.execute("UPDATE research_links SET role=? WHERE research_id=? AND kind=? AND ref=?", (role or None, rid, kind, ref))
         c.execute("UPDATE research SET updated_at=? WHERE id=?", (now(), rid))
+        if by == "user":
+            _event(c, "user", "research.link", rid, kind=kind, ref=ref)
 
 
 def rejected_in_research(rid):
@@ -2503,6 +2572,8 @@ def update_experiment(eid, by, base_rev=None, asked=False, **fields):
         cols = ", ".join(f"{k}=?" for k in fields)
         c.execute(f"UPDATE experiments SET {cols}, updated_at=?, edited_by=?, revision=revision+1 WHERE id=?",
                   (*fields.values(), now(), by, eid))
+        if by == "user":
+            _event(c, "user", "experiment.edit", eid)
         return cur["revision"] + 1
 
 
@@ -2547,6 +2618,8 @@ def update_writing(rid, base_rev=None, by="user", **sections):
         cols = ", ".join(f"{k}=?" for k in sections)
         c.execute(f"UPDATE writing SET {cols}, updated_at=?, edited_by=?, revision=revision+1 WHERE research_id=?",
                   (*sections.values(), now(), by, rid))
+        if by == "user":
+            _event(c, "user", "writing.save", rid)
         return (cur["revision"] if cur else 0) + 1
 
 
@@ -2568,6 +2641,7 @@ def accept_writing(rid, base_rev=None, fields=None):
     update_writing(rid, base_rev, "agent", **{k: p[k] for k in ("abstract", "introduction") if p.get(k) and (fields is None or k in fields)})
     with tx() as c:
         c.execute("UPDATE writing SET proposal=NULL WHERE research_id=?", (rid,))
+        _event(c, "user", "writing.accept", rid)
 
 
 def discard_writing(rid):
@@ -2607,6 +2681,8 @@ def accept_plan(rid, base_rev=None):
         raise rules.Rejected("没有待确认的计划修改稿")
     update_plan(rid, p["tasks"], "agent", base_rev)
     discard_plan(rid)
+    with tx() as c:
+        _event(c, "user", "plan.accept", rid)
 
 
 def discard_plan(rid):
@@ -2843,7 +2919,9 @@ def add_anchor(pid, surface, quote, by, page=None, section=None):
     with tx() as c:
         if not c.execute("SELECT 1 FROM papers WHERE id=?", (pid,)).fetchone():
             raise rules.Rejected("论文不在库里")
-        c.execute("INSERT INTO anchors VALUES (?,?,?,?,?,?,?,?)", (aid, now(), pid, surface, quote, page, section, by))
+        c.execute(
+            "INSERT INTO anchors (id, created_at, paper_id, surface, quote, page, section, by, user_id) VALUES (?,?,?,?,?,?,?,?,?)",
+            (aid, now(), pid, surface, quote, page, section, by, _owner() if by == "user" else None))
     return aid
 
 

@@ -353,6 +353,38 @@ class Multi(unittest.TestCase):
             store.put_card("arxiv:2410.24164", {"tldr": "空间里的卡 v2"}, "agent")
         self.assertEqual(self.call("/api/papers/arxiv:2410.24164", cookie=home_b)[1]["card"]["tldr"], "家里的卡 v2")
 
+    def test_personal_heatmap_includes_what_you_did_in_a_space(self):
+        from datetime import date
+
+        self.url = self.serve()
+        a, ta = self.user("甲")
+        b, tb = self.user("乙")
+        rid, _, _ = self.research_with_material(a["library"])
+        with store.at_home(store.library_home(a["library"])):
+            space = accounts.create_space(a, "组会", rid)
+            before = store.activity()["days"][date.today().isoformat()]
+        accounts.redeem(accounts.invite("join", space, "editor"), user=b)
+        with store.at_home(store.library_home(space)), store.viewing(a):
+            store.new_thread("library", text="甲在空间里问")
+            store.mark_read("arxiv:2410.24164")
+            store.add_note("甲的空间笔记", "user")
+        with store.at_home(store.library_home(space)), store.viewing(b):
+            store.new_thread("library", text="乙在空间里问")
+        today = date.today().isoformat()
+        home_a = f"p2b_session={ta}"
+        self.assertEqual(self.call("/api/state", cookie=home_a)[1]["activity"]["days"][today], before + 3)
+        rows = self.call(f"/api/activity/{today}", cookie=home_a)[1]
+        self.assertEqual(sorted(r["kind"] for r in rows if r.get("space_name") == "组会"), ["message", "note", "read"])
+        self.assertFalse(any(r.get("text") == "乙在空间里问" for r in rows))
+        self.assertFalse(any(r.get("space_id") and r.get("text") == "想法" for r in rows))
+        rows_b = self.call(f"/api/activity/{today}", cookie=f"p2b_session={tb}")[1]
+        self.assertTrue(any(r.get("text") == "乙在空间里问" and r.get("space_name") == "组会" for r in rows_b))
+        self.assertFalse(any(r.get("text") == "甲在空间里问" for r in rows_b))
+        with store.at_home(store.library_home(space)), store.viewing(a):
+            texts = [r["text"] for r in store.activity_day(today)]
+        self.assertIn("甲在空间里问", texts)
+        self.assertNotIn("乙在空间里问", texts)
+
     def test_leaving_a_space_carries_your_discussions_home(self):
         a, ta = self.user("甲")
         b, tb = self.user("乙")

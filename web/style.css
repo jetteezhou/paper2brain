@@ -452,13 +452,14 @@ mark.anchor-mark:hover { background: color-mix(in srgb, var(--amber) 22%, transp
 .msg.bot .md { font-size: 14px; }
 .msg-foot { display: flex; gap: 6px; align-items: center; margin-top: 4px; color: var(--faint); font-size: 12px; }
 .typing { color: var(--muted); font-size: 12.5px; display: flex; gap: 7px; align-items: center; }
-.chat-input { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end; background: var(--panel); }
-.chat-input textarea { flex: 1; resize: none; border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px 11px; outline: none; max-height: min(40vh, 320px); min-height: 38px; background: var(--panel); line-height: 20px; }
+.chat-input { border-top: 1px solid var(--line); padding: 10px 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; background: var(--panel); }
+.chat-input textarea { order: -1; flex: 1 0 100%; resize: none; border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px 11px; outline: none; max-height: min(40vh, 320px); min-height: 38px; background: var(--panel); line-height: 20px; }
+.chat-input textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-input textarea:focus { border-color: var(--accent); }
-.chat-input { flex-wrap: wrap; }
-.chat-imgs { flex-basis: 100%; display: flex; gap: 8px; flex-wrap: wrap; }
+.chat-input .grow { flex: 1; }
+.chat-imgs { order: -2; flex-basis: 100%; display: flex; gap: 8px; flex-wrap: wrap; }
 .chat-attach { cursor: pointer; }
-.chat-model { appearance: none; -webkit-appearance: none; border: 0; border-radius: 8px; height: 38px; max-width: 150px; field-sizing: content; padding: 0 22px 0 10px;
+.chat-model { appearance: none; -webkit-appearance: none; border: 0; border-radius: 8px; height: 38px; max-width: 220px; field-sizing: content; padding: 0 22px 0 10px;
   font-size: 12.5px; color: var(--muted); cursor: pointer; text-overflow: ellipsis; outline: none;
   background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 8px center; }
 .chat-model:hover, .chat-model:focus-visible { background-color: rgba(0,0,0,.05); color: var(--text); }
@@ -789,9 +790,6 @@ input, textarea, select { transition: border-color .15s, box-shadow .2s var(--ea
 }
 @container (max-width: 440px) {
   .chat-input { padding: 8px 10px; gap: 6px; }
-  .chat-input textarea { order: -1; flex-basis: 100%; }
-  .chat-imgs { order: -2; }
-  .chat-input .chat-model { margin-right: auto; }
 }
 #toast { border-radius: 999px; padding: 9px 18px; background: rgba(42, 40, 37, .86); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); box-shadow: var(--shadow-pop); transition: opacity .25s var(--ease), transform .4s var(--spring); }
 :is(.paper-title, .research-title, .page-title, .cap-title, .modal h3, .empty b, .item-title) { text-wrap: balance; }

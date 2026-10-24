@@ -138,6 +138,20 @@ class Store(unittest.TestCase):
         kinds = [x["kind"] for x in store.activity_day(today)]
         self.assertEqual((kinds.count("read"), kinds[-2:]), (1, ["message", "read"]))
 
+    def test_activity_counts_the_research_work_you_actually_did(self):
+        from datetime import date
+
+        today = date.today().isoformat()
+        before = store.activity()["days"].get(today, 0)
+        rid = store.add_research("一个研究", "user")
+        store.update_writing(rid, abstract="摘要")
+        store.add_experiment(rid, "跑了一次", "user", title="试验")
+        store.add_experiment(rid, "agent 记的", "agent")  # the agent's record is not your day
+        store.link(self.cid, "arxiv:2410.24164", "user")
+        self.assertEqual(store.activity()["days"][today], before + 4)
+        kinds = {x["kind"] for x in store.activity_day(today)}
+        self.assertTrue({"research", "writing", "experiment", "link"} <= kinds)
+
     def test_current_and_longest_streak(self):
         from datetime import datetime, timedelta, timezone
 

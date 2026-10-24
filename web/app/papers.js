@@ -441,6 +441,10 @@ export function CapturesView({ view }) {
   const sel = useSel('capture', list);
   const c = appState.value?.counts || {};
   useEffect(() => {
+    const want = takeSwitchIntent('inbox');
+    if (want && view === 'inbox') selected.value = { kind: 'capture', id: want.id };
+  }, []);
+  useEffect(() => {
     const key = (e) => {
       const t = e.target instanceof Element ? e.target : document.body;
       if (t.closest('input, textarea, select') || (e.key === 'Enter' && t.closest('button, a, [role=link], [role=button]')) || e.metaKey || e.ctrlKey || e.altKey || !list?.length || document.querySelector('.modal-bg')) return;
