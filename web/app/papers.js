@@ -6,8 +6,9 @@ import {
 } from './lib.js';
 import {
   appState, agentOn, selected, useLive, refresh, toast, fail, restoreTrash, go, openReader, openThread, openPaper, openResearch, openCapture, openModal, closeModal, peekPaper,
+  openInSpace, takeSwitchIntent,
 } from './state.js';
-import { Chat, ThreadLines, JotForm, scopeLabel } from './discuss.js';
+import { Chat, ThreadLines, scopeLabel } from './discuss.js';
 import { researchPicker, openComposer, ResearchChip, StageChip } from './research.js';
 import { useAnchorMarks, openFigure } from './reader.js';
 
@@ -32,16 +33,18 @@ export const PaperChip = ({ id, title, peek }) => html`<a href="#" class="chip p
 
 export function ListDetail({ list, detail, hasSel, single }) {
   return html`<div id="body" class=${`${hasSel ? 'show-detail' : ''} ${single ? 'single' : ''}`}><section id="list">${list}</section><section id="detail">
-    ${hasSel && !wide() ? html`<button class="btn sm ghost" onClick=${() => (selected.value = null)}>← 返回列表</button>` : null}${detail}</section></div>`;
+    ${hasSel ? html`<button class="btn sm ghost m-back" onClick=${() => (selected.value = null)}>← 返回列表</button>` : null}${detail}</section></div>`;
 }
 
 /** The selected item of this kind, auto-selecting the first one on wide screens when nothing is selected.
- * A selection missing from the list is kept: the list may not have refreshed yet (a paper just taken in from a citation). */
+ * A selection missing from the list is kept: the list may not have refreshed yet (a paper just taken in from a citation).
+ * Items with `space` are pointers into a shared space and never auto-selected: they open by switching libraries. */
 function useSel(kind, items) {
   const s = selected.value;
   const id = s?.kind === kind ? s.id : null;
   useEffect(() => {
-    if (items && items.length && !id && wide()) selected.value = { kind, id: items[0].id };
+    const first = (items || []).find((x) => !x.space);
+    if (items && items.length && !id && wide() && first) selected.value = { kind, id: first.id };
   }, [items, id]);
   return id;
 }
@@ -159,6 +162,11 @@ export function PaperCard({ paper: p, capture, inReader }) {
   const deepRun = p.runs?.find((r) => live(r.status));
   const capRun = capture?.runs.find((r) => live(r.status));
   const deep = p.captures?.some((c) => c.triage === 'deep');
+  const acc = appState.value?.account;
+  const inSpace = acc && acc.role !== 'viewer' && acc.library !== acc.libraries.find((l) => l.kind === 'personal')?.id;
+  const copyHome = async () => {
+    try { await post(`/api/papers/${enc(p.id)}/copy-home`); toast('已复制到你的个人库（两边之后各自更新）'); } catch (err) { fail(err); }
+  };
   let body;
   if (card) {
     const res = card.resources || {};
@@ -209,6 +217,12 @@ export function PaperCard({ paper: p, capture, inReader }) {
     if (v === null) return;
     try { await post(`/api/papers/${enc(p.id)}/name`, { name: v }); refresh(); } catch (err) { fail(err); }
   };
+  const editAliases = async (e) => {
+    e.preventDefault();
+    const v = prompt('别名，用逗号分隔（如没有单独论文的版本 GR00T N1.7）。实验设置里的对比方法可以用别名：', (p.aliases || []).join(', '));
+    if (v === null) return;
+    try { await post(`/api/papers/${enc(p.id)}/aliases`, { aliases: v.split(/[,，]/) }); refresh(); } catch (err) { fail(err); }
+  };
   return html`<article class="paper" data-anchor-surface="card" data-pid=${p.id} ref=${ref}>
     ${inReader ? null : html`<h1 class="paper-title">${p.short_name ? html`<span class="short-name">${p.short_name}</span>` : null}${p.title}</h1>`}
     <div class="paper-meta">${authors(p.authors)}${p.published ? ' · ' + p.published : ''} · ${p.url ? html`<a href=${href(p.url)} target="_blank" rel="noopener">${idLabel(p.id)} ↗</a>` : idLabel(p.id)}
@@ -216,6 +230,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
       ${capture && p.captures?.length > 1 ? html` · <a href="#" onClick=${(e) => { e.preventDefault(); openPaper(p.id); }}>共 ${p.captures.length} 个来源</a>` : null}
       ${capture ? html` · <a href="#" title=${capture.source === 'find' ? '不是你要找的方向' : '这条捕获不是讲这篇'} onClick=${unlink}>${capture.source === 'find' ? '不对路？' : '不是这篇？'}</a>` : null}
       · <a href="#" title=${p.short_name_by === 'user' ? '你起的缩写，点击修改' : '自动识别的缩写，点击修改'} onClick=${rename}>${p.short_name ? `缩写 ${p.short_name}` : '加缩写'}</a>
+      · <a href="#" title="这篇论文方法的其他叫法，点击修改" onClick=${editAliases}>${p.aliases?.length ? `别名 ${p.aliases.join('、')}` : '加别名'}</a>
       · <a href="#" class="danger" title="从库里彻底删除这篇论文及它的卡片、报告、划线、讨论和笔记" onClick=${removePaper}>删除论文</a></div>
     <${TopicsRow} owner=${p} />
     <${Jumps} p=${p} j=${fullJumps(p)} full />
@@ -226,6 +241,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
     ${inReader ? null : html`<div class="paper-actions">
       <${DeepButton} p=${p} />
       <button class="btn" onClick=${() => openReader(p.id, { tab: 'chat' })}>讨论这篇</button>
+      ${inSpace ? html`<button class="btn" title="在你的个人库里也放一份（这边的还在）" onClick=${copyHome}>复制到个人库</button>` : null}
       <button class="btn" title=${deep ? '移回收件箱' : 'agent 会先把深读报告写好，你有空时直接看'} onClick=${toggleDeep}>${deep ? '✓ 已在稍后深读' : '稍后深读'}</button></div>`}
   </article>`;
 }
@@ -234,8 +250,7 @@ export function PaperCard({ paper: p, capture, inReader }) {
 export function PaperNotes({ p, flush }) {
   return html`<div class="block" style=${flush ? 'margin-top:0' : ''}><div class="block-title">讨论与笔记<span class="line"></span></div>
       <${ThreadLines} threads=${p.threads} paperId=${p.id} />
-      ${p.notes.map((n) => html`<div class="run" style="margin-top:6px"><${Html} tag="div" s=${mdHtml(n.text)} cls="md" /><div class="hint">${n.by === 'agent' ? 'agent 记录的讨论结论' : '笔记'} · ${ago(n.created_at)}</div></div>`)}
-      <${JotForm} scope=${`paper:${p.id}`} placeholder="记一个想法：开一段关于这篇的讨论（不叫 agent 回答）" /></div>
+      ${p.notes.map((n) => html`<div class="run" style="margin-top:6px"><${Html} tag="div" s=${mdHtml(n.text)} cls="md" /><div class="hint">${n.by === 'agent' ? 'agent 记录的讨论结论' : '笔记'} · ${ago(n.created_at)}</div></div>`)}</div>
     ${p.cited_in?.length ? html`<div class="block"><div class="block-title">引用了这篇的讨论 · ${p.cited_in.length}<span class="line"></span></div>
       ${p.cited_in.map((t) => html`<div class="source" onClick=${() => openThread(t.scope, t.id)}><span class="source-kind">${scopeLabel(t.scope, t.scope_title)}</span>
         <span class="source-label">${t.title || t.first || '一段讨论'}</span></div>`)}</div>` : null}`;
@@ -422,8 +437,7 @@ function CaptureDetail({ id, view }) {
     ${c.attachments.length ? html`<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">${c.attachments.map((a) => a.mime.startsWith('image/')
       ? html`<a href=${`/api/attachments/${a.id}`} target="_blank" class="thumb" style="width:96px;height:96px"><img src=${`/api/attachments/${a.id}`} /></a>`
       : html`<a href=${`/api/attachments/${a.id}`} target="_blank" class="chip">${a.filename.replace(/^\d+-/, '')} ↗</a>`)}</div>` : null}
-    <div class="thoughts"><${ThreadLines} threads=${c.threads} paperId=${papers[0]?.id} />
-      <${JotForm} scope=${`capture:${c.id}`} placeholder=${c.threads.length ? '再补一句…（记下就开一段讨论，不叫 agent 回答）' : '补一句：为什么收它？'} /></div>
+    <div class="thoughts"><${ThreadLines} threads=${c.threads} paperId=${papers[0]?.id} /></div>
     ${notice}
     ${papers.map((p) => html`<${CapturePaper} key=${p.id} pid=${p.id} capture=${c} why=${p.evidence} />`)}
     <${RunsBlock} c=${c} /></div>`;
@@ -433,6 +447,10 @@ export function CapturesView({ view }) {
   const [list] = useLive(`/api/captures?view=${view}`);
   const sel = useSel('capture', list);
   const c = appState.value?.counts || {};
+  useEffect(() => {
+    const want = takeSwitchIntent('inbox');
+    if (want && view === 'inbox') selected.value = { kind: 'capture', id: want.id };
+  }, []);
   useEffect(() => {
     const key = (e) => {
       const t = e.target instanceof Element ? e.target : document.body;
@@ -468,8 +486,8 @@ export function CapturesView({ view }) {
 
 export function PaperItem({ p, on, picked, onPick }) {
   return html`<div class=${`item ${on ? 'on' : ''}${picked ? ' picked' : ''}`} data-id=${p.id}
-      onClick=${() => (onPick ? onPick(p.id) : (selected.value = { kind: 'paper', id: p.id }))}>
-    <div class="item-meta"><span class="src">${idLabel(p.id)}</span>${p.published ? html`<span>· ${p.published.slice(0, 7)}</span>` : null}<time>${ago(p.last_captured)}</time></div>
+      onClick=${() => (p.space ? openInSpace(p.space, 'papers', p.id) : onPick ? onPick(p.id) : (selected.value = { kind: 'paper', id: p.id }))}>
+    <div class="item-meta"><span class="src">${idLabel(p.id)}</span>${p.space ? html`<span class="chip" title="在共享空间「${p.space.name}」里，点开进入那个空间">共享 · ${p.space.name}</span>` : null}${p.published ? html`<span>· ${p.published.slice(0, 7)}</span>` : null}<time>${ago(p.last_captured)}</time></div>
     <div class="item-paper no-arrow" style="margin-top:0;font-size:14.5px">${p.short_name ? html`<b class="short-name">${p.short_name}</b>` : null}${p.title}</div>
     <div class="item-meta" style="margin:3px 0 0">${authors(p.authors)}</div>
     ${p.tldr ? html`<div class="item-tldr">${p.tldr}</div>` : null}
@@ -486,11 +504,15 @@ export function TopicTabs({ topic, on, papers, research }) {
 }
 
 export function PapersView({ view, topic }) {
-  const q = view === 'topic' ? `?topic=${enc(topic)}` : view === 'unsorted' ? '?unsorted=1' : '';
+  const q = view === 'topic' ? `?topic=${enc(topic)}` : view === 'unsorted' ? '?unsorted=1' : '?shared=1';
   const [list] = useLive('/api/papers' + q);
   const [research] = useLive(topic ? `/api/research?topic=${enc(topic)}` : null);
   const [picking, setPicking] = useState(null);
   useEffect(() => setPicking(null), [view, topic]);
+  useEffect(() => {
+    const want = takeSwitchIntent('papers'); // back from a shared space, with a paper to open
+    if (want) selected.value = { kind: 'paper', id: want.id };
+  }, []);
   const sel = useSel('paper', list);
   const pick = (id) => { const s = new Set(picking); s.has(id) ? s.delete(id) : s.add(id); setPicking(s); };
   const chosen = () => list.filter((x) => picking.has(x.id));
@@ -505,8 +527,10 @@ export function PapersView({ view, topic }) {
   const head = html`<${ListHead} title=${title} sub=${list?.length ? `${list.length} 条` : ''}
       keys=${list?.length ? html`<a href="#" onClick=${(e) => { e.preventDefault(); setPicking(picking ? null : new Set()); }}>${picking ? '退出多选' : '多选'}</a>` : null} />
     ${topic ? html`<${TopicTabs} topic=${topic} on="papers" papers=${list?.length} research=${research?.length} />` : null}${bar}`;
+  const ptrs = (list || []).filter((p) => p.space), own = (list || []).filter((p) => !p.space);
+  const item = (p) => html`<${PaperItem} key=${p.id} p=${p} on=${p.id === sel} picked=${picking?.has(p.id)} onPick=${picking ? pick : null} />`;
   const body = !list ? html`<div class="empty"><span class="spin"></span></div>` : !list.length ? html`<${Empty} e=${v.empty} />`
-    : list.map((p) => html`<${PaperItem} key=${p.id} p=${p} on=${p.id === sel} picked=${picking?.has(p.id)} onPick=${picking ? pick : null} />`);
+    : html`${ptrs.length ? html`<div class="group-label">共享空间里与你相关 · ${ptrs.length} 篇</div>${ptrs.map(item)}` : null}${own.map(item)}`;
   return html`<${ListDetail} hasSel=${!!sel} list=${html`${head}${body}`}
     detail=${sel ? html`<${PaperDetail} key=${sel} pid=${sel} />` : list?.length ? html`<div class="empty" style="padding-top:120px">选择左侧一条查看</div>` : null} />`;
 }

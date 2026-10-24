@@ -5,12 +5,13 @@ import { signal } from '@preact/signals';
 import { html, get, post, del, enc, short, ago, readBase64, idLabel, threadName, Icon, fit, Mark, workHot, openWork } from './lib.js';
 import {
   route, baseRoute, go, appState, loadState, refresh, toast, toastSig, fail, restoreTrash, modalSig, openModal, closeModal,
-  selected, openThread, openCapture, openReader, openPaper, openResearch, useLive, peekPaper,
+  selected, openThread, openCapture, openReader, openPaper, openResearch, openInSpace, useLive, peekPaper,
 } from './state.js';
 import { CapturesView, PapersView, SearchView, ListDetail, openWebFind, addAndOpen } from './papers.js';
 import { ResearchView, openComposer, researchPicker, showResearch } from './research.js';
 import { DiscussView } from './discuss.js';
 import { Reader, SelectionPopup, Peek } from './reader.js';
+import { Notepad } from './notepad.js';
 
 /** An overlay's value, kept on screen for a moment after it goes away so it can animate out: [shown, leaving]. */
 function useLeaving(v, ms = 160) {
@@ -105,16 +106,37 @@ const TRIAGE_LABEL = { deep: '稍后深读', archived: '存档', ignored: '忽�
 /** One action of the day: what it was, and where clicking takes you. */
 function activityRow(x) {
   const jump = (fn) => () => { closeModal(); fn(); };
+  const space = x.space_id ? { id: x.space_id, name: x.space_name } : null;
+  const there = (view, id) => jump(() => openInSpace(space, view, id));
+  const research = (id) => (space ? jump(async () => {
+    try { await post('/api/libraries/switch', { library: space.id }); } catch (e) { return fail(e); }
+    sessionStorage.setItem('p2b.openResearch', id);
+    location.hash = '#/research';
+    location.reload();
+  }) : jump(() => openResearch(id)));
+  const paper = (id) => (space ? there('papers', id) : jump(() => openPaper(id)));
+  const said = (verb, title) => (title ? `${verb}《${title}》` : verb);
   const row = {
-    capture: ['收下', x.text, jump(() => openCapture(x.ref))],
-    message: ['讨论', x.text, jump(() => openThread(x.extra, x.ref))],
-    anchor: ['划词', `“${x.text}”${x.extra ? ` · ${x.extra}` : ''}`, jump(() => openReader(x.ref, { tab: 'anchors' }))],
-    note: ['笔记', x.text, x.ref ? jump(() => openPaper(x.ref)) : null],
-    triage: [TRIAGE_LABEL[x.text] || '分拣', x.extra, jump(() => openCapture(x.ref))],
-    read: ['阅读', x.extra || x.ref, jump(() => openReader(x.ref))],
+    capture: ['收下', x.text, space ? there('inbox', x.ref) : jump(() => openCapture(x.ref))],
+    message: ['讨论', x.text, space ? there('discuss', x.ref) : jump(() => openThread(x.extra, x.ref))],
+    anchor: ['划词', `“${x.text}”${x.extra ? ` · ${x.extra}` : ''}`, space ? there('papers', x.ref) : jump(() => openReader(x.ref, { tab: 'anchors' }))],
+    note: ['笔记', x.text, x.ref ? paper(x.ref) : null],
+    triage: [TRIAGE_LABEL[x.text] || '分拣', x.extra, space ? there('inbox', x.ref) : jump(() => openCapture(x.ref))],
+    read: ['阅读', x.extra || x.ref, space ? there('papers', x.ref) : jump(() => openReader(x.ref))],
+    research: ['研究', said(x.text, x.extra), research(x.ref)],
+    experiment: ['实验', said(x.text, x.extra), x.ref ? research(x.ref) : null],
+    topics: ['归类', x.extra || x.ref, paper(x.ref)],
+    link: ['关联', x.extra || x.text, space ? there('inbox', x.ref) : jump(() => openCapture(x.ref))],
+    topic: ['主题', x.extra || x.text, space ? null : jump(() => go('topic', x.ref))],
+    move: ['整理', x.extra || '一段讨论', space ? there('discuss', x.ref) : jump(() => openThread(null, x.ref))],
+    figures: ['图表', x.extra, research(x.ref)],
+    material: ['素材', x.extra ? `${x.text || '素材'} · 《${x.extra}》` : x.text, research(x.ref)],
+    writing: ['写作', said(x.text, x.extra), research(x.ref)],
+    plan: ['计划', x.extra ? `采纳《${x.extra}》` : '采纳计划', research(x.ref)],
   }[x.kind];
+  if (!row) return null;
   return html`<div class=${`act-row ${row[2] ? '' : 'static'}`} role=${row[2] ? 'link' : null} tabIndex=${row[2] ? 0 : null} onClick=${row[2]}><time>${new Date(x.at).toTimeString().slice(0, 5)}</time>
-    <span class="chip">${row[0]}</span><span class="act-text">${short(row[1] || '', 90)}</span></div>`;
+    <span class="chip">${row[0]}</span>${space ? html`<span class="chip" title="在共享空间里做的">${space.name}</span>` : null}<span class="act-text">${short(row[1] || '', 90)}</span></div>`;
 }
 
 function Activity({ day: first }) {
@@ -228,6 +250,7 @@ function Sidebar() {
   return html`<aside id="side">
     <${Brand} />
     <${PalTrigger} />
+    <${Libraries} />
     <nav class="nav">
       <${MainNav} />
       <div class="nav-label">主题<button class="nav-add" title="新建主题" aria-label="新建主题" onClick=${() => topicModal()}>+</button></div>
@@ -364,6 +387,20 @@ function SearchApi() {
     <div style="text-align:right"><button class="btn sm primary">保存</button></div></form>`;
 }
 
+/** Which engine PDFMathTranslate uses for the Chinese copies (EN / 中 in the reader). */
+function TranslateEngine() {
+  const [d, reload] = useLive('/api/agent/translate', { poll: false });
+  if (!d) return html`<span class="spin"></span>`;
+  const pick = async (e) => {
+    try { await post('/api/agent/translate', { engine: e.target.value }); toast('已保存，之后翻译的论文用这个引擎'); reload(); } catch (err) { fail(err); }
+  };
+  return html`<div class="block-title" style="margin-top:14px">PDF 翻译引擎<span class="line"></span></div>
+    <p class="hint" style="margin-top:0">论文收下后在后台用 PDFMathTranslate 翻成中文，阅读器和速览窗口右上角切换 EN / 中。
+      ${d.installed ? '' : '服务器还没装 PDFMathTranslate（ops/server.sh 会装）。'}
+      ${d.engine === 'search' && !appState.value.agent.search_api ? '快速搜索接口现在不可用，翻译等它上线再继续。' : ''}
+      <select value=${d.engine} onChange=${pick} aria-label="PDF 翻译引擎">${Object.entries(d.engines).map(([k, label]) => html`<option value=${k}>${label}</option>`)}</select></p>`;
+}
+
 /** Who holds the library, how fresh the iCloud snapshot is, and the pull that takes it over on this Mac. */
 function Handoff() {
   const [d, , err] = useLive('/api/handoff', { poll: false });
@@ -396,8 +433,112 @@ function Handoff() {
     ${s && d.holder && s.owner === d.me ? html`<p class="hint">这台就是持有者，不用接手。</p>` : null}`;
 }
 
+// ---------- the shared server: libraries, the agent on the user's own Mac, sharing a research ----------
+
+/** Which library the page shows (the user's own or a shared space); switching reloads everything. */
+function Libraries() {
+  const acc = appState.value?.account;
+  if (!acc) return null;
+  const pick = async (e) => {
+    try { await post('/api/libraries/switch', { library: e.target.value }); } catch (err) { return fail(err); }
+    location.hash = '';
+    location.reload();
+  };
+  return html`<select class="lib-pick" value=${acc.library} onChange=${pick} aria-label="切换论文库" style="margin:4px 12px 8px;max-width:calc(100% - 24px)">
+    ${acc.libraries.map((l) => html`<option value=${l.id}>${l.kind === 'space' ? '共享 · ' : ''}${l.name}${l.role === 'viewer' ? '（只读）' : ''}</option>`)}</select>`;
+}
+
+const joinLink = (code) => `${location.origin}/join.html#${code}`;
+const Copyable = ({ text }) => html`<pre style="user-select:all;white-space:pre-wrap;word-break:break-all">${text}</pre>`;
+
+function Account() {
+  const acc = appState.value.account, a = appState.value.agent;
+  const [got, setGot] = useState({});
+  const [researches] = useLive('/api/research', { poll: false });
+  const personal = acc.libraries.find((l) => l.kind === 'personal')?.id, space = acc.library !== personal, owner = acc.role === 'owner';
+  const call = async (key, url, body, after) => {
+    try { const r = await post(url, body); setGot((g) => ({ ...g, [key]: r })); if (after) after(r); } catch (e) { fail(e); }
+  };
+  const reload = () => { location.hash = ''; location.reload(); };
+  const share = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    if (!f.get('research_id')) return fail('先选一个研究');
+    call('space', '/api/spaces', { research_id: f.get('research_id'), name: f.get('name') }, () => { toast('已共享到新空间，正在打开'); setTimeout(reload, 600); });
+  };
+  const setRole = (m, role) => call('role', `/api/members/${m.id}`, { role }, () => { toast(role ? '已修改' : '已移出'); refresh(); });
+  const leave = () => confirm('离开这个空间？之后要别人重新邀请才能回来。') && call('leave', `/api/members/${acc.user.id}`, { role: null }, reload);
+  const invite = (role) => call('invite', '/api/members/invite', { role, admin_password: document.getElementById('admin-password').value });
+  const savePassword = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target), form = e.target;
+    call('password', '/api/me/password', { name: f.get('name'), password: f.get('password'), old: f.get('old') },
+      () => { form.reset(); toast('已保存：之后在任何设备用登录名和密码登录'); refresh(); });
+  };
+  return html`<div class="block-title" style="margin-top:0">本机 agent<span class="line"></span></div>
+  <p class="hint" style="margin-top:0">${acc.user.name}，你的 agent 在你自己的 Mac 上运行：由 Mac 用你的 Cursor key 调用 Cursor（key 不上传服务器），只能通过这个网页按你的权限读写。
+    ${a.backends?.cursor ? html`<b>✓ 本机在线，worker ${a.machine}</b>（Mac 关机时 agent 不会回复，其他功能照常）` : '本机 agent 不在线：在你的 Mac 上运行下面的命令（装过的话看 Mac 是否开着）。'}
+    TCodex：${a.backends?.tcodex ? '✓ 本机在线，模型列表里可以选 TCodex 的模型' : '本机不在线（在装了 tcodex 的 Mac 上运行下面的命令即可接上）'}。
+    快速搜索接口：${a.search_api ? '✓ 本机已配置' : '不可用（运行下面的命令时会问）'}。</p>
+  ${got.token ? html`<p class="hint">口令只显示这一次（重新生成会让旧的失效）。在 Mac 的终端里运行（会问 Cursor API key 和快速搜索接口，已有单人版 paper2brain 的设置时直接沿用）：</p>
+    <${Copyable} text=${`git clone ${a.repo} ~/paper2brain-client 2>/dev/null; ~/paper2brain-client/setup.sh ${location.origin} ${got.token.token}`} />`
+    : html`<button class="btn sm" onClick=${() => call('token', '/api/me/agent-token', {})}>生成本机 agent 的口令</button>`}
+  <div class="block-title" style="margin-top:14px">${space ? '这个共享空间' : '共享研究'}<span class="line"></span></div>
+  ${space ? html`<div>${acc.members.map((m) => html`<div class="cand"><div class="cand-body"><div class="cand-title">${m.name}${m.id === acc.user.id ? '（你）' : ''}</div>
+      <div class="cand-meta">${m.id === acc.agent_member ? '空间的后台整理（没人发起的任务）在 ta 的 Mac 上跑' : ''}</div></div>
+      ${owner ? html`<select value=${m.role} onChange=${(e) => setRole(m, e.target.value)} aria-label="角色"><option value="viewer">只读</option><option value="editor">编辑</option><option value="owner">所有者</option></select>
+        ${m.id !== acc.agent_member && m.role !== 'viewer' ? html`<button class="btn sm ghost" onClick=${() => call('agent', '/api/members/agent', { user_id: m.id }, refresh)}>由 ta 负责后台整理</button>` : null}
+        ${m.id !== acc.user.id ? html`<button class="btn sm ghost danger" onClick=${() => confirm(`把 ${m.name} 移出空间？`) && setRole(m, null)}>移出</button>` : null}`
+      : html`<span class="hint">${{ viewer: '只读', editor: '编辑', owner: '所有者' }[m.role]}</span>`}</div>`)}</div>
+    ${owner ? html`${acc.admin ? html`<p class="hint">邀请：<input id="admin-password" type="password" placeholder="二级密码" aria-label="二级密码" autocomplete="off" />
+      <button class="btn sm" onClick=${() => invite('editor')}>生成可编辑的邀请链接</button>
+      <button class="btn sm" onClick=${() => invite('viewer')}>生成只读的邀请链接</button></p>`
+      : html`<p class="hint">只有超级管理员能生成邀请链接，需要加人时找 ta。</p>`}
+      ${got.invite ? html`<p class="hint">一次有效，7 天内用：</p><${Copyable} text=${joinLink(got.invite.code)} />` : null}`
+      : html`<p><button class="btn sm ghost danger" onClick=${leave}>离开这个空间</button></p>`}`
+  : html`<p class="hint" style="margin-top:0">把一个研究放进一个新的共享空间，再邀请别人一起改。研究本身（三要素、素材、实验、文档、写作）在空间里只有一份，大家都改这一份；每个人的讨论和 agent 只有自己看得到，用的是自己 Mac 上的 agent。你个人库里留下一个指向它的入口：研究列表里标着“共享”，论文页上仍显示被它用到，点开就进入空间。你在空间里添加或讨论过的论文，会连着快读卡复制进你的个人库；你写的讨论在你个人库的讨论列表里也看得到（这里只读，想继续点“去空间继续”）；你离开空间或空间归档时，你的讨论会复制回你的个人库。你作为所有者随时可以在研究页上把它移回个人库。</p>
+    <form class="research-create" onSubmit=${share}>
+      <select name="research_id" aria-label="要共享的研究"><option value="">选一个研究…</option>${(researches || []).map((x) => html`<option value=${x.id}>${x.title}</option>`)}</select>
+      <input name="name" placeholder="空间的名字（不写就用“共享空间”）" maxlength="60" aria-label="空间的名字" />
+      <div style="text-align:right"><button class="btn sm primary">共享到新空间</button></div></form>`}
+  <div class="block-title" style="margin-top:14px">登录名和密码<span class="line"></span></div>
+  <p class="hint" style="margin-top:0">${acc.login ? `登录名：${acc.login}。在任何设备打开 ${location.origin} ，输入登录名和密码即可。` : '还没设密码：设好后在任何设备打开这个网址就能登录，'}</p>
+  <form class="research-create" onSubmit=${savePassword}>
+    <input name="name" defaultValue=${acc.login || acc.user.name} maxlength="40" aria-label="登录名" autocomplete="username" />
+    ${acc.login ? html`<input name="old" type="password" placeholder="当前密码" aria-label="当前密码" autocomplete="current-password" />` : null}
+    <input name="password" type="password" placeholder="新密码（至少 8 位）" aria-label="新密码" autocomplete="new-password" />
+    <div style="text-align:right"><button class="btn sm primary">${acc.login ? '修改' : '设置密码'}</button></div></form>
+  ${acc.admin ? html`<${Rollback} />` : null}`;
+}
+
+// super admin: roll a library, or one research in it, back to an hourly snapshot (the state before is saved first)
+function Rollback() {
+  const [pw, setPw] = useState(''), [lib, setLib] = useState(''), [data, setData] = useState(null), [pick, setPick] = useState({});
+  const load = async (library, backup) => { try { setLib(library); setData(await post('/api/admin/backups', { admin_password: pw, library, backup })); setPick({ backup }); } catch (e) { fail(e); } };
+  const go = async () => {
+    if (!pick.backup) return fail('先选一个时间点');
+    if (!confirm(`把${pick.research_id ? '这个研究' : '整个论文库'}回滚到 ${pick.backup}？这之后的改动会丢失（回滚前的状态会先备份）。`)) return;
+    try { await post('/api/admin/restore', { admin_password: pw, library: lib, backup: pick.backup, research_id: pick.research_id }); toast('已回滚'); load(lib, pick.backup); } catch (e) { fail(e); }
+  };
+  return html`<div class="block-title" style="margin-top:14px">回滚数据（超级管理员）<span class="line"></span></div>
+  <p class="hint" style="margin-top:0"><input type="password" value=${pw} onInput=${(e) => setPw(e.target.value)} placeholder="二级密码" aria-label="二级密码" autocomplete="off" />
+    <button class="btn sm" onClick=${() => load('' + (appState.value.account.library))}>列出论文库</button></p>
+  ${data ? html`<select value=${lib} onChange=${(e) => load(e.target.value)} aria-label="论文库">${data.libraries.map((l) => html`<option value=${l.id}>${l.kind === 'space' ? '共享 · ' : '个人 · '}${l.name}（所有者：${l.owners}）</option>`)}</select>
+    <select value=${pick.backup || ''} onChange=${(e) => load(lib, e.target.value)} aria-label="时间点"><option value="">选一个时间点…</option>${data.backups.map(([n, size]) => html`<option value=${n}>${n}（${Math.round(size / 1024)} KB）</option>`)}</select>
+    <select value=${pick.research_id || ''} onChange=${(e) => setPick({ ...pick, research_id: e.target.value })} aria-label="范围"><option value="">整个论文库</option>${data.research.map((x) => html`<option value=${x.id}>只回滚研究：${x.title}</option>`)}</select>
+    <button class="btn sm danger" onClick=${go}>回滚</button>` : null}`;
+}
+
 function Setup() {
   const a = appState.value.agent, ok = a.backends || {};
+  if (appState.value.account) return html`<h3>账号、agent 与共享</h3><${Account} />
+    ${a.enabled && appState.value.account.role === 'owner' ? html`<div class="block-title" style="margin-top:14px">模型<span class="line"></span></div><${Models} key=${a.machine} />` : null}
+    <div class="block-title" style="margin-top:14px">快速搜索接口<span class="line"></span></div>
+    <p class="hint" style="margin-top:0">搜索框的 AI 推荐、快速问、起标题、上网找论文用一个 OpenAI 兼容接口（Gemini 用 https://generativelanguage.googleapis.com/v1beta/openai）。
+      它由${appState.value.account.library === appState.value.account.libraries.find((l) => l.kind === 'personal')?.id ? '你' : '负责这个空间 agent 的成员'}的 Mac 调用：地址、模型和 key 只存在那台 Mac 上，走它的代理，所以 Gemini 这类限地区的模型也能用。
+      ${a.search_api ? html`<b>✓ 本机已配置并在线</b>` : '现在不可用：Mac 没开，或还没配置。'}改接口或代理：在 Mac 上运行 <code>~/paper2brain-client/setup.sh --search</code>。</p>
+    ${appState.value.account.role === 'owner' ? html`<${TranslateEngine} />` : null}
+    <div style="text-align:right;margin-top:12px"><button class="btn" onClick=${closeModal}>关闭</button></div>`;
   const switchTo = async (backend) => { try { await post('/api/agent/backend', { backend }); toast('已保存，选“默认”的模块之后用这个后端'); refresh(); } catch (e) { fail(e); } };
   const mark = (b) => (ok[b] ? '✓ 已连接' : '未连接');
   return html`<h3>${a.enabled ? 'Agent 已连接' : '连接 agent'}</h3>
@@ -425,6 +566,7 @@ function Setup() {
   <p class="hint" style="margin-top:0">搜索框停顿 1 秒后，第一条的 AI 推荐直接调这个 OpenAI 兼容接口（关闭思考，通常 1–8 秒）；不填就用上面“快速搜索”选的 TCodex 模型（约 4 秒）。
     ${a.search_ai ? '✓ 已可用' : '未可用'}</p>
   <${SearchApi} />
+  <${TranslateEngine} />
   <div class="block-title" style="margin-top:14px">两台 Mac<span class="line"></span></div>
   <${Handoff} />
   <p class="hint">调优 agent：修改仓库里的 <code>librarian/*.md</code>，再在捕获详情里点“重新整理”。</p>
@@ -432,7 +574,7 @@ function Setup() {
 }
 const setupModal = () => appState.value && openModal(html`<${Setup} />`);
 
-// ---------- the one bar (⌘K): capture, search, find papers, jot a thought, start a research, act on this paper, go anywhere ----------
+// ---------- the one bar (⌘K): capture, search, find papers, ask the agent, start a research, act on this paper, go anywhere ----------
 
 const FIND_RE = /^\s*(?:请|麻烦)?\s*(?:帮我|帮忙|给我)\s*(?:找|搜|推荐)|^\s*(?:找|搜)(?:一下|几篇|一些|些)?[^\n]{0,60}(?:论文|paper)/i;
 const accepted = (f) => f.type.startsWith('image/') || f.type === 'application/pdf';
@@ -450,15 +592,6 @@ async function addFiles(files) {
     const data = await readBase64(f);
     cap.value = { ...cap.value, files: [...cap.value.files, { mime: f.type, name: f.name, data }] };
   }
-}
-
-async function jot(text) {
-  clearCap();
-  try {
-    const t = await post('/api/threads', { scope: 'library', text });
-    toast('已记下，开了一段新讨论', '去讨论', () => openThread(t.scope, t.id));
-    refresh();
-  } catch (e) { cap.value = { ...cap.value, text }; fail(e); }
 }
 
 async function ask(text) {
@@ -548,7 +681,6 @@ function paletteItems(t, link, files, hits, ai) {
       h.research.slice(0, 3).forEach((x) => add('库里', `r:${x.id}`, '☆', x.title, '研究', () => openResearch(x.id), true));
     }
     if (appState.value?.agent?.enabled) add('用这段话', 'ask', '◌', `和 agent 讨论：${say}`, '整个论文库，比如改主题树、归纳方向', () => ask(t));
-    add('用这段话', 'jot', '✎', '记成一个想法', '开一段讨论，不叫 agent 回答', () => jot(t));
     if (!FIND_RE.test(t)) find();
     add('用这段话', 'cap', '＋', '收下这段文字', '按标题找原论文', submitCapture);
     add('用这段话', 'res', '☆', '以它开始一个研究', '', startResearch);
@@ -625,7 +757,7 @@ function Palette({ leaving }) {
   return html`<div class=${`pal-bg${leaving ? ' leaving' : ''}`} onMouseDown=${(e) => { if (e.target === e.currentTarget) palOpen.value = false; }}>
     <div class="pal" id="palette" role="dialog" aria-label="收下、搜索、找论文">
       <textarea ref=${ta} rows="1" class="pal-input" value=${text} onInput=${set('text')} onKeyDown=${key}
-        placeholder="粘贴链接、截图或 PDF 收下；输入文字搜索、找论文、记想法、跳转…" aria-label="收下、搜索、找论文"></textarea>
+        placeholder="粘贴链接、截图或 PDF 收下；输入文字搜索、找论文、问 agent、跳转…" aria-label="收下、搜索、找论文"></textarea>
       ${files.length ? html`<div class="pal-files">${files.map((f, j) => html`<div class="thumb">${f.mime === 'application/pdf'
         ? html`<div class="thumb-pdf"><b>PDF</b>${short(f.name, 18)}</div>` : html`<img src=${`data:${f.mime};base64,${f.data}`} alt="" />`}
         <button type="button" aria-label="移除" onClick=${() => { cap.value = { ...cap.value, files: files.filter((_, k) => k !== j) }; }}>×</button></div>`)}</div>` : null}
@@ -778,7 +910,8 @@ function App() {
   return html`<div id="app" inert=${blocked}>
       <${Sidebar} />
       <main id="main">
-        <nav id="mnav" aria-label="主导航"><${MobileMark} /><${MainNav} /></nav>
+        <nav id="mnav" aria-label="主导航"><${MobileMark} /><${MainNav} /><${Libraries} />
+          <button type="button" class="m-agent" onClick=${setupModal} title="Agent 与账号设置" aria-label="Agent 与账号设置"><span class=${`dot ${appState.value?.agent?.enabled ? 'ok' : ''}`}></span></button></nav>
         <${PalTrigger} cls="mpal" />
         <${Body} />
       </main>
@@ -787,6 +920,7 @@ function App() {
     ${reading ? html`<div inert=${blocked}><${Reader} /></div>` : null}
     <${SelectionPopup} />
     <${Peek} />
+    <div inert=${blocked}><${Notepad} /></div>
     <${PaletteHost} />
     <${Toast} />
     <${Modal} />`;

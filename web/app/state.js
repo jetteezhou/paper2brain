@@ -103,9 +103,14 @@ export function openReader(pid, intent = {}) {
   readerIntent.value = intent;
   location.hash = `#/read/${enc(pid)}${intent.page ? '@' + intent.page : ''}`;
 }
-/** A paper's PDF in a floating window over whatever is open: { pid, page, q }. */
-export const peek = signal(null);
-export const peekPaper = (pid, page, q) => { peek.value = { pid, page, q }; };
+/** Papers' PDFs in floating windows over whatever is open: [{ id, pid, page, q }]. A paper already
+ * open jumps in its own window; past five the oldest closes. Which one is on top follows the last click. */
+export const peek = signal([]);
+let peekSeq = 0;
+export const peekPaper = (pid, page, q) => {
+  const old = peek.value.find((x) => x.pid === pid);
+  peek.value = [...peek.value.filter((x) => x !== old), { id: old?.id ?? ++peekSeq, pid, page, q }].slice(-5);
+};
 /** The message to flash once a discussion is on screen. */
 export const highlight = signal(null);
 /** A passage selected on a page, waiting to be quoted into that scope's discussion input: { scope, text }. */
@@ -132,6 +137,24 @@ export async function openPaper(pid) {
 }
 export const openResearch = (id) => openItem('research', id, 'research');
 export const openCapture = (id) => openItem('capture', id, 'inbox');
+
+/** Open something that lives in a shared space: switch libraries, reload, then open it there. */
+export async function openInSpace(space, view, id) {
+  try { await post('/api/libraries/switch', { library: space.id }); } catch (e) { return fail(e); }
+  sessionStorage.setItem('p2b.openAfterSwitch', JSON.stringify({ view, id }));
+  location.hash = `#/${view}`;
+  location.reload();
+}
+/** The { view, id } openInSpace left across the reload, consumed once — and only by the view it is for. */
+export function takeSwitchIntent(view) {
+  const raw = sessionStorage.getItem('p2b.openAfterSwitch');
+  try {
+    const intent = raw ? JSON.parse(raw) : null;
+    if (!intent || intent.view !== view) return null;
+    sessionStorage.removeItem('p2b.openAfterSwitch');
+    return intent;
+  } catch { return null; }
+}
 
 // on a research page a citation is checked in place: the peek window, which can still open the reader
 registerAction('open-paper', (el) => (route.value.view === 'research' ? peekPaper(el.dataset.pid) : openPaper(el.dataset.pid)));

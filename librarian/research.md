@@ -98,7 +98,7 @@
 }
 ```
 
-- `title`、`summary`、`problem`、`method`、`validation` 必填，Markdown 字符串。
+- `title`、`summary`、`problem`、`method`、`validation` 必填，Markdown 字符串。需要合并单元格等复杂表格时可以直接写 HTML `<table>`（只保留表格标签和 colspan/rowspan，单元格里照常写引用和加粗）。
 - 引用库里的论文写成 `[arxiv:2410.24164 p.3]` 或 `[doi:10.xxx]`，被引论文必须在库里，提交后自动加入素材；用户说过的话写成 `[讨论 2026-10-16]`。
 - 不编数字。成功线来自用户、来自 baseline 论文里的数字（带页码），或者写"待确认：成功线"。
 - `./p2b research propose <id> --file /tmp/research.json --base-rev <revision>`。返回"内容已被修改"说明用户刚改过，重新 `show` 后在新版本上改。

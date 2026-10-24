@@ -3,13 +3,14 @@
 // figure lightbox, which open from anywhere a card is shown.
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
-import { html, get, post, del, enc, short, idLabel, href, mdHtml, citeHtml, Mark, Md, workHot, openWork } from './lib.js';
+import { html, get, post, del, enc, short, idLabel, href, mdHtml, citeHtml, Mark, Md, workHot, openWork, DockGrip } from './lib.js';
 import {
   route, baseRoute, appState, readerIntent, go, useLive, refresh, toast, fail, agentOn, openModal, closeModal, registerAction, openReader, quoting, peek, peekPaper, addPaper,
 } from './state.js';
 import { PaperCard, PaperNotes, PdfButton, RunCard, reportState } from './papers.js';
 import { Chat } from './discuss.js';
 import { showResearch } from './research.js';
+import { addNote, sourceOf } from './notepad.js';
 
 // ---------- marking passages ----------
 
@@ -76,7 +77,23 @@ export function useAnchorMarks(ref, paper) {
 // ---------- the PDF ----------
 
 let pdfjs;
-const PDFV = { doc: null, pid: null, scale: 1, observer: null, host: null, paper: null, flash: null };
+const PDFV = { doc: null, pid: null, lang: 'en', scale: 1, observer: null, host: null, paper: null, flash: null };
+const pdfUrl = (pid, lang) => `/api/papers/${enc(pid)}/pdf${lang === 'zh' ? '?lang=zh' : ''}`;
+// only the byte ranges the pages on screen need: over a slow line a whole-file download would hold up the first page
+const openPdf = async (pid, lang) => (await pdfLib()).getDocument({ url: pdfUrl(pid, lang), disableStream: true, disableAutoFetch: true }).promise;
+
+// ---------- EN / 中 switch: the PDFMathTranslate copy made when the paper came in; English until asked ----------
+
+const zhSig = signal(false);
+const pdfLang = (p) => (zhSig.value && p?.zh === 'done' ? 'zh' : 'en');
+const ZH_WHY = { pending: '中文版正在翻译，稍后再来', failed: '这篇的中文翻译失败了' };
+function LangSwitch({ p }) {
+  if (!p?.pdf_path) return null;
+  const lang = pdfLang(p);
+  return html`<div class="seg sm" title=${p.zh === 'done' ? '切换英文原文 / 中文译文' : ZH_WHY[p.zh] || '服务器没装 PDFMathTranslate'}>
+    <button class=${lang === 'en' ? 'on' : ''} onClick=${() => { zhSig.value = false; }}>EN</button>
+    <button class=${lang === 'zh' ? 'on' : ''} disabled=${p.zh !== 'done'} onClick=${() => { zhSig.value = true; }}>中</button></div>`;
+}
 async function pdfLib() {
   if (!pdfjs) {
     pdfjs = await import('/vendor/pdfjs/pdf.min.mjs');
@@ -86,10 +103,9 @@ async function pdfLib() {
 }
 const pageDiv = (n) => PDFV.host?.querySelector(`.pdf-page[data-page="${n}"]`);
 
-async function mountPdf(host, pid, page = 1) {
-  const lib = await pdfLib();
-  const doc = PDFV.pid === pid && PDFV.doc ? PDFV.doc : await lib.getDocument(`/api/papers/${enc(pid)}/pdf`).promise;
-  Object.assign(PDFV, { doc, pid, host });
+async function mountPdf(host, pid, page = 1, lang = 'en') {
+  const doc = PDFV.pid === pid && PDFV.lang === lang && PDFV.doc ? PDFV.doc : await openPdf(pid, lang);
+  Object.assign(PDFV, { doc, pid, lang, host });
   const base = (await doc.getPage(1)).getViewport({ scale: 1 });
   PDFV.scale = Math.max(0.6, Math.min(2.4, (host.clientWidth - 36) / base.width));
   PDFV.observer?.disconnect();
@@ -98,7 +114,8 @@ async function mountPdf(host, pid, page = 1) {
   host.innerHTML = '';
   for (let n = 1; n <= doc.numPages; n++) {
     const div = document.createElement('div');
-    Object.assign(div.dataset, { page: n, anchorSurface: 'pdf', pid });
+    // pinned passages are checked against the English text, so the translation is read-only
+    Object.assign(div.dataset, lang === 'en' ? { page: n, anchorSurface: 'pdf', pid } : { page: n });
     div.className = 'pdf-page';
     div.style.width = `${base.width * PDFV.scale}px`;
     div.style.height = `${base.height * PDFV.scale}px`;
@@ -109,12 +126,14 @@ async function mountPdf(host, pid, page = 1) {
   if (page > 1) jumpPdf(page);
 }
 
-/** Resolves once the page's canvas and text layer are in place (the same promise for concurrent callers). */
+let drawing = Promise.resolve();
+/** Resolves once the page's canvas and text layer are in place (the same promise for concurrent callers).
+ * One page at a time, in the order they came on screen: a neighbour's huge figure must not hold up the page being read. */
 function renderPage(n) {
   const div = pageDiv(n);
   if (!div) return Promise.resolve();
   div.dataset.rendered = '1';
-  div.rendering ||= drawPage(div, n);
+  div.rendering ||= drawing = drawing.catch(() => {}).then(() => div.isConnected && drawPage(div, n));
   return div.rendering;
 }
 
@@ -170,13 +189,13 @@ function markPage(n) {
 }
 const markAllPdf = () => PDFV.host?.querySelectorAll('.pdf-page[data-rendered]').forEach((d) => markPage(+d.dataset.page));
 
-function PdfView({ pid, page, wide }) {
+function PdfView({ pid, page, wide, lang }) {
   const host = useRef();
   const [error, setError] = useState(null);
   useEffect(() => {
     const top = PDFV.host === host.current ? [...host.current.querySelectorAll('.pdf-page')].find((d) => d.getBoundingClientRect().bottom > 80) : null;
-    mountPdf(host.current, pid, top ? +top.dataset.page : page || 1).catch((e) => setError(e.message));
-  }, [pid, wide]);
+    mountPdf(host.current, pid, top ? +top.dataset.page : page || 1, lang).catch((e) => setError(e.message));
+  }, [pid, wide, lang]);
   if (error) return html`<div class="pdf-missing">PDF 打不开：${error}</div>`;
   return html`<div class="pdfv" id="pdfv" ref=${host}><div class="pdf-loading"><span class="spin"></span>正在打开 PDF…</div></div>`;
 }
@@ -319,12 +338,13 @@ export function Reader() {
       ${p.pdf_path && p.outline?.length ? html`<select class="toc" title="跳到原文的某一节" onChange=${(e) => { const [pg, ...t] = e.target.value.split('|'); e.target.value = ''; if (pg) jumpPdf(+pg, t.join('|')); }}>
         <option value="">原文目录…</option>${p.outline.map((s) => html`<option value=${`${s.page}|${s.title}`}>${'　'.repeat(Math.min(s.level, 3) - 1)}${short(s.title, 48)}　p.${s.page}</option>`)}</select>` : null}
       ${p.url ? html`<a class="btn sm ghost" href=${href(p.url)} target="_blank" rel="noopener">${idLabel(p.id).split(' ')[0]} ↗</a>` : null}
+      <${LangSwitch} p=${p} />
       <button class="btn sm ghost" onClick=${() => { wideSig.value = !wideSig.value; localStorage.setItem('p2b.wide', wideSig.value ? '1' : '0'); }}>调整面板宽度</button>
     </div>
     <div class=${`reader-body ${wideSig.value ? 'wide' : ''}`}>
-      ${p.pdf_path ? html`<${PdfView} pid=${p.id} page=${+pageArg || view.page || 1} wide=${wideSig.value} />`
+      ${p.pdf_path ? html`<${PdfView} pid=${p.id} page=${+pageArg || view.page || 1} wide=${wideSig.value} lang=${pdfLang(p)} />`
         : html`<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br /><${PdfButton} paper=${p.id} /></div></div>`}
-      <div class="panel"><div class="tabs" id="tabs">${tabs.map(([k, label, n]) => html`<button class=${`tab ${tab === k || (k === 'anchors' && tab === 'anchor') ? 'on' : ''}`} onClick=${() => setTab(k)}>${label}${n ? html`<span class="n">${n}</span>` : null}</button>`)}</div>
+      <div class="panel"><${DockGrip} /><div class="tabs" id="tabs">${tabs.map(([k, label, n]) => html`<button class=${`tab ${tab === k || (k === 'anchors' && tab === 'anchor') ? 'on' : ''}`} onClick=${() => setTab(k)}>${label}${n ? html`<span class="n">${n}</span>` : null}</button>`)}</div>
         <div class=${`panel-body ${chatty ? 'chatwrap' : ''}`} id="panel">${body}</div></div>
     </div></div>`;
 }
@@ -345,13 +365,13 @@ registerAction('cite', (el) => {
 
 /** Its own PDF.js document and pages, so it never disturbs the reader's; the quoted line flashes once its page draws.
  * Pages follow the window's width: stretched at once while resizing, redrawn sharp once it settles. */
-function PeekPdf({ pid, page, q }) {
+function PeekPdf({ pid, page, q, lang }) {
   const host = useRef();
   const [error, setError] = useState(null);
   useEffect(() => {
     let doc, io, ro, timer, dead = false, flashed = !q;
     (async () => {
-      doc = await (await pdfLib()).getDocument(`/api/papers/${enc(pid)}/pdf`).promise;
+      doc = await openPdf(pid, lang);
       const base = (await doc.getPage(1)).getViewport({ scale: 1 }), el = host.current;
       const fitScale = () => Math.max(0.5, (el.clientWidth - 24) / base.width);
       let scale = fitScale();
@@ -396,25 +416,37 @@ function PeekPdf({ pid, page, q }) {
       ro.observe(el);
     })().catch((e) => !dead && setError(e.message));
     return () => { dead = true; clearTimeout(timer); ro?.disconnect(); io?.disconnect(); doc?.destroy(); };
-  }, [pid, page, q]);
+  }, [pid, page, q, lang]);
   if (error) return html`<div class="pdf-missing">PDF 打不开：${error}</div>`;
   return html`<div class="peek-pdf" ref=${host}><div class="pdf-loading"><span class="spin"></span>正在打开 PDF…</div></div>`;
 }
 
-export function Peek() {
-  const pk = peek.value;
-  const [p, reload, err] = useLive(pk ? `/api/papers/${enc(pk.pid)}` : null, { poll: false });
+export const Peek = () => peek.value.map((pk, i) => html`<${PeekWindow} key=${pk.id} pk=${pk} i=${i} />`);
+
+/** Click (or a fresh open) brings that window forward. 80–84 stays under modals at 90; at most five windows. */
+const PEEK_Z = 80;
+function raisePeek(el) {
+  if (!el) return;
+  const rest = [...document.querySelectorAll('.peek')].filter((n) => n !== el)
+    .sort((a, b) => (+a.style.zIndex || 0) - (+b.style.zIndex || 0));
+  [...rest, el].forEach((n, i) => { n.style.zIndex = PEEK_Z + i; });
+}
+
+function PeekWindow({ pk, i }) {
+  const set = (next) => { peek.value = peek.value.flatMap((x) => (x.id !== pk.id ? [x] : next ? [{ ...next, id: pk.id }] : [])); };
+  const [p, reload, err] = useLive(`/api/papers/${enc(pk.pid)}`, { poll: false });
   const [pos, setPos] = useState(null);
   const [drag, setDrag] = useState(null);
   const [adding, setAdding] = useState(null);
-  const mine = adding && adding.pid === pk?.pid ? adding : null;
+  const root = useRef();
+  const mine = adding && adding.pid === pk.pid ? adding : null;
+  useEffect(() => { raisePeek(root.current); }, [pk]);
   useEffect(() => {
-    if (!pk || mine || !(err || p?.listed === false)) return;
+    if (mine || !(err || p?.listed === false)) return;
     setAdding({ pid: pk.pid });
-    addPaper(pk.pid).then((np) => { if (np.id !== pk.pid) peek.value = { ...pk, pid: np.id }; else reload(); })
+    addPaper(pk.pid).then((np) => { if (np.id !== pk.pid) set({ ...pk, pid: np.id }); else reload(); })
       .catch((e) => setAdding({ pid: pk.pid, error: e.message }));
-  }, [pk?.pid, err, p?.listed]);
-  if (!pk) return null;
+  }, [pk.pid, err, p?.listed]);
   const down = (e) => {
     if (e.target.closest('button')) return;
     const r = e.currentTarget.parentElement.getBoundingClientRect();
@@ -422,15 +454,16 @@ export function Peek() {
     setDrag({ dx: e.clientX - r.left, dy: e.clientY - r.top });
   };
   const move = (e) => drag && setPos({ x: Math.max(0, e.clientX - drag.dx), y: Math.max(0, e.clientY - drag.dy) });
-  const full = () => { peek.value = null; openReader(pk.pid, { tab: 'card', page: pk.page, q: pk.q }); };
-  return html`<div class="peek" role="dialog" aria-label="速览论文" style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : null}>
+  const full = () => { set(null); openReader(pk.pid, { tab: 'card', page: pk.page, q: pk.q }); };
+  // new windows cascade so the ones under them stay grabbable
+  return html`<div class="peek" role="dialog" aria-label="速览论文" ref=${root} onPointerDown=${(e) => raisePeek(e.currentTarget)} style=${pos ? { left: `${pos.x}px`, top: `${pos.y}px`, right: 'auto' } : { top: `${64 + i * 28}px`, right: `${24 + i * 28}px` }}>
     <div class="peek-top" onPointerDown=${down} onPointerMove=${move} onPointerUp=${() => setDrag(null)}>
       <b title=${p?.title}>${p ? short(p.title, 60) : '…'}</b>${pk.page ? html`<span class="hint">p.${pk.page}</span>` : null}<span class="grow"></span>
-      <button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => { peek.value = null; }}>×</button></div>
+      <${LangSwitch} p=${p} /><button class="btn sm ghost" onClick=${full}>在阅读器打开</button><button class="btn sm ghost" aria-label="关闭" onClick=${() => set(null)}>×</button></div>
     ${pk.q ? html`<div class="peek-q hint" title=${pk.q}>找这句：${short(pk.q, 90)}</div>` : null}
     ${mine?.error && !p ? html`<div class="pdf-missing"><div style="text-align:center">收不下这篇论文：${mine.error}<br />${pk.pid.startsWith('arxiv:') ? html`<a class="btn sm ghost" href=${`https://arxiv.org/abs/${pk.pid.slice(6)}`} target="_blank" rel="noopener">在 arXiv 打开</a>` : null}</div></div>`
       : !p ? html`<div class="pdf-loading"><span class="spin"></span>${mine ? '这篇不在论文库里，正在收下（拉取元数据和 PDF）…' : ''}</div>`
-      : p.pdf_path ? html`<${PeekPdf} pid=${pk.pid} page=${pk.page} q=${pk.q} />`
+      : p.pdf_path ? html`<${PeekPdf} pid=${pk.pid} page=${pk.page} q=${pk.q} lang=${pdfLang(p)} />`
       : html`<div class="pdf-missing"><div style="text-align:center">还没有 PDF<br /><${PdfButton} paper=${p.id} /></div></div>`}</div>`;
 }
 
@@ -505,6 +538,7 @@ export function SelectionPopup() {
       ${ans.sources?.length ? html`<div class="hint">网上来源：${ans.sources.map((x) => html`<a href=${x.url} target="_blank">${short(x.title || x.url, 30)}</a>　`)}</div>` : null}`
     : ans.error ? html`<span class="hint" style="color:var(--red)">${ans.error}</span>` : html`<span class="spin"></span> <span class="hint">${ans.web ? '在网上查…' : '几秒内回答…'}</span>`}</div>` : null;
   const keep = (e) => { if (e.target.tagName !== 'INPUT') e.preventDefault(); };
+  const noteBtn = html`<button class="btn sm ghost" title="先存进快速便签，攒够了再一起带去讨论" onClick=${() => { addNote(ctx.quote, sourceOf(ctx.range.commonAncestorContainer)); done(); }}>存便签</button>`;
   const field = (ph) => html`<form onSubmit=${(e) => { e.preventDefault(); quick(false); }}><input ref=${input} value=${v} onInput=${(e) => setV(e.target.value)} placeholder=${ph} /></form>`;
   const quickBtn = html`<button class="btn sm primary" title="几秒内在这里回答，只看这一页附近的内容，不保存" onClick=${() => quick(false)}>快速问</button>
     ${appState.value?.agent?.search_api ? html`<button class="btn sm" title="可以上网搜索补充，答案带网上来源，不保存（约 5 秒）" onClick=${() => quick(true)}>上网查</button>` : null}`;
@@ -525,7 +559,7 @@ export function SelectionPopup() {
       <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>${field('问点什么，回车快速回答')}${answer}
       <div class="selpop-acts">${quickBtn}
         ${agentOn.value ? html`<button class="btn sm" title="新开一段讨论，让 agent 查这个研究的全部资料来回答" onClick=${deepen}>${ans ? '让 agent 深入' : '新开讨论问 agent'}</button>` : null}
-        <button class="btn sm ghost" title="把这段引用放进右侧讨论的输入框，接着写想怎么改" onClick=${() => { quoting.value = { scope: ctx.scope, text: ctx.quote }; done(); }}>加入讨论</button></div></div>`;
+        <button class="btn sm ghost" title="把这段引用放进右侧讨论的输入框，接着写想怎么改" onClick=${() => { quoting.value = { scope: ctx.scope, text: ctx.quote }; done(); }}>加入讨论</button>${noteBtn}</div></div>`;
   }
   const discuss = async () => {
     const c = ctx, text = question();
@@ -537,16 +571,9 @@ export function SelectionPopup() {
       if (error) toast(`划词已保存，但没能发出问题：${error}`, null, null, true);
     } catch (e) { fail(e); }
   };
-  const jot = async () => {
-    if (!v.trim()) { input.current.placeholder = '先写下你的想法，再点“记下来”'; input.current.focus(); return; }
-    const c = ctx, note = v.trim();
-    done();
-    try { await post('/api/threads', { scope: `paper:${c.pid}`, text: `关于「${short(c.quote, 120)}」：${note}` }); toast('已记下，开了一段关于这篇的讨论'); refresh(); } catch (e) { fail(e); }
-  };
   return html`<div id="selpop" ref=${box} onMouseDown=${keep}>
     <div class="selpop-quote">「${short(ctx.quote, 48)}」</div>${field('围绕这段问点什么，回车快速回答')}${answer}
-    <div class="selpop-acts">${quickBtn}<button class="btn sm" title="新开一段关于这段的讨论，让 agent 翻全文、查库里别的论文来回答" onClick=${discuss}>${ans ? '让 agent 深入' : '讨论这段'}</button>
-      <button class="btn sm ghost" title="只记下，不叫 agent 回答" onClick=${jot}>记下来</button></div></div>`;
+    <div class="selpop-acts">${quickBtn}<button class="btn sm" title="新开一段关于这段的讨论，让 agent 翻全文、查库里别的论文来回答" onClick=${discuss}>${ans ? '让 agent 深入' : '讨论这段'}</button>${noteBtn}</div></div>`;
 }
 
 // ---------- figure lightbox ----------

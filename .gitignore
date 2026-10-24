@@ -1,4 +1,5 @@
 .venv/
+.venv-pdf2zh/
 __pycache__/
 *.pyc
 .DS_Store

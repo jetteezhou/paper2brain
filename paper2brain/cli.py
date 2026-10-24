@@ -1,8 +1,10 @@
 """p2b: the only way the librarian agent writes to the library. Every command prints JSON."""
 import argparse
+import base64
 import json
 import mimetypes
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -60,6 +62,10 @@ def run(args):
         store.link(args.capture_id, pid, "agent", evidence=args.evidence)
         store.update_capture(args.capture_id, status="mapped")
         return {"linked": pid, "has_fulltext": bool(store.pages(pid))}
+    if cmd == "alias":
+        pid = to_pid(args.paper)
+        store.set_aliases(pid, [*((store.get_paper(pid, with_anchors=False) or {}).get("aliases") or []), args.name])
+        return {"aliases": store.get_paper(pid, with_anchors=False)["aliases"]}
     if cmd == "unlink":
         store.unlink(args.capture_id, to_pid(args.paper), "agent")
         return {"unlinked": True}
@@ -83,6 +89,12 @@ def run(args):
         pid = to_pid(args.paper)
         store.set_topics(pid, args.paths, "agent")
         return {"paper": pid, "topics": args.paths}
+    if cmd == "map":
+        if args.action == "show":
+            return store.get_map()
+        if not args.file:
+            raise rules.Rejected("用法：./p2b map put --file /tmp/map.json")
+        return store.put_map(_read_json(args.file))
     if cmd == "threads":
         return [{k: t[k] for k in ("id", "parent_id", "title", "first", "scope", "scope_title", "n", "last_at")}
                 for t in store.recent_threads()]
@@ -121,6 +133,8 @@ def run(args):
     if cmd == "diagram":
         if args.action == "list":
             return [{**d, "html": str(store.diagram_dir(args.id, d["name"]) / "figure.html")} for d in store.diagrams(args.id)]
+        if args.action == "chart":
+            return diagram.render_chart(args.id, args.name)
         return diagram.render(args.id, args.name, args.file, args.title, args.caption, args.kind)
     if cmd == "experiment":
         if args.action == "add":
@@ -159,8 +173,9 @@ def run(args):
             return {"filled": len(cells)}
         draft = draft if isinstance(draft, dict) else {}
         named = {r["paper"]: r["name"] for r in ((x.get("related") or {}).get("comparison") or {}).get("rows") or []}
-        words = lambda pid: " ".join([(store.get_paper(pid, with_anchors=False) or {}).get("title") or "", named.get(pid, ""),
-                                      *store.pages(pid)[:2]])  # noqa: E731
+        def words(pid):
+            p = store.get_paper(pid, with_anchors=False) or {}
+            return " ".join([p.get("title") or "", named.get(pid, ""), *(p.get("aliases") or []), *store.pages(pid)[:2]])
         design = rules.validate_setup(draft.get("setup"), store.paper_ids(), words)
         figures = rules.validate_figures(draft.get("figures"), "\n".join(filter(None, (x.get("body") or {}).values())), design)
         rules.check_coverage(design, figures)
@@ -180,6 +195,8 @@ def run(args):
             raise rules.Rejected("这个研究没有关联 Overleaf 项目")
         if args.action == "pull":
             overleaf.pull(pid)
+        if args.action == "compile":
+            return overleaf.compile(pid)
         return {"path": str(overleaf.local_dir(pid)), "unpushed_files": overleaf.changes(pid)["files"]}
     if cmd == "research":
         if args.action == "list":
@@ -239,6 +256,70 @@ def run(args):
     if cmd == "serve":
         from . import server
         server.serve(args.host, args.port)
+    if cmd == "guide":
+        # the agent's working specs; a member's Mac (paper2brain-client) writes them into its librarian/
+        folder = Path(__file__).resolve().parent.parent / "librarian"
+        return {"docs": {p.name: p.read_text() for p in sorted(folder.glob("*.md"))}}
+    if cmd == "admin":
+        from . import accounts
+        if not store.multi():
+            raise rules.Rejected("admin 只用在多用户服务器上（设置了 P2B_ROOT）")
+        return {"link": f"{args.url.rstrip('/')}/join.html#{accounts.invite()}", "note": f"一次有效，{accounts.INVITE_DAYS} 天内用"}
+
+
+# Run on the server for an agent elsewhere: nothing that serves, reads this machine's inbox or administers accounts.
+# ponytail: Overleaf checkouts live on the server, where a remote agent cannot edit them; it stays a web-only feature.
+REMOTE_BLOCKED = {"serve", "inbox", "admin", "overleaf"}
+
+
+class _Help(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    """Errors and --help come back as values instead of exiting the server."""
+    def error(self, message):
+        raise rules.Rejected(f"{self.prog}：{message}")
+
+    def print_help(self, file=None):
+        raise _Help(self.format_help())
+
+
+def run_remote(argv, files):
+    """./p2b sent from an agent's machine (paper2brain-client), run in the library chosen for it. files maps each --file /
+    --image value the client named ("-" for stdin) to its base64 content; no other path on this machine is read.
+    Returns (output, {server path: base64}) for the files in the output the agent needs to look at."""
+    with tempfile.TemporaryDirectory() as tmp:
+        argv = [str(a) for a in argv]
+        for i in range(1, len(argv)):
+            if argv[i - 1] in ("--file", "--image") and argv[i] in files:
+                path = Path(tmp) / f"{i}-{Path(argv[i]).name or 'stdin'}"
+                path.write_bytes(base64.b64decode(files[argv[i]]))
+                argv[i] = str(path)
+        try:
+            args = parser(_Parser).parse_args(argv)
+        except _Help as h:
+            return {"help": str(h)}, {}
+        if args.cmd in REMOTE_BLOCKED:
+            raise rules.Rejected(f"./p2b {args.cmd} 不能在多用户服务器上运行")
+        for p in [getattr(args, "file", None), *(getattr(args, "image", None) or [])]:
+            if p is not None and Path(tmp).resolve() not in Path(p).resolve().parents:
+                raise rules.Rejected(f"{p} 没有随命令一起发来")
+        out = run(args)
+    return out, _out_files(args, out)
+
+
+def _out_files(args, out):
+    """Figure images and diagrams the agent opens to check its work, from this library only."""
+    if args.cmd == "figures":
+        paths = [f["image"] for f in out["figures"]]
+    elif args.cmd == "diagram":
+        paths = [d["html"] for d in out] if args.action == "list" else [out["png"]]
+    else:
+        return {}
+    lib = store.home().resolve()
+    return {p: base64.b64encode(Path(p).read_bytes()).decode() for p in paths
+            if Path(p).is_file() and lib in Path(p).resolve().parents}
 
 
 def _thread_brief(tid):
@@ -250,8 +331,8 @@ def _thread_brief(tid):
                          for m in t["messages"]]}
 
 
-def parser():
-    p = argparse.ArgumentParser(prog="p2b", description="paper2brain 论文库命令行")
+def parser(cls=argparse.ArgumentParser):
+    p = cls(prog="p2b", description="paper2brain 论文库命令行")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("capture", help="收下一条内容（按 --id 幂等）")
@@ -273,6 +354,9 @@ def parser():
     s.add_argument("capture_id")
     s.add_argument("paper")
     s.add_argument("--evidence", required=True, help="为什么判定是这篇")
+    s = sub.add_parser("alias", help="给论文加一个别名（没有自己论文的版本或 checkpoint，如 GR00T N1.7 之于 GR00T N1）；只在用户明确说过时用")
+    s.add_argument("paper")
+    s.add_argument("name")
     s = sub.add_parser("unlink")
     s.add_argument("capture_id")
     s.add_argument("paper")
@@ -293,6 +377,10 @@ def parser():
     s.add_argument("--parent", help="propose：放在哪个一级主题下（不写就是一级主题）")
     s.add_argument("--why", help="propose：为什么现有主题放不下")
     s.add_argument("--paper", dest="paper_for", action="append", default=[], help="propose：采用后归进去的论文")
+
+    s = sub.add_parser("map", help="讨论地图：问题和结论，不是讨论树（见 librarian/discuss.md）")
+    s.add_argument("action", choices=["show", "put"])
+    s.add_argument("--file", help="put：JSON 文件，- 表示标准输入")
 
     sub.add_parser("threads", help="讨论树：每段讨论的 id、上级（parent_id）、标题或开头一句、范围、最近活动")
     s = sub.add_parser("thread", help="讨论：show 查看消息、上级和下级 / title 起标题 / move 挂到另一段讨论下面")
@@ -321,11 +409,11 @@ def parser():
     s.add_argument("--repo", required=True)
     s.add_argument("--paper", required=True)
     s.add_argument("--file", required=True)
-    s = sub.add_parser("diagram", help="论文插图（方法框架图、动机图）：render 把 HTML/SVG 渲染成论文用的 PDF 和预览 PNG；list 看已有的图（见 librarian/diagram.md）")
-    s.add_argument("action", choices=["render", "list"])
+    s = sub.add_parser("diagram", help="论文插图（方法框架图、动机图）：render 把 HTML/SVG 渲染成论文用的 PDF 和预览 PNG；chart 把实验页某张预期图表连数据导成 PDF/PNG；list 看已有的图（见 librarian/diagram.md）")
+    s.add_argument("action", choices=["render", "list", "chart"])
     s.add_argument("id", help="研究 id")
     s.add_argument("--kind", choices=["method", "motivation"], help="method 方法框架图（默认），motivation 动机图；改已有的图时不用写")
-    s.add_argument("--name", help="图的名字（小写英文和连字符），同名覆盖")
+    s.add_argument("--name", help="render：图的名字（小写英文和连字符），同名覆盖；chart：预期图表的 id（见 figures-plan show）")
     s.add_argument("--file", help="HTML 文件")
     s.add_argument("--title", help="简短的中文名，例如“整体框架图”")
     s.add_argument("--caption", help="论文图注（英文）")
@@ -358,8 +446,8 @@ def parser():
     s.add_argument("id", help="研究 id")
     s.add_argument("--file")
     s.add_argument("--base-rev", type=int)
-    s = sub.add_parser("overleaf", help="研究关联的 Overleaf 项目：show 本地目录和未推送的改动 / pull 拉取最新（有未推送改动时拒绝）")
-    s.add_argument("action", choices=["show", "pull"])
+    s = sub.add_parser("overleaf", help="研究关联的 Overleaf 项目：show 本地目录和未推送的改动 / pull 拉取最新（有未推送改动时拒绝）/ compile 本地编译验证改动能过")
+    s.add_argument("action", choices=["show", "pull", "compile"])
     s.add_argument("id", help="研究 id")
 
     s = sub.add_parser("research", help="研究：list / add 新建（构思中）/ show / link 关联素材 / propose 提交修改稿待用户确认")
@@ -391,6 +479,10 @@ def parser():
     s = sub.add_parser("serve", help="启动 Web 界面")
     s.add_argument("--host", help="默认：设了口令时也对内网开放（0.0.0.0），否则只开本机")
     s.add_argument("--port", type=int, default=8765)
+    sub.add_parser("guide", help="librarian/ 工作规范的当前版本（团队版：成员 Mac 上的 ./p2b guide 把它们写到本地）")
+    s = sub.add_parser("admin", help="多用户服务器：invite 生成一个新账号的邀请链接（在服务器上运行）")
+    s.add_argument("action", choices=["invite"])
+    s.add_argument("--url", required=True, help="网页地址，例如 https://p2b.example.com")
     return p
 
 

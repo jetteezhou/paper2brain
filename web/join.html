@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>加入 paper2brain</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+</head>
+<body>
+  <main style="max-width:420px;margin:12vh auto;padding:0 20px">
+    <h2><img src="/logo.svg" alt="" width="28" style="vertical-align:-6px"> paper2brain</h2>
+    <form id="join" hidden>
+      <p class="hint" id="what">用这个邀请链接加入。新账号填名字和密码，以后用它们登录。</p>
+      <div id="fresh">
+        <input name="name" id="name" placeholder="名字（登录用，也是共享空间里别人看到的）" maxlength="40" aria-label="名字" autocomplete="username" style="width:100%;margin-bottom:10px">
+        <input name="password" id="password" type="password" placeholder="密码（至少 8 位）" aria-label="密码" autocomplete="new-password" style="width:100%;margin-bottom:10px">
+      </div>
+      <button class="btn primary">加入</button>
+    </form>
+    <form id="login" hidden>
+      <input name="name" placeholder="登录名" maxlength="40" aria-label="登录名" autocomplete="username" required style="width:100%;margin-bottom:10px">
+      <input name="password" type="password" placeholder="密码" aria-label="密码" autocomplete="current-password" required style="width:100%;margin-bottom:10px">
+      <button class="btn primary">登录</button>
+      <p class="hint">还没有账号：用别人发给你的邀请链接打开。</p>
+    </form>
+    <p class="hint" id="error" role="alert" style="color:#c5221f"></p>
+  </main>
+  <script>
+    // the code rides in the #fragment, which browsers never send to the server or its logs
+    const code = location.hash.slice(1), form = document.getElementById('join'), login = document.getElementById('login'), err = document.getElementById('error');
+    if (!code) login.hidden = false;
+    else fetch('/api/state').then((r) => {
+      form.hidden = false;
+      if (r.ok) { document.getElementById('fresh').hidden = true; document.getElementById('what').textContent = '你已登录：点“加入”接受这个邀请。'; }
+    });
+    const send = async (url, body) => {
+      err.textContent = '';
+      try {
+        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) location.replace('/'); else err.textContent = d.error || `出错了（${r.status}）`;
+      } catch (e) { err.textContent = `连不上服务器：${e.message}`; }
+    };
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      send('/api/join', { code, name: document.getElementById('name').value, password: document.getElementById('password').value });
+    };
+    login.onsubmit = (e) => {
+      e.preventDefault();
+      send('/api/login', { name: login.elements.name.value, password: login.elements.password.value });
+    };
+  </script>
+</body>
+</html>

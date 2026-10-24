@@ -37,7 +37,7 @@
 ## 提交
 
 ```json
-{"groups": [{"id": "保留原有方向的 id；新方向省略", "name": "方向名", "papers": ["arxiv:2410.24164", "..."], "text": "论文里的段落（Markdown，带引用）", "diff": "我们的区别，一句话"}],
+{"groups": [{"id": "保留原有方向的 id；新方向省略", "name": "方向名", "papers": ["arxiv:2410.24164", "..."], "text": "论文里的段落（Markdown，带引用；复杂表格可直接写 HTML <table>，支持 colspan/rowspan）", "diff": "我们的区别，一句话"}],
  "comparison": {"columns": ["维度1", "维度2"], "rows": [{"paper": "arxiv:2410.24164", "name": "π0", "cells": ["✓", "仅仿真"]}, {"paper": "ours", "name": "我们的方法名", "cells": ["✗", "真机"]}]},
  "note": "这次改了什么，一句话"}
 ```

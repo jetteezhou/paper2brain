@@ -1,12 +1,13 @@
 // The discussion workbench. Discussions form a tree: each node is a run of messages; a branch grows from a whole
 // discussion or from one of its messages (fork point) and inherits the path above it. Left: the outline (stable
 // order, fold, zoom, drag, Tab / Shift+Tab, j k h l). Right: the river — the path root→current read as one stream
-// with tributaries inline where they fork — or the delta, a living canvas of the whole tree (zoom, pan, drag to move).
+// with tributaries inline where they fork — or the map, questions and conclusions the agent distilled.
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
 import { html, get, post, del, ago, short, plain, threadName, live, Md, firstSentence, enc, fit, touch, Mark, readBase64 } from './lib.js';
 import {
   appState, agentOn, useLive, refresh, toast, fail, restoreTrash, openThread, openReader, openCapture, openResearch, highlight, go, quoting,
+  openInSpace, takeSwitchIntent,
 } from './state.js';
 import { researchPicker, openComposer, ResearchChip } from './research.js';
 import { PaperChip } from './papers.js';
@@ -68,21 +69,24 @@ const joinResearch = (t, paperId) => researchPicker({
   links: [{ kind: 'thread', ref: t.id }, ...(paperId ? [{ kind: 'paper', ref: paperId }] : [])],
 });
 
-/** One line that opens a new discussion of a scope with what the user wrote; nobody is asked to answer. */
+/** One line that opens a new discussion of a scope with what the user wrote, as the first question to the agent
+ * (with the agent off it is only written down). */
 export function JotForm({ scope, placeholder, onDone }) {
   const [v, setV] = useState('');
   const submit = async (e) => {
     e.preventDefault();
     if (!v.trim()) return;
     try {
-      const t = await post('/api/threads', { scope, text: v.trim() });
+      const asking = agentOn.value;
+      const t = await post('/api/threads', asking ? { scope } : { scope, text: v.trim() });
+      if (asking) await post('/api/chat', { scope, text: v.trim(), thread_id: t.id });
       setV('');
-      toast('已记下，开了一段新讨论', '去讨论', () => openThread(t.scope, t.id));
+      if (!asking) toast('已记下，开了一段新讨论', '去讨论', () => openThread(t.scope, t.id));
       refresh();
       onDone?.(t);
     } catch (err) { fail(err); }
   };
-  return html`<form class="add-line" onSubmit=${submit}><input value=${v} onInput=${(e) => setV(e.target.value)} placeholder=${placeholder} /><button class="btn sm">记下</button></form>`;
+  return html`<form class="add-line" onSubmit=${submit}><input value=${v} onInput=${(e) => setV(e.target.value)} placeholder=${placeholder} /><button class="btn sm">${agentOn.value ? '发送' : '记下'}</button></form>`;
 }
 
 // ---------- the chat: one discussion read as the whole path from the root ----------
@@ -122,9 +126,9 @@ function Msg({ m, t, onFork, shelf }) {
     researchPicker({ heading: '把这段讨论加入研究', title: firstSentence(s), summary: short(s, 300),
       links: [{ kind: 'message', ref: m.id }, ...(k === 'paper' ? [{ kind: 'paper', ref: ref2 }] : [])], topics: k === 'topic' ? [ref2] : [] });
   };
-  const acts = html`${(m.research || []).map((x) => html`<${ResearchChip} x=${x} />`)}
+  const acts = onFork ? html`${(m.research || []).map((x) => html`<${ResearchChip} x=${x} />`)}
     <button class="btn sm ghost" onClick=${addToResearch} title="作为素材加入研究">加入研究</button>
-    <button class="btn sm ghost" onClick=${() => onFork(m)} title="从这条消息分出一段新讨论，带着到这里为止的上下文">从这里分叉</button>`;
+    <button class="btn sm ghost" onClick=${() => onFork(m)} title="从这条消息分出一段新讨论，带着到这里为止的上下文">从这里分叉</button>` : null;
   const forks = shelf !== undefined ? shelf
     : m.forks?.length ? html`<div class="forks">↳ 从这里分出：${m.forks.map((f) => html`<a href="#" onClick=${(e) => { e.preventDefault(); openThread(f.scope, f.id); }}>${short(threadName(f), 30)}</a>`)}</div>` : null;
   if (m.role === 'user') {
@@ -157,6 +161,7 @@ function TitleLine({ t: thread }) {
   const [editing, setEditing] = useState(false);
   const [v, setV] = useState('');
   const t = { ...thread, first: thread.messages.find((m) => m.role === 'user')?.text };
+  if (t.space) return html`<div class="tree-title"><b>${t.title || threadName(t)}</b></div>`; // read through from a space: no renaming here
   const save = async (e) => {
     e.preventDefault();
     try { await post(`/api/threads/${enc(t.id)}`, { title: v }); setEditing(false); toast('已保存标题'); refresh(); } catch (err) { fail(err); }
@@ -170,7 +175,7 @@ function TitleLine({ t: thread }) {
     <button class="btn sm ghost" onClick=${() => { setV(threadName(t)); setEditing(true); }}>改标题</button></div>`;
 }
 
-/** The input every discussion ends in: Enter sends to the agent, ⌥Enter (or the button) only jots it down. */
+/** The input every discussion ends in: Enter sends to the agent (with the agent off, only writes it down). */
 export function Composer({ t, reload, draft, setDraft, input }) {
   const on = agentOn.value;
   const [imgs, setImgs] = useState([]);
@@ -201,6 +206,14 @@ export function Composer({ t, reload, draft, setDraft, input }) {
     try { await post('/api/chat', { scope: t.scope, thread_id: t.id, model, redo: true }); setChosen(null); reload(); refresh(); } catch (e) { fail(e); }
   };
   useEffect(() => fit(input.current), [draft]);
+  // a quote with no scope (from the notepad) goes to whichever discussion is on screen
+  useEffect(() => {
+    const q = quoting.value;
+    if (!q || (q.scope && q.scope !== t.scope)) return;
+    quoting.value = null;
+    setDraft((d) => `${d ? d.trimEnd() + '\n' : ''}${q.raw ? q.text : `「${q.text}」\n`}`);
+    setTimeout(() => { const el = input.current; el?.focus(); el?.setSelectionRange(el.value.length, el.value.length); });
+  }, [quoting.value, t.scope]);
   const pick = (e) => { addImgs([...e.target.files]); e.target.value = ''; };
   return html`<form class="chat-input" onSubmit=${(e) => { e.preventDefault(); send(on); }}
     onDragOver=${(e) => on && e.preventDefault()}
@@ -210,17 +223,17 @@ export function Composer({ t, reload, draft, setDraft, input }) {
     ${on ? html`<label class="btn ghost chat-attach" title="附图片（也可以直接粘贴或拖进来），最多 5 张">＋<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden onChange=${pick} /></label>` : null}
     <textarea rows="1" ref=${input} value=${draft} onInput=${(e) => setDraft(e.target.value)}
       onPaste=${(e) => { const fs = [...(e.clipboardData?.files || [])]; if (on && fs.length) { e.preventDefault(); e.stopPropagation(); addImgs(fs); } }}
-      onKeyDown=${(e) => { if (e.key === 'Enter' && !e.isComposing && (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch))) { e.preventDefault(); send(on && !e.altKey); } }}
-      placeholder=${touch ? (on ? '问点什么…' : 'Agent 未连接：先记下，连上后再接着聊') : on ? '问点什么… 回车发送，⌥回车只记下，Shift+回车换行' : 'Agent 未连接：回车只记下，连上后再接着聊'}></textarea>
+      onKeyDown=${(e) => { if (e.key === 'Enter' && !e.isComposing && (e.metaKey || e.ctrlKey || (!e.shiftKey && !touch))) { e.preventDefault(); send(on); } }}
+      placeholder=${on ? '问点什么…' : 'Agent 未连接，先记下来'}
+      title=${on ? (touch ? '点发送' : '回车发送，Shift+回车换行') : 'Agent 未连接：先记下，连上后再接着聊'}></textarea>
     ${on && models ? html`<select class="chat-model" value=${chosen || key(t.model) || ''} onChange=${(e) => setChosen(e.target.value)}
         title=${switchTo ? '下一句会换到这个模型：新开一个 agent，带上前面说过的' : '这段讨论用的模型'}>
       ${t.model ? null : html`<option value="">默认模型</option>`}
       ${t.model && !models.models.some((m) => key(m) === key(t.model)) ? html`<option value=${key(t.model)}>${t.model.id}</option>` : null}
       ${models.models.map((m) => html`<option value=${key(m)}>${m.displayName || m.id}</option>`)}</select>` : null}
+    <span class="grow"></span>
     ${canRedo ? html`<button type="button" class="btn ghost" onClick=${redo}
-      title=${switchTo ? `用 ${switchTo.displayName || switchTo.id} 重新回答上一个问题，替换掉现在的回答` : '重新回答上一个问题，替换掉现在的回答（可以先在左边换个模型）'}>重新生成</button>` : null}
-    ${on ? html`<button type="button" class="btn ghost" title="只记下，不叫 agent 回答" onClick=${() => send(false)}>记下</button>` : null}
-    <button class="btn primary">${on ? '发送' : '记下'}</button></form>`;
+      title=${switchTo ? `用 ${switchTo.displayName || switchTo.id} 重新回答上一个问题，替换掉现在的回答` : '重新回答上一个问题，替换掉现在的回答（可以先在左边换个模型）'}>重新生成</button>` : null}    <button class="btn primary">${on ? '发送' : '记下'}</button></form>`;
 }
 
 /** The opening of an empty discussion: what it is about, plus a few questions to start from. */
@@ -249,13 +262,6 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
   const box = useRef(), input = useRef();
   const n = t?.messages.length || 0;
   useStickToBottom(box, n, t?.id);
-  useEffect(() => {
-    const q = quoting.value;
-    if (!q || q.scope !== t?.scope) return;
-    quoting.value = null;
-    setDraft((d) => `${d ? d.trimEnd() + '\n' : ''}「${q.text}」\n`);
-    setTimeout(() => { const el = input.current; el?.focus(); el?.setSelectionRange(el.value.length, el.value.length); });
-  }, [quoting.value, t?.scope]);
   const switchTo = (id) => { setTid(id); onThread?.(id); };
   if (!t) return html`<div class="chat"><div class="chat-empty"><span class="spin"></span></div></div>`;
   const k = kindOf(t.scope);
@@ -279,23 +285,22 @@ export function Chat({ scope, threadId, onThread, inWorkbench }) {
   const empty = !n && !t.path.length;
 
   return html`<div class="chat">
-    <div class="chat-head">范围：${scopeLabel(t.scope, t.scope_title)}
+    <div class="chat-head"><span class="chat-scope" title=${scopeLabel(t.scope, t.scope_title)}>范围：${scopeLabel(t.scope, t.scope_title)}</span>
       ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(k.length + 1)); }}>有修改稿待你确认 →</a>` : null}
       ${sib.length > 1 ? html`<span class="branch-switch" title=${t.parent_id ? '同一处分出的几个分支' : '这个范围里并列的几段讨论'}>
         <button disabled=${si <= 0} onClick=${() => switchTo(sib[si - 1].id)}>‹</button>${t.parent_id ? '分支' : '讨论'} ${si + 1}/${sib.length}<button disabled=${si >= sib.length - 1} onClick=${() => switchTo(sib[si + 1].id)}>›</button></span>` : null}
       <span class="grow"></span>
       ${inWorkbench ? html`<${ScopeOpen} scope=${t.scope} />` : null}
-      ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${() => branch(null)} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
       ${n || t.path.length ? html`<button class="btn sm ghost" onClick=${() => branch(null, true)} title="同一范围，不带前面的上下文，从头开始">发起新讨论</button>` : null}
       ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => switchTo(t.parent_id || sib.find((s) => s.id !== t.id)?.id || null), () => switchTo(t.id))} />` : null}</div>
-    ${n || t.path.length ? html`<div class="tree-bar">
-      ${t.path.length ? html`<div class="crumbs">${t.path.map((s) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(s.id); }}>${short(threadName(s), 24)}</a><span>›</span>`)}</div>` : null}
-      <${TitleLine} t=${t} />
-      ${t.children.filter((c) => !c.fork_message_id).length ? html`<div class="hint">分出去的：${t.children.filter((c) => !c.fork_message_id).map((c) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(c.id); }}>${short(threadName(c), 30)}</a>　`)}</div>` : null}</div>` : null}
-    ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
     <div class="msgs" ref=${box}>
+      ${n || t.path.length ? html`<div class="tree-bar">
+        ${t.path.length ? html`<div class="crumbs">${t.path.map((s) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(s.id); }}>${short(threadName(s), 24)}</a><span>›</span>`)}</div>` : null}
+        <${TitleLine} t=${t} />
+        ${t.children.filter((c) => !c.fork_message_id).length ? html`<div class="hint">分出去的：${t.children.filter((c) => !c.fork_message_id).map((c) => html`<a href="#" onClick=${(e) => { e.preventDefault(); switchTo(c.id); }}>${short(threadName(c), 30)}</a>　`)}</div>` : null}</div>` : null}
+      ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
       <${Inherited} path=${t.path} />
       ${empty ? html`<${EmptyChat} t=${t} setDraft=${setDraft} input=${input} />`
         : t.messages.map((m) => html`<${Msg} key=${m.id} m=${m} t=${t} onFork=${branch} />`)}
@@ -316,16 +321,22 @@ function Shelf({ forks, nextId, outflow }) {
 
 /** An ancestor reach: dimmer water already flowed through, the forks still visible where they happened. */
 function UpReach({ seg, nextId, onFork }) {
+  const [open, setOpen] = useState(() => innerWidth > 900);
+  useEffect(() => { if (highlight.value && seg.messages.some((m) => m.id === highlight.value)) setOpen(true); }, [highlight.value]);
   const byMid = {};
   for (const c of seg.children || []) if (c.fork_message_id) (byMid[c.fork_message_id] = byMid[c.fork_message_id] || []).push(c);
   const outflow = (seg.children || []).filter((c) => !c.fork_message_id);
-  return html`<div class="reach up">
-    <button class="reach-head" title="溯洄：把这段讨论变成当前" onClick=${() => go('discuss', seg.id)}>⌃ ${short(threadName(seg), 56)}</button>
-    ${seg.messages.map((m) => html`<div key=${m.id} id=${`m-${m.id}`} class=${`up-msg ${m.role}${highlight.value === m.id ? ' flash' : ''}`}>
+  const forks = (seg.children || []).length;
+  return html`<div class=${`reach up ${open ? '' : 'folded'}`}>
+    <div class="reach-bar">
+      <button class="reach-head" title="溯洄：把这段讨论变成当前" onClick=${() => go('discuss', seg.id)}>⌃ ${short(threadName(seg), 56)}</button>
+      <button class="btn sm ghost reach-toggle" onClick=${() => setOpen(!open)}>${open ? '收起上级' : `展开 ${seg.messages.length} 条${forks > 1 ? ` · ${forks} 分支` : ''}`}</button>
+    </div>
+    ${open ? html`${seg.messages.map((m) => html`<div key=${m.id} id=${`m-${m.id}`} class=${`up-msg ${m.role}${highlight.value === m.id ? ' flash' : ''}`}>
       <div class="up-body">${m.role === 'user' ? m.text : html`<${Md} text=${m.text} />`}</div>
-      <button class="btn sm ghost fork-here" title="从这条消息分出一段新讨论" onClick=${() => onFork(m, seg)}>⑂ 分叉</button>
+      ${onFork ? html`<button class="btn sm ghost fork-here" title="从这条消息分出一段新讨论" onClick=${() => onFork(m, seg)}>⑂ 分叉</button>` : null}
       ${byMid[m.id]?.length ? html`<${Shelf} forks=${byMid[m.id]} nextId=${nextId} />` : null}</div>`)}
-    ${outflow.length ? html`<${Shelf} forks=${outflow} nextId=${nextId} outflow />` : null}
+      ${outflow.length ? html`<${Shelf} forks=${outflow} nextId=${nextId} outflow />` : null}` : null}
   </div>`;
 }
 
@@ -365,27 +376,30 @@ function River({ t, reload }) {
   };
 
   return html`<div class="river">
-    <div class="chat-head">范围：${scopeLabel(t.scope, t.scope_title)}
+    <div class="chat-head"><button class="btn sm ghost m-back" onClick=${() => go('discuss')}>← 列表</button>
+      <span class="chat-scope" title=${scopeLabel(t.scope, t.scope_title)}>范围：${scopeLabel(t.scope, t.scope_title)}</span>
       ${t.proposal ? html`<a href="#" class="chip violet" onClick=${(e) => { e.preventDefault(); openResearch(t.scope.slice(k.length + 1)); }}>有修改稿待你确认 →</a>` : null}
       <span class="grow"></span>
+      ${t.space ? html`<span class="chip" title="这段讨论在共享空间里，这里只读">共享 · ${t.space.name}</span>
+        <button class="btn sm primary" onClick=${() => openInSpace(t.space, 'discuss', t.id)}>去「${t.space.name}」继续 →</button>` : html`
       <${ScopeOpen} scope=${t.scope} />
-      ${t.agent_id ? html`<a class="btn sm ghost" href=${`https://cursor.com/agents/${t.agent_id}`} target="_blank">在 Cursor 中继续 ↗</a>` : null}
       ${n && canCompose(k) ? html`<button class="btn sm ghost" onClick=${compose} title="把这段讨论作为素材开始一个研究">开始研究</button>` : null}
       ${n ? html`<button class="btn sm ghost" onClick=${branch} title="在这段讨论下面开一段新的">分出新讨论</button>` : null}
-      ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => go('discuss', t.parent_id || undefined), () => go('discuss', t.id))} />` : null}</div>
-    ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
+      ${n ? html`<${DeleteThread} onClick=${() => removeThread(t, () => go('discuss', t.parent_id || undefined), () => go('discuss', t.id))} />` : null}`}</div>
     <div class="river-flow" ref=${box}>
+      ${papers.length ? html`<div class="scope-papers"><span class="hint">${k === 'find' ? `已入库 ${t.scope_papers.length} 篇` : '论文'}</span>${papers.map((p) => html`<${PaperChip} id=${p.id} title=${p.title} />`)}</div>` : null}
       ${chain.map((seg, i) => i < chain.length - 1
-        ? html`<${UpReach} key=${seg.id} seg=${seg} nextId=${chain[i + 1].id} onFork=${fork} />`
+        ? html`<${UpReach} key=${seg.id} seg=${seg} nextId=${chain[i + 1].id} onFork=${t.space ? null : fork} />`
         : html`<div class="reach now" key=${seg.id}>
           ${n || chain.length > 1 ? html`<div class="reach-now">${chain.length > 1 ? html`<span class="reach-tag">下游 · 当前</span>` : null}<${TitleLine} t=${seg} /></div>` : null}
           ${empty ? html`<${EmptyChat} t=${seg} setDraft=${setDraft} input=${input} />`
-            : seg.messages.map((m) => html`<${Msg} key=${m.id} m=${m} t=${seg} onFork=${(mm) => fork(mm)} shelf=${m.forks?.length ? html`<${Shelf} forks=${m.forks} />` : null} />`)}
+            : seg.messages.map((m) => html`<${Msg} key=${m.id} m=${m} t=${seg} onFork=${t.space ? null : (mm) => fork(mm)} shelf=${m.forks?.length ? html`<${Shelf} forks=${m.forks} />` : null} />`)}
           ${!n && t.path.length ? html`<div class="chat-empty"><b>从这里接着想</b><p class="hint">这段分支带着上面的上下文，问点什么，或者先记一句。</p></div>` : null}
           ${outflow.length ? html`<${Shelf} forks=${outflow} outflow />` : null}
         </div>`)}
     </div>
-    <${Composer} t=${t} reload=${reload} draft=${draft} setDraft=${setDraft} input=${input} /></div>`;
+    ${t.space ? html`<div class="chat-empty"><p class="hint">只读：这段讨论在共享空间「${t.space.name}」里，内容随空间实时更新。要继续讨论，点上面的按钮进入那个空间。</p></div>`
+      : html`<${Composer} t=${t} reload=${reload} draft=${draft} setDraft=${setDraft} input=${input} />`}</div>`;
 }
 
 function RiverLoader({ id }) {
@@ -440,9 +454,9 @@ function Row({ t, depth, sel, onSelect, tree, renaming, setRenaming, drag, setDr
   const k = kindOf(t.scope);
   const over = drag && drag.over === t.id;
   return html`<div class=${`ol-row ${sel ? 'on' : ''} ${over ? 'drop' : ''}`} style=${`padding-left:${10 + depth * 18}px`} data-id=${t.id}
-      draggable=${true} onDragStart=${(e) => { e.dataTransfer.setData('text/x-thread', t.id); e.dataTransfer.effectAllowed = 'move'; setDrag({ id: t.id }); }}
-      onDragOver=${(e) => { if (drag && drag.id !== t.id && !under(tree.byId, t.id, drag.id)) { e.preventDefault(); if (drag.over !== t.id) setDrag({ ...drag, over: t.id }); } }}
-      onDrop=${(e) => { e.preventDefault(); e.stopPropagation(); const id = drag?.id; setDrag(null); if (id && id !== t.id && tree.byId[id].parent_id !== t.id) move(id, t.id, threadName(t)); }}
+      draggable=${!t.space} onDragStart=${(e) => { if (t.space) return; e.dataTransfer.setData('text/x-thread', t.id); e.dataTransfer.effectAllowed = 'move'; setDrag({ id: t.id }); }}
+      onDragOver=${(e) => { if (!t.space && drag && drag.id !== t.id && !under(tree.byId, t.id, drag.id)) { e.preventDefault(); if (drag.over !== t.id) setDrag({ ...drag, over: t.id }); } }}
+      onDrop=${(e) => { e.preventDefault(); e.stopPropagation(); const id = drag?.id; setDrag(null); if (!t.space && id && id !== t.id && tree.byId[id].parent_id !== t.id) move(id, t.id, threadName(t)); }}
       onDragEnd=${() => setDrag(null)}
       onClick=${() => onSelect(t.id)}>
     <span class=${`ol-caret ${kids ? '' : 'leaf'} ${isFolded ? '' : 'open'}`} onClick=${(e) => { e.stopPropagation(); if (kids) setFold(t.id, !isFolded); }}>${kids ? '▸' : ''}</span>
@@ -451,8 +465,8 @@ function Row({ t, depth, sel, onSelect, tree, renaming, setRenaming, drag, setDr
       ${renaming === t.id
         ? html`<form onSubmit=${rename}><input class="ol-rename" value=${v} ref=${(el) => { if (el && !el.dataset.f) { el.dataset.f = 1; el.focus(); el.select(); } }}
             onInput=${(e) => setV(e.target.value)} onBlur=${rename} onKeyDown=${(e) => { if (e.key === 'Escape') { e.stopPropagation(); setRenaming(null); } }} /></form>`
-        : html`<div class="ol-title" onDblClick=${(e) => { e.stopPropagation(); setV(threadName(t)); setRenaming(t.id); }}>${threadName(t)}</div>`}
-      <div class="ol-meta"><span class="chip">${SCOPE_KIND[k] || k}</span>${k !== 'library' && t.scope_title ? html`<span class="src">${short(plain(t.scope_title), 28)}</span>` : null}
+        : html`<div class="ol-title" onDblClick=${(e) => { e.stopPropagation(); if (t.space) return; setV(threadName(t)); setRenaming(t.id); }}>${threadName(t)}</div>`}
+      <div class="ol-meta"><span class="chip">${SCOPE_KIND[k] || k}</span>${t.space ? html`<span class="chip" title="在共享空间「${t.space.name}」里；这里只读，进去才能继续">共享 · ${t.space.name}</span>` : null}${k !== 'library' && t.scope_title ? html`<span class="src">${short(plain(t.scope_title), 28)}</span>` : null}
         <span>${t.n} 条</span><time>${ago(t.last_at)}</time>${kids && isFolded ? html`<span>· ${kids} 个分支</span>` : null}
         ${t.parent_by === 'agent' ? html`<span class="chip violet" title="agent 觉得它接着上一段；点 × 放回顶层">agent 挂的<button class="x" onClick=${(e) => { e.stopPropagation(); move(t.id, null); }}>×</button></span>` : null}</div>
     </div></div>`;
@@ -507,10 +521,10 @@ function Outline({ list, selId, onSelect }) {
 
   return html`<div class="outline" tabIndex="0" ref=${box} onKeyDown=${key}>
     <div class="list-head"><h2>讨论</h2><span class="sub">${list.length ? `${list.length} 段` : ''}</span>
-      <span class="keys"><div class="seg sm"><button class=${pane.value === 'river' ? 'on' : ''} onClick=${() => (pane.value = 'river')}>河流</button>
+      <span class="pane-switch"><div class="seg sm"><button class=${pane.value === 'river' ? 'on' : ''} onClick=${() => (pane.value = 'river')}>河流</button>
         <button class=${pane.value === 'map' ? 'on' : ''} onClick=${() => (pane.value = 'map')}>地图</button></div></span></div>
     <div class="ol-tools">
-      <${JotForm} scope="library" placeholder="记一个想法…（回车，开一段新讨论）" onDone=${(t) => onSelect(t.id)} />
+      <${JotForm} scope="library" placeholder=${agentOn.value ? '问 agent…（回车，开一段新讨论）' : '记一个想法…（回车，开一段新讨论）'} onDone=${(t) => onSelect(t.id)} />
       <div class="scope-bar"><span class="hint">新讨论</span>
         <button class="scope" onClick=${() => post('/api/threads', { scope: 'library' }).then((t) => onSelect(t.id)).catch(fail)}>整个论文库</button>
         <select class="scope" onChange=${(e) => { const s = e.target.value; e.target.value = ''; if (s) post('/api/threads', { scope: s }).then((t) => onSelect(t.id)).catch(fail); }}>
@@ -527,107 +541,193 @@ function Outline({ list, selId, onSelect }) {
   </div>`;
 }
 
-// ---------- the delta: the whole tree as a living canvas — wheel zooms, the water pans, a node dragged onto another re-homes it ----------
+// ---------- the map: questions and conclusions the agent distilled. Threads are sources, not nodes. ----------
 
-function Delta({ list, selId, onSelect }) {
-  const { byId, roots } = useMemo(() => buildTree(list), [list]);
-  const W = 210, H = 54, pos = {};
-  let row = 0, depthMax = 0;
-  const place = (t, d) => {
-    depthMax = Math.max(depthMax, d);
-    if (t.kids.length) { t.kids.forEach((c) => place(c, d + 1)); pos[t.id] = { x: d * W, y: (pos[t.kids[0].id].y + pos[t.kids[t.kids.length - 1].id].y) / 2 }; }
-    else pos[t.id] = { x: d * W, y: row++ * H };
-  };
-  roots.forEach((t) => { place(t, 0); row += 0.4; });
-  const onPath = new Set();
-  for (let u = selId; u; u = byId[u]?.parent_id) onPath.add(u);
-  const nodes = Object.values(byId);
-  const fullW = (depthMax + 1) * W + 20, fullH = Math.max(row, 1) * H + 20;
+const CW = 244, CH = 70, DX = 360, DY = 96;
 
+function layoutMap(map) {
+  const shown = (map.nodes || []).filter((n) => !n.hidden);
+  const byId = Object.fromEntries(shown.map((n) => [n.id, n]));
+  const groups = [...(map.groups || [])];
+  const have = new Set(groups.map((g) => g.id));
+  for (const n of shown) if (!have.has(n.group)) { have.add(n.group); groups.push({ id: n.group, name: n.group }); }
+  const pos = {}, regions = [];
+  let cursor = 16, bottom = 80;
+  for (const g of groups) {
+    const nodes = shown.filter((n) => n.group === g.id);
+    if (!nodes.length) continue;
+    const local = {};
+    let row = 0;
+    const kidsOf = (id) => nodes.filter((n) => n.parent === id && byId[n.parent]?.group === g.id).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const roots = nodes.filter((n) => !(n.parent && byId[n.parent]?.group === g.id)).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const seen = new Set();
+    const place = (n, d) => {
+      if (seen.has(n.id)) return;
+      seen.add(n.id);
+      const kids = kidsOf(n.id).filter((c) => !seen.has(c.id));
+      if (kids.length) {
+        kids.forEach((c) => place(c, d + 1));
+        local[n.id] = { x: d * DX, y: (local[kids[0].id].y + local[kids[kids.length - 1].id].y) / 2 };
+      } else local[n.id] = { x: d * DX, y: row++ * DY };
+    };
+    (roots.length ? roots : nodes).forEach((n) => { place(n, 0); row += 0.3; });
+    nodes.filter((n) => !seen.has(n.id)).forEach((n) => { local[n.id] = { x: 0, y: row++ * DY }; });
+    const boxes = Object.values(local);
+    const w = Math.max(...boxes.map((p) => p.x), 0) + CW, h = Math.max(...boxes.map((p) => p.y), 0) + CH;
+    for (const n of nodes) pos[n.id] = { x: cursor + local[n.id].x, y: 36 + local[n.id].y };
+    regions.push({ id: g.id, name: g.name, x: cursor - 12, y: 8, w: w + 24, h: h + 44 });
+    bottom = Math.max(bottom, h + 60);
+    cursor += w + 64;
+  }
+  return { pos, regions, w: Math.max(cursor, 1), h: bottom };
+}
+
+function edgeEnds(pos, a, b) {
+  const A = pos[a], B = pos[b];
+  if (!A || !B) return null;
+  const right = A.x + CW <= B.x, left = B.x + CW <= A.x;
+  let x1, y1, x2, y2;
+  if (right) [x1, y1, x2, y2] = [A.x + CW, A.y + CH / 2, B.x, B.y + CH / 2];
+  else if (left) [x1, y1, x2, y2] = [A.x, A.y + CH / 2, B.x + CW, B.y + CH / 2];
+  else if (A.y < B.y) [x1, y1, x2, y2] = [A.x + CW / 2, A.y + CH, B.x + CW / 2, B.y];
+  else [x1, y1, x2, y2] = [A.x + CW / 2, A.y, B.x + CW / 2, B.y + CH];
+  const dx = x2 - x1, dy = y2 - y1;
+  const d = Math.abs(dx) >= Math.abs(dy)
+    ? `M${x1},${y1} C${x1 + dx / 2},${y1} ${x2 - dx / 2},${y2} ${x2},${y2}`
+    : `M${x1},${y1} C${x1},${y1 + dy / 2} ${x2},${y2 - dy / 2} ${x2},${y2}`;
+  return { d, x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+}
+
+function MapCanvas({ onOpen, threads }) {
+  const [map, , err] = useLive('/api/map');
+  const [open, setOpen] = useState(() => new Set());
+  const spaceThreads = (threads || []).filter((t) => t.space);
+  const kept = (map?.nodes || []).filter((n) => !n.hidden);
+  const all = Object.fromEntries(kept.map((n) => [n.id, n]));
+  const kidsOf = {};
+  for (const n of kept) if (all[n.parent]) (kidsOf[n.parent] = kidsOf[n.parent] || []).push(n);
+  // the trunk shows: each root and what hangs right under it; deeper levels wait until their parent is opened
+  const isRoot = (n) => !all[n.parent];
+  const visible = (n) => isRoot(n) || (visible(all[n.parent]) && (isRoot(all[n.parent]) || open.has(n.parent)));
+  const shown = kept.filter(visible);
+  const lay = useMemo(() => layoutMap({ ...(map || { groups: [] }), nodes: shown }), [map, open]);
+  const hidden = (map?.nodes || []).filter((n) => n.hidden);
+  const toggle = (id) => setOpen((s) => { const t = new Set(s); t.has(id) ? t.delete(id) : t.add(id); return t; });
+  const byId = Object.fromEntries(shown.map((n) => [n.id, n]));
   const box = useRef();
   const [view, setView] = useState({ x: 24, y: 24, k: 1 });
+  const [sel, setSel] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
   const fitted = useRef(false);
-  const dref = useRef(null);           // the live drag, a ref so fast moves never read a stale closure
-  const [, bump] = useState(0);
-  const setD = (d) => { dref.current = d; bump((x) => x + 1); };
-  const drag = dref.current;
   const pan = useRef(null);
+  const node = byId[sel];
   const fit = () => {
     const el = box.current;
     if (!el) return;
-    const k = Math.min((el.clientWidth - 48) / fullW, (el.clientHeight - 48) / fullH, 1.1);
-    setView({ k, x: (el.clientWidth - fullW * k) / 2, y: (el.clientHeight - fullH * k) / 2 });
+    const k = Math.min((el.clientHeight - 48) / lay.h, 1);
+    const fits = (span, room) => span * k + 48 <= room;
+    setView({ k, x: fits(lay.w, el.clientWidth) ? (el.clientWidth - lay.w * k) / 2 : 16, y: fits(lay.h, el.clientHeight) ? (el.clientHeight - lay.h * k) / 2 : 16 });
   };
-  useEffect(() => { if (!fitted.current && nodes.length) { fitted.current = true; fit(); } }, [nodes.length]);
+  useEffect(() => { if (!fitted.current && shown.length) { fitted.current = true; fit(); } }, [shown.length]);
   const zoomBy = (f, cx, cy) => setView((v) => {
-    const k = Math.min(2.5, Math.max(0.2, v.k * f));
+    const k = Math.min(2.5, Math.max(0.25, v.k * f));
     return { k, x: cx - ((cx - v.x) / v.k) * k, y: cy - ((cy - v.y) / v.k) * k };
   });
-  const toWorld = (e) => {
-    const r = box.current.getBoundingClientRect();
-    return { x: (e.clientX - r.left - view.x) / view.k, y: (e.clientY - r.top - view.y) / view.k };
+  const onPath = new Set();
+  for (let u = sel; u && byId[u]; u = byId[u].parent) { if (onPath.has(u)) break; onPath.add(u); }
+  const curves = [];
+  const push = (key, from, to, label, contra, hot) => {
+    const e = edgeEnds(lay.pos, from, to);
+    if (e) curves.push({ key, ...e, label, contra, hot, w: label.length * 12 + 10 });
   };
-  const nodeAt = (w) => nodes.find((t) => { const p = pos[t.id]; return w.x >= p.x + 10 && w.x <= p.x + 170 && w.y >= p.y + 6 && w.y <= p.y + 36; });
-
+  for (const n of shown) if (n.parent && n.rel && lay.pos[n.parent]) {
+    const label = n.rel === '回答' && n.partial ? '回答·部分' : n.rel;
+    if (n.rel === '回答') push(`s-${n.id}`, n.id, n.parent, label, false, onPath.has(n.id) && onPath.has(n.parent));
+    else push(`s-${n.id}`, n.parent, n.id, label, false, onPath.has(n.id) && onPath.has(n.parent));
+  }
+  for (const e of map?.edges || []) if (lay.pos[e.src] && lay.pos[e.dst]) push(`c-${e.src}-${e.dst}`, e.src, e.dst, e.rel, e.rel === '对照', onPath.has(e.src) && onPath.has(e.dst));
+  const pick = (id) => { setSel(id); setEditing(false); setDraft(byId[id]?.text || ''); };
+  const save = async (e) => {
+    e.preventDefault();
+    if (!node || draft.trim() === node.text) { setEditing(false); return; }
+    try { await post(`/api/map/nodes/${enc(node.id)}`, { text: draft }); setEditing(false); refresh(); } catch (err) { fail(err); }
+  };
+  const hide = async () => {
+    try { await post(`/api/map/nodes/${enc(node.id)}`, { hidden: true }); setSel(null); refresh(); } catch (err) { fail(err); }
+  };
+  const restore = async (id) => { try { await post(`/api/map/nodes/${enc(id)}`, { hidden: false }); refresh(); } catch (err) { fail(err); } };
   const down = (e) => {
-    const g = e.target.closest('.tm-node');
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* synthetic or gone pointer */ }
-    if (g) setD({ id: g.dataset.id, moved: false, over: null });
-    else pan.current = { sx: e.clientX, sy: e.clientY, x: view.x, y: view.y };
+    if (e.target.closest('.map-card, .map-bar, .delta-tools, .map-hidden')) return;
+    pan.current = { sx: e.clientX, sy: e.clientY, x: view.x, y: view.y };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* gone */ }
   };
-  const movep = (e) => {
-    if (pan.current) { const p = pan.current; setView((v) => ({ ...v, x: p.x + e.clientX - p.sx, y: p.y + e.clientY - p.sy })); return; }
-    const d = dref.current;
-    if (d) {
-      const w = toWorld(e), over = nodeAt(w);
-      setD({ ...d, moved: true, wx: w.x, wy: w.y, over: over && over.id !== d.id && !under(byId, over.id, d.id) ? over.id : null });
-    }
-  };
-  const up = () => {
-    if (pan.current) { pan.current = null; return; }
-    const d = dref.current;
-    if (!d) return;
-    setD(null);
-    if (d.over) move(d.id, d.over, threadName(byId[d.over]));
-    else if (!d.moved) onSelect(d.id);
-  };
-
-  return html`<div class="delta" ref=${box}>
-    <svg width="100%" height="100%" onPointerDown=${down} onPointerMove=${movep} onPointerUp=${up} onPointerCancel=${up}
-        onWheel=${(e) => { e.preventDefault(); const r = box.current.getBoundingClientRect(); zoomBy(Math.exp(-e.deltaY * 0.0012), e.clientX - r.left, e.clientY - r.top); }}>
+  if (err) return html`<div class="delta"><div class="empty"><b>地图没载入</b><p class="hint">${err}</p></div></div>`;
+  if (!map) return html`<div class="delta"><div class="empty"><span class="spin"></span></div></div>`;
+  return html`<div class="delta" ref=${box}
+      onPointerDown=${down}
+      onPointerMove=${(e) => { const p = pan.current; if (p) setView((v) => ({ ...v, x: p.x + e.clientX - p.sx, y: p.y + e.clientY - p.sy })); }}
+      onPointerUp=${() => { pan.current = null; }} onPointerCancel=${() => { pan.current = null; }}
+      onClick=${(e) => { if (!e.target.closest('.map-card, .map-bar, .delta-tools, .map-hidden')) setSel(null); }}
+      onWheel=${(e) => { e.preventDefault(); const r = box.current.getBoundingClientRect(); zoomBy(Math.exp(-e.deltaY * 0.0012), e.clientX - r.left, e.clientY - r.top); }}>
+    <svg width="100%" height="100%">
+      <defs><marker id="map-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" /></marker></defs>
       <g transform=${`translate(${view.x},${view.y}) scale(${view.k})`}>
-        ${nodes.filter((t) => byId[t.parent_id]).map((t) => {
-          const a = pos[t.parent_id], b = pos[t.id], x1 = a.x + 170, y1 = a.y + 21, x2 = b.x + 10, y2 = b.y + 21;
-          return html`<path key=${`e-${t.id}`} d=${`M${x1},${y1} C${x1 + 30},${y1} ${x2 - 30},${y2} ${x2},${y2}`} class=${`tm-edge ${onPath.has(t.id) ? 'on' : ''} ${t.fork_message_id ? 'fork' : ''}`} />`;
-        })}
-        ${nodes.map((t) => html`<g key=${t.id} data-id=${t.id} transform=${`translate(${pos[t.id].x + 10},${pos[t.id].y + 6})`}
-            class=${`tm-node ${t.id === selId ? 'sel' : onPath.has(t.id) ? 'on' : ''} ${drag?.over === t.id ? 'drop' : ''} ${drag?.id === t.id && drag.moved ? 'held' : ''}`}>
-          <rect width="160" height="30" rx="8" /><text x="10" y="19">${short(threadName(t), 13)}</text>
-          <text class="tm-n" x="150" y="19" text-anchor="end">${t.n}</text>
-          <title>${threadName(t)}（${SCOPE_KIND[kindOf(t.scope)]} · ${t.n} 条）${t.fork_message_id ? ' · 从某条消息分叉' : ''}</title></g>`)}
-        ${drag?.moved ? html`<g class="tm-ghost" transform=${`translate(${drag.wx - 80},${drag.wy - 15})`} pointer-events="none">
-          <rect width="160" height="30" rx="8" /><text x="10" y="19">${short(threadName(byId[drag.id]), 13)}</text></g>` : null}
+        ${lay.regions.map((g) => html`<g key=${g.id}><rect class="map-region" x=${g.x} y=${g.y} width=${g.w} height=${g.h} rx="12" />
+          <text class="map-region-name" x=${g.x + 14} y=${g.y + 20}>${g.name}</text></g>`)}
+        ${curves.map((c) => html`<g key=${c.key}><path d=${c.d} class=${`map-edge ${c.contra ? 'contra' : ''} ${c.hot ? 'on' : ''}`} marker-end=${c.contra ? 'none' : 'url(#map-arrow)'} />
+          <rect class="map-tag-bg" x=${c.x - c.w / 2} y=${c.y - 9} width=${c.w} height="18" rx="4" />
+          <text class="map-tag" x=${c.x} y=${c.y + 4} text-anchor="middle">${c.label}</text></g>`)}
       </g></svg>
+    <div class="map-layer" style=${`transform:translate(${view.x}px,${view.y}px) scale(${view.k})`}>
+      ${shown.map((n) => {
+        const deeper = !isRoot(n) && kidsOf[n.id]?.length;
+        return html`<button key=${n.id} class=${`map-card ${n.kind}${isRoot(n) ? ' root' : ''}${n.id === sel ? ' sel' : ''}${onPath.has(n.id) ? ' on' : ''}`}
+          style=${`left:${lay.pos[n.id].x}px;top:${lay.pos[n.id].y}px`} onClick=${(e) => { e.stopPropagation(); pick(n.id); if (deeper) toggle(n.id); }}>
+        <span class="k">${n.kind === 'question' ? '问' : '结'}</span>
+        <span class="t">${n.text}</span>
+        ${deeper ? html`<span class="n more">${open.has(n.id) ? '收起' : `展开 ${kidsOf[n.id].length}`}</span>`
+          : n.sources.length > 1 ? html`<span class="n">${n.sources.length} 段</span>` : null}
+        ${n.text_by === 'user' ? html`<span class="mine" title="你改过，agent 不再改这句">改</span>` : null}
+      </button>`;
+      })}
+    </div>
+    ${!shown.length ? html`<div class="empty"><b>${hidden.length ? '节点都藏起来了' : '地图还空着'}</b><p class="hint">${hidden.length ? '右上角可以恢复。' : '能收成问题或结论的讨论，agent 会整理到这里。找论文、改分类这种不会出现。'}</p></div>` : null}
+    ${node ? html`<div class="map-bar">
+      ${editing ? html`<form onSubmit=${save}><textarea rows="2" value=${draft} onInput=${(e) => setDraft(e.target.value)} />
+        <button class="btn sm" type="submit">保存</button><button class="btn sm ghost" type="button" onClick=${() => setEditing(false)}>取消</button></form>`
+        : html`<p>${node.text}</p><button class="btn sm ghost" onClick=${() => { setDraft(node.text); setEditing(true); }}>改一句</button>`}
+      <button class="btn sm ghost" onClick=${hide}>藏起</button>
+      <span class="srcs">${node.sources.map((s) => html`<button key=${s.id} class="btn sm" onClick=${() => onOpen(s.id)}>${short(s.title, 28)}</button>`)}</span>
+    </div>` : null}
     <div class="delta-tools">
+      ${spaceThreads.length ? html`<details class="map-hidden"><summary>空间里你的讨论 ${spaceThreads.length}</summary>
+        ${spaceThreads.map((t) => html`<button key=${t.id} title=${`共享 · ${t.space.name}；这里只读`} onClick=${() => onOpen(t.id)}>${short(threadName(t), 22)}</button>`)}</details>` : null}
+      ${hidden.length ? html`<details class="map-hidden"><summary>藏起 ${hidden.length}</summary>
+        ${hidden.map((n) => html`<button key=${n.id} onClick=${() => restore(n.id)}>${short(n.text, 22)}</button>`)}</details>` : null}
       <button class="btn sm" onClick=${() => zoomBy(1.3, box.current.clientWidth / 2, box.current.clientHeight / 2)}>＋</button>
       <button class="btn sm" onClick=${() => zoomBy(0.77, box.current.clientWidth / 2, box.current.clientHeight / 2)}>－</button>
       <button class="btn sm" onClick=${fit} title="适应屏幕">⊡</button></div>
-    <div class="delta-hint hint">滚轮缩放 · 拖空白平移 · 点节点打开 · 拖节点到另一节点上改挂载 · 虚线 = 从某条消息分叉</div>
+    <div class="delta-hint hint">滚轮缩放 · 拖空白平移 · 点节点看出处 · 线上的字是这两个说法的关系</div>
   </div>`;
 }
 
 // ---------- the view ----------
 
 export function DiscussView({ threadId }) {
-  const [list] = useLive('/api/threads/recent');
+  const [list] = useLive('/api/threads/recent?shared=1');
   const sel = threadId || null;
-  const select = (id) => { pane.value = 'river'; go('discuss', id); };
-  useEffect(() => { if (!sel && list?.length && innerWidth > 900) go('discuss', buildTree(list).roots[0]?.id); }, [list?.length, sel]);
-  return html`<div id="body" class=${sel ? 'show-detail' : ''}>
+  const select = (id) => { pane.value = 'river'; go('discuss', id); }; // space threads read through at home; entering the space is a deliberate choice there
+  useEffect(() => {
+    const want = takeSwitchIntent('discuss');
+    if (want) { go('discuss', want.id); return; }
+    if (!sel && list?.length && innerWidth > 900) go('discuss', buildTree(list).roots[0]?.id);
+  }, [list?.length, sel]);
+  const back = () => { pane.value = 'river'; go('discuss'); };
+  return html`<div id="body" class=${sel || pane.value === 'map' ? 'show-detail' : ''}>
     <section id="list">${list ? html`<${Outline} list=${list} selId=${sel} onSelect=${select} />` : html`<div class="empty"><span class="spin"></span></div>`}</section>
     <section id="detail">
-      ${innerWidth <= 900 && sel ? html`<button class="btn sm ghost" onClick=${() => go('discuss')}>← 返回列表</button>` : null}
-      ${pane.value === 'map' && list ? html`<${Delta} list=${list} selId=${sel} onSelect=${select} />`
+      ${pane.value === 'map' ? html`<button class="btn sm ghost m-back" onClick=${back}>← 返回列表</button><${MapCanvas} onOpen=${select} threads=${list} />`
         : sel ? html`<div class="detail thread"><div class="chatbox"><${RiverLoader} key=${sel} id=${sel} /></div></div>`
           : html`<div class="empty" style="padding-top:120px">选择左侧一段讨论</div>`}
     </section></div>`;

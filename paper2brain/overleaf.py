@@ -1,6 +1,6 @@
 """The Overleaf project of a research, as a local git checkout through Overleaf's Git integration (or the GitHub
 repository the project syncs with). The agent edits files here; nothing leaves until the user pushes from the
-research page."""
+research page. compile() builds the PDF locally so the research page can preview it before pushing."""
 import base64
 import json
 import os
@@ -105,3 +105,49 @@ def discard(pid):
     path = local_dir(pid)
     _git(path, "reset", "--hard", "--quiet")
     _git(path, "clean", "-fdq")
+
+
+# ---------- local compile: preview the PDF before anything is pushed ----------
+
+def _main_tex(path):
+    """The root .tex holding \\documentclass; main.tex wins when several have one."""
+    mains = [f for f in path.glob("*.tex") if re.search(r"\\documentclass", f.read_text(errors="replace"))]
+    if not mains:
+        raise rules.Rejected("本地目录里没有含 \\documentclass 的 .tex 主文件")
+    return next((f for f in mains if f.name == "main.tex"), sorted(mains)[0])
+
+
+def compiled_pdf(pid):
+    path, main = local_dir(pid), None
+    try:
+        main = _main_tex(path)
+    except rules.Rejected:
+        return None
+    pdf = path.parent / (path.name + ".build") / (main.stem + ".pdf")
+    return pdf if pdf.is_file() else None
+
+
+def compile(pid):
+    """latexmk the main file into a .build dir beside the checkout (never inside it: aux files would look like
+    unpushed edits). Returns the pdf path and the log's last lines; Rejected with the error excerpt on failure."""
+    path = local_dir(pid)
+    if not (path / ".git").exists():
+        raise rules.Rejected("本地还没有克隆：先在研究页关联 Overleaf 项目")
+    main = _main_tex(path)
+    build = path.parent / (path.name + ".build")
+    build.mkdir(parents=True, exist_ok=True)
+    text = main.read_text(errors="replace")
+    engine = "-xelatex" if re.search(r"\\usepackage(\[.*?\])?\{(ctex|xeCJK|fontspec)\}", text) else "-pdf"
+    cmd = ["latexmk", engine, "-interaction=nonstopmode", "-halt-on-error", f"-outdir={build}", main.name]
+    try:
+        r = subprocess.run(cmd, cwd=path, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        raise rules.Rejected("没装 latexmk（MacTeX）：brew install --cask mactex，或先用 Overleaf 网页编译") from None
+    except subprocess.TimeoutExpired:
+        raise rules.Rejected("编译超过 10 分钟被中止：项目太大或卡在交互式报错（已用 nonstopmode，不该卡）") from None
+    log = (build / (main.stem + ".log"))
+    tail = log.read_text(errors="replace")[-3000:] if log.is_file() else (r.stdout + r.stderr)[-3000:]
+    if r.returncode or not (build / (main.stem + ".pdf")).is_file():
+        excerpt = "\n".join(l for l in tail.splitlines() if l.startswith("!")) or tail[-1200:]
+        raise rules.Rejected(f"编译失败：\n{excerpt[:1500]}")
+    return {"pdf": str(build / (main.stem + ".pdf")), "log": tail[-800:]}

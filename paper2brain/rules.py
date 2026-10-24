@@ -393,22 +393,25 @@ def validate_plan(tasks):
     return out
 
 
-FIGURE_KINDS = ("table", "bar", "line", "radar")
+FIGURE_KINDS = ("table", "bar", "hbar", "line", "radar")
+# full: the figure takes the page's whole width; half: it sits beside the next half-width figure.
+FIGURE_WIDTHS = ("full", "half")
 # The parts of a paper's Experiments section, in the order they appear.
 FIGURE_SECTIONS = ("main", "ablation", "analysis", "appendix")
 
 
 def _named(items, what, errors, extra=(), most=8, least=1):
     """[{name, ...}] with unique non-empty names; extra: the other keys kept (stripped strings). A note is a line in
-    the paper's setup, not an essay."""
+    the paper's setup, not an essay. most None: no upper bound."""
     out = []
     for it in items if isinstance(items, list) else []:
         name = str((it or {}).get("name") or "").strip()[:60] if isinstance(it, dict) else ""
         if name:
             out.append({"name": name, **{k: str(it.get(k) or "").strip() or None for k in extra}})
     names = [x["name"] for x in out]
-    if not least <= len(out) <= most or len(set(names)) < len(names):
-        errors.append(f"setup.{what} 要有 {least}-{most} 项，name 不能重复")
+    if len(out) < least or (most is not None and len(out) > most) or len(set(names)) < len(names):
+        errors.append(f"setup.{what} 至少 {least} 项，name 不能重复" if most is None
+                      else f"setup.{what} 要有 {least}-{most} 项，name 不能重复")
     long = [x["name"] for x in out if len(x.get("note") or "") > 150]
     if long:
         errors.append(f"setup.{what} 的 note 每条不超过 150 字（论文里的一句话），过长：{long}")
@@ -416,7 +419,7 @@ def _named(items, what, errors, extra=(), most=8, least=1):
 
 
 def _calls_itself(name, text):
-    """Whether a paper's own words (title, opening pages) use this name for the method; "π0 (5Hz)" counts as π0."""
+    """Whether a paper's own words (title, opening pages, aliases) use this name for the method; "π0 (5Hz)" counts as π0."""
     core = re.sub(r"\s*\(.*?\)\s*", " ", name).strip().lower()
     squash = lambda s: re.sub(r"[\s\-_]+", "", s.lower())  # noqa: E731
     return bool(core) and squash(core) in squash(text or "")
@@ -435,7 +438,7 @@ def validate_setup(setup, known_papers=(), paper_words=None):
     if not method:
         errors.append("setup.method 写我们的方法在表里的名字")
     out = {"questions": questions, "method": method, "benchmarks": _named(s.get("benchmarks"), "benchmarks", errors, ("note",), 6),
-           "baselines": _named(s.get("baselines"), "baselines", errors, ("paper", "note"), 6, 2),
+           "baselines": _named(s.get("baselines"), "baselines", errors, ("paper", "note"), None, 2),
            "controls": _named(s.get("controls"), "controls", errors, ("note",), 6, 0),
            "metrics": _named(s.get("metrics"), "metrics", errors, ("unit", "better"), 6),
            "implementation": str(s.get("implementation") or "").strip() or None}
@@ -451,8 +454,8 @@ def validate_setup(setup, known_papers=(), paper_words=None):
     if paper_words and not unknown:
         renamed = [f"{b['name']}（{b['paper']}）" for b in out["baselines"] if not _calls_itself(b["name"], paper_words(b["paper"]))]
         if renamed:
-            errors.append(f"setup.baselines 要用论文自己的方法名，这些名字在论文标题和开头几页里找不到：{renamed}"
-                          "（借了论文思路的自己的变体放 controls）")
+            errors.append(f"setup.baselines 要用论文自己的方法名，这些名字在论文标题、开头几页和别名里找不到：{renamed}"
+                          "（没有自己论文的版本或 checkpoint，用户确认后用 ./p2b alias 给论文加别名；借了论文思路的自己的变体放 controls）")
     names = [method] + [x["name"] for k in ("baselines", "controls") for x in out[k]]
     if len(set(names)) < len(names):
         errors.append("method、baselines、controls 的名字不能重复")
@@ -460,6 +463,32 @@ def validate_setup(setup, known_papers=(), paper_words=None):
         errors.append("setup.implementation 不超过 800 字：只写论文 Implementation Details 段落的要点，评测协议写进各基准的 note")
     if errors:
         raise Rejected("实验设置未通过校验：\n- " + "\n- ".join(errors))
+    return out
+
+
+def unknown_main_methods(figures, setup):
+    """Method names a main-result figure uses that are not the setup's method, baselines, or controls.
+    The same names validate_figures rejects; the save turns this into a lookup instead of a dead end."""
+    if not isinstance(setup, dict) or not isinstance(figures, list):
+        return []
+    known = {str(setup.get("method") or "").strip()}
+    for key in ("baselines", "controls"):
+        for b in setup.get(key) or []:
+            if isinstance(b, dict) and str(b.get("name") or "").strip():
+                known.add(str(b["name"]).strip())
+    out = []
+    for f in figures:
+        if not isinstance(f, dict) or f.get("section") != "main":
+            continue
+        dims = []
+        for key in ("rows", "series"):
+            vals = [str(v).strip()[:60] for v in f.get(key) or [] if str(v).strip()] if isinstance(f.get(key), list) else []
+            dims.append(vals)
+        axis = next((d for d in dims if setup.get("method") in d), None)
+        names = [v for v in (axis or []) if v not in known]
+        if names:
+            out.append({"id": str(f.get("id") or ""), "title": str(f.get("title") or "").strip(),
+                        "names": names, "rows": dims[0], "series": dims[1]})
     return out
 
 
@@ -486,13 +515,15 @@ def validate_figures(figures, context="", setup=None):
             errors.append(f"「{title}」kind 只能是 {' / '.join(FIGURE_KINDS)}")
         if f.get("section") not in FIGURE_SECTIONS:
             errors.append(f"「{title}」section 只能是 {' / '.join(FIGURE_SECTIONS)}")
+        if (f.get("width") or "full") not in FIGURE_WIDTHS:
+            errors.append(f"「{title}」width 只能是 {' / '.join(FIGURE_WIDTHS)}")
         if f.get("question") not in range(1, len(setup["questions"]) + 1):
             errors.append(f"「{title}」question 写它回答 setup.questions 里的第几个（1-{len(setup['questions'])}）")
         if not str(f.get("caption") or "").strip():
             errors.append(f"「{title}」缺少 caption（论文里的图注 / 表注）")
         rows, series = ([str(v).strip()[:60] for v in f.get(k) or []] if isinstance(f.get(k), list) else [] for k in ("rows", "series"))
-        if not 1 <= len(rows) <= 40 or not all(rows) or len(set(rows)) < len(rows):
-            errors.append(f"「{title}」rows 要有 1-40 个不重复的非空名字")
+        if not 1 <= len(rows) <= 50 or not all(rows) or len(set(rows)) < len(rows):
+            errors.append(f"「{title}」rows 要有 1-50 个不重复的非空名字")
         if not 1 <= len(series) <= 12 or not all(series) or len(set(series)) < len(series):
             errors.append(f"「{title}」series 要有 1-12 个不重复的非空名字")
         metric = f.get("metric") or None
@@ -523,7 +554,7 @@ def validate_figures(figures, context="", setup=None):
         if fid in seen:
             errors.append(f"第 {i} 张 id 重复：{fid}")
         seen.add(fid)
-        out.append({"id": fid, "title": title[:80], "kind": f.get("kind"), "section": f.get("section"), "question": f.get("question"),
+        out.append({"id": fid, "title": title[:80], "kind": f.get("kind"), "width": f.get("width") or "full", "section": f.get("section"), "question": f.get("question"),
                     "caption": str(f.get("caption") or "").strip(), "claim": str(f.get("claim") or "").strip() or None, "metric": metric,
                     "rows": rows, "series": series, "x_title": str(f.get("x_title") or "").strip() or None,
                     "y_title": str(f.get("y_title") or "").strip() or None, "target": target})
@@ -644,3 +675,148 @@ def check_link(existing, by):
 def check_revision(current, base):
     if base is not None and base != current:
         raise Rejected(f"内容已被修改（当前版本 {current}，你基于 {base}），请重新读取后再提交")
+
+
+# The discussion map. A node is a question or a conclusion; threads are sources, not nodes.
+# Spine relations hang a node under its layout parent. Cross relations are the other edges.
+# (parent kind, child kind) for the spine; (src kind, dst kind) for a cross edge.
+_MAP_SPINE = {"拆开": ("question", "question"), "收窄": ("question", "question"), "引出": ("conclusion", "question"),
+              "回答": ("question", "conclusion"), "前提": ("conclusion", "conclusion")}
+_MAP_CROSS = {"对照": ("conclusion", "conclusion"), "支撑": ("conclusion", "conclusion"), "待证": ("question", "conclusion")}
+_MAP_KIND = {"question": "问题", "conclusion": "结论"}
+MAP_GROUP_MAX = 8  # a region stays readable at a glance; past this the agent has to merge
+_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def _slug(v, what):
+    s = str(v or "").strip()
+    if not _SLUG.match(s):
+        raise Rejected(f"{what} 的 id 要用英文、数字和连字符：{s[:40]}")
+    return s
+
+
+def map_sentence(text, kind):
+    """One sentence the map can show. A question asks; a conclusion states."""
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if kind not in _MAP_KIND:
+        raise Rejected("节点种类只能是 question（问题）或 conclusion（结论）")
+    if not 4 <= len(text) <= 80:
+        raise Rejected(f"节点要写成 4 到 80 字的一句话：{text[:40]}")
+    if kind == "question" and not text.endswith(("？", "?")):
+        raise Rejected(f"问题要写成问句，以？结尾：{text}")
+    if kind == "conclusion" and text.endswith(("？", "?")):
+        raise Rejected(f"结论要写成判断句，不要以问号结尾：{text}")
+    return text
+
+
+def map_spine(rel, parent_kind, child_kind):
+    want = _MAP_SPINE.get(rel)
+    if not want:
+        raise Rejected("挂在上级下面的关系只能是拆开、收窄、引出、回答、前提")
+    if (parent_kind, child_kind) != want:
+        raise Rejected(f"「{rel}」的上级要是{_MAP_KIND[want[0]]}、下级要是{_MAP_KIND[want[1]]}"
+                       f"（现在是{_MAP_KIND.get(parent_kind, parent_kind)} → {_MAP_KIND.get(child_kind, child_kind)}）")
+
+
+def map_cross(rel, src_kind, dst_kind):
+    want = _MAP_CROSS.get(rel)
+    if not want:
+        raise Rejected("跨线只能是对照、支撑、待证")
+    if (src_kind, dst_kind) != want:
+        raise Rejected(f"「{rel}」要从{_MAP_KIND[want[0]]}指向{_MAP_KIND[want[1]]}"
+                       f"（现在是{_MAP_KIND.get(src_kind, src_kind)} → {_MAP_KIND.get(dst_kind, dst_kind)}）")
+
+
+def _map_pair(pairs, a, b):
+    key = tuple(sorted((a, b)))
+    if key in pairs:
+        raise Rejected(f"{a} 和 {b} 之间已经有一条关系")
+    pairs.add(key)
+
+
+def _map_edge(e):
+    if not isinstance(e, dict):
+        raise Rejected("跨线要是对象")
+    rel, src, dst = e.get("rel"), _slug(e.get("src"), "跨线"), _slug(e.get("dst"), "跨线")
+    if rel not in _MAP_CROSS:
+        raise Rejected("跨线只能是对照、支撑、待证")
+    if src == dst:
+        raise Rejected("跨线的两端不能是同一个节点")
+    if rel == "对照" and src > dst:
+        src, dst = dst, src
+    return {"src": src, "dst": dst, "rel": rel}
+
+
+def _map_edge_list(raw, what):
+    if not isinstance(raw, list):
+        raise Rejected(f"{what} 要是数组")
+    edges, pairs = [], set()
+    for e in raw:
+        edge = _map_edge(e)
+        _map_pair(pairs, edge["src"], edge["dst"])
+        edges.append(edge)
+    return edges
+
+
+def validate_map(doc):
+    """The agent's map update. `edges` adds or replaces those pairs; `drop_edges` removes those pairs.
+    Omit both to leave cross edges alone. Nodes not listed are left for the store to keep. Does not look at the database."""
+    if not isinstance(doc, dict):
+        raise Rejected("地图要一个 JSON 对象")
+    groups, seen_g = [], set()
+    for g in doc.get("groups") or []:
+        if not isinstance(g, dict):
+            raise Rejected("分组要是对象")
+        gid, name = _slug(g.get("id"), "分组"), re.sub(r"\s+", " ", str(g.get("name") or "")).strip()
+        if gid in seen_g:
+            raise Rejected(f"分组 id 重复：{gid}")
+        if not 1 <= len(name) <= 24:
+            raise Rejected(f"分组名要 1 到 24 字：{name[:30]}")
+        seen_g.add(gid)
+        groups.append({"id": gid, "name": name})
+    nodes, by_id, pairs = [], {}, set()
+    for n in doc.get("nodes") or []:
+        if not isinstance(n, dict):
+            raise Rejected("节点要是对象")
+        nid, kind = _slug(n.get("id"), "节点"), n.get("kind")
+        if nid in by_id:
+            raise Rejected(f"节点 id 重复：{nid}")
+        parent, rel = n.get("parent") or None, n.get("rel") or None
+        if parent:
+            parent = _slug(parent, "上级")
+        if bool(parent) != bool(rel):
+            raise Rejected(f"「{nid}」有上级时要写 rel，没有上级就不要写 rel")
+        if parent == nid:
+            raise Rejected(f"「{nid}」不能挂在自己下面")
+        if n.get("partial") and rel != "回答":
+            raise Rejected("只有「回答」可以标部分")
+        sources = []
+        for s in n.get("sources") or []:
+            sid = s.get("id") if isinstance(s, dict) else s
+            sid = _slug(sid, "讨论")
+            if sid not in sources:
+                sources.append(sid)
+        if not sources:
+            raise Rejected(f"「{nid}」至少要有一段讨论作为出处")
+        text = map_sentence(n.get("text"), kind)
+        group = _slug(n.get("group"), "节点的分组")
+        if parent and parent in by_id:
+            map_spine(rel, by_id[parent]["kind"], kind)
+            _map_pair(pairs, parent, nid)
+        by_id[nid] = {"kind": kind}
+        nodes.append({"id": nid, "group": group, "kind": kind, "text": text, "parent": parent, "rel": rel,
+                      "partial": bool(n.get("partial")), "sources": sources})
+    # A parent listed later in the file: check the pair once both exist.
+    for n in nodes:
+        if n["parent"] and n["parent"] in by_id and tuple(sorted((n["parent"], n["id"]))) not in pairs:
+            map_spine(n["rel"], by_id[n["parent"]]["kind"], n["kind"])
+            _map_pair(pairs, n["parent"], n["id"])
+    edges = _map_edge_list(doc["edges"], "edges") if "edges" in doc else []
+    for e in edges:
+        if e["src"] in by_id and e["dst"] in by_id:
+            map_cross(e["rel"], by_id[e["src"]]["kind"], by_id[e["dst"]]["kind"])
+            _map_pair(pairs, e["src"], e["dst"])
+    drop_edges = _map_edge_list(doc["drop_edges"], "drop_edges") if "drop_edges" in doc else []
+    drop = list(dict.fromkeys(_slug(x, "要去掉的节点") for x in (doc.get("drop") or [])))
+    seen = list(dict.fromkeys(_slug(x, "讨论") for x in (doc.get("seen") or [])))
+    return {"groups": groups, "nodes": nodes, "edges": edges, "drop_edges": drop_edges, "drop": drop, "seen": seen}

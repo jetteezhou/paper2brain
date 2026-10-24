@@ -1,9 +1,12 @@
 """SQLite storage. The only module that touches the database; every write goes through a transaction here."""
+import contextvars
 import json
 import re
 import os
 import shutil
 import sqlite3
+import tempfile
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -17,7 +20,7 @@ TOPIC_TREE = [
     ("WAM", ["世界模型", "表征研究", "WAN base", "V-JEPA"]),
 ]
 TRIAGE = ("inbox", "deep", "archived", "ignored")
-JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch", "for_papers", "tasks", "groups", "comparison", "charts", "figures", "cells", "design"}
+JSON_COLS = {"links", "candidates", "authors", "card", "report", "tools", "meta", "body", "proposal", "results", "rows", "launch", "for_papers", "tasks", "groups", "comparison", "charts", "figures", "cells", "design", "aliases"}
 # WAITING: queued here until there is room to start it; the others are Cursor's own statuses of a live run.
 UNFINISHED = ("WAITING", "CREATING", "RUNNING", "QUEUED")
 _UNFINISHED_SQL = "('WAITING','CREATING','RUNNING','QUEUED')"
@@ -194,7 +197,7 @@ def _v7_discussion_tree(c):
                                    f"ORDER BY created_at DESC", old).fetchone() or [None])[0]
         c.execute("INSERT INTO threads (id, created_at, scope, title, agent_id, title_by) VALUES (?,?,?,?,?,?)",
                   (t["id"], t["created_at"], scope, t["gist"], agent or None, t["gist"] and t["gist_by"]))
-        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)",
+        c.execute("INSERT INTO messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)",
                   (new_id(), t["created_at"], t["id"], "user" if t["by"] == "user" else "assistant", t["text"], None))
         if old:
             for table, col in (("messages", "thread_id"), ("notes", "thread_id"), ("runs", "ref")):
@@ -271,7 +274,8 @@ def _v17_short_names(c):
 # keyed by a local counter) or trash (this Mac's undo).
 SYNCED = ("captures", "attachments", "papers", "capture_papers", "topics", "paper_topics", "notes", "threads", "messages",
           "runs", "research", "research_topics", "research_links", "repos", "research_repos", "code_maps", "experiments",
-          "writing", "research_docs", "anchors", "paper_text", "plans", "related_work", "exp_figures")
+          "writing", "research_docs", "anchors", "paper_text", "plans", "related_work", "exp_figures",
+          "map_groups", "map_nodes", "map_edges", "map_sources", "map_seen")
 
 
 def primary_key(c, table):
@@ -284,6 +288,8 @@ def _sync_triggers(c):
     for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'sync\\_%' ESCAPE '\\'").fetchall():
         c.execute(f"DROP TRIGGER {name}")
     for t in SYNCED:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone():
+            continue  # a later migration creates it, then rebuilds these triggers
         cols = primary_key(c, t)
 
         def log(row):
@@ -294,6 +300,13 @@ def _sync_triggers(c):
             if t == "runs" and op != "DELETE":
                 when += " AND NEW.status IN ('FINISHED', 'ERROR', 'CANCELLED', 'EXPIRED')"
             c.execute(f"CREATE TRIGGER sync_{t}_{op.lower()} AFTER {op} ON {t} WHEN {when} BEGIN {' '.join(log(r) for r in rows)} END")
+
+
+def _v21_owners(c):
+    """In a shared space each member's discussions, agent runs and what they deleted are their own (user_id; NULL:
+    everyone's, as before)."""
+    for t in ("threads", "runs", "trash"):
+        c.execute(f"ALTER TABLE {t} ADD COLUMN user_id TEXT")
 
 
 def _v20_sync_everything(c):
@@ -335,12 +348,48 @@ def _v18_trash(c):
             shutil.move(str(home() / "trash" / "paper"), str(home() / "trash" / tid))
 
 
+def _v22_idea_map(c):
+    """The map is not the conversation tree. Nodes are questions and conclusions the agent distilled; threads are
+    sources. rel hangs a node under parent_id. Cross edges (对照 / 支撑 / 待证) are separate. map_seen remembers which
+    discussions were already read, so another Mac does not build the map again."""
+    c.execute("CREATE TABLE IF NOT EXISTS map_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0)")
+    c.execute("CREATE TABLE IF NOT EXISTS map_nodes (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES map_groups(id), "
+              "kind TEXT NOT NULL, text TEXT NOT NULL, parent_id TEXT, rel TEXT, partial INTEGER NOT NULL DEFAULT 0, "
+              "text_by TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    c.execute("CREATE TABLE IF NOT EXISTS map_edges (src TEXT NOT NULL REFERENCES map_nodes(id) ON DELETE CASCADE, "
+              "dst TEXT NOT NULL REFERENCES map_nodes(id) ON DELETE CASCADE, rel TEXT NOT NULL, PRIMARY KEY (src, dst, rel))")
+    c.execute("CREATE TABLE IF NOT EXISTS map_sources (node_id TEXT NOT NULL REFERENCES map_nodes(id) ON DELETE CASCADE, "
+              "thread_id TEXT NOT NULL, PRIMARY KEY (node_id, thread_id))")
+    c.execute("CREATE TABLE IF NOT EXISTS map_seen (thread_id TEXT PRIMARY KEY, at TEXT NOT NULL, n INTEGER NOT NULL)")
+    _sync_triggers(c)
+
+
+def _v23_capture_owner(c):
+    """Who brought a capture in (NULL: before this, or the library's own inbox). Captures stay visible to the whole
+    space; a member's personal library reads it to point at "papers I added in a space"."""
+    c.execute("ALTER TABLE captures ADD COLUMN user_id TEXT")
+
+
+def _v24_who(c):
+    """Who wrote a note, a highlight or a logged action (NULL: a personal library, or from before this), so one
+    member's heatmap can count what they did in a shared space without taking anyone else's."""
+    for t in ("events", "notes", "anchors"):
+        c.execute(f"ALTER TABLE {t} ADD COLUMN user_id TEXT")
+
+
+def _v25_aliases(c):
+    """aliases: other names the user accepts for the paper's method (JSON list), e.g. GR00T N1.7 for the GR00T N1
+    paper: a release without a paper of its own. Baselines may use them (rules.validate_setup) and search finds them."""
+    c.execute("ALTER TABLE papers ADD COLUMN aliases TEXT")
+
+
 # Append only: PRAGMA user_version is the number of steps already applied. Each step runs once, in its own
 # transaction, after a backup of the database as it was.
 MIGRATIONS = [_v1_baseline, _v2_indexes, _v3_run_queue, _v4_free_bare_thoughts, _v5_searchable_fulltext, _v6_topic_proposals,
               _v7_discussion_tree, _v8_fork_point, _v9_material_roles, _v10_overleaf, _v11_plans, _v12_related_work,
               _v13_related_comparison, _v14_experiment_charts, _v15_expected_figures,
-              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything]
+              _v16_experiment_design, _v17_short_names, _v18_trash, _v19_sync, _v20_sync_everything, _v21_owners,
+              _v22_idea_map, _v23_capture_owner, _v24_who, _v25_aliases]
 
 
 def config():
@@ -348,10 +397,68 @@ def config():
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+_home = contextvars.ContextVar("p2b_home", default=None)
+_viewer = contextvars.ContextVar("p2b_viewer", default=None)
+
+
+def multi():
+    """The shared server (./p2b serve --multi): one data directory per library under P2B_ROOT, chosen per request."""
+    return bool(os.environ.get("P2B_ROOT"))
+
+
 def home():
-    path = Path(os.environ.get("P2B_HOME") or Path.home() / "paper2brain-data")
+    path = _home.get()
+    if path is None:
+        if multi():
+            raise RuntimeError("多用户模式下没有选定论文库")  # fail closed: never fall back to a default library
+        path = Path(os.environ.get("P2B_HOME") or Path.home() / "paper2brain-data")
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@contextmanager
+def at_home(path):
+    """Everything inside (and threads started with spawn) reads and writes the library at path."""
+    token = _home.set(Path(path))
+    try:
+        yield
+    finally:
+        _home.reset(token)
+
+
+@contextmanager
+def viewing(user):
+    """Inside (a member's request to a shared space): only their own discussions and agent runs exist, and the ones they
+    start are stamped theirs. user: {"id", "library"} or None for everything."""
+    token = _viewer.set(user)
+    try:
+        yield
+    finally:
+        _viewer.reset(token)
+
+
+def viewer():
+    return _viewer.get()
+
+
+def _owner():
+    return (_viewer.get() or {}).get("id")
+
+
+def _private(conn, uid):
+    """Temp views named like the private tables shadow them for every unqualified read on this connection, so no query
+    can show another member's discussion, run or deleted item. Writes name the real tables (main.*): SQLite before
+    3.38 allows no qualified names in triggers, so the views have none, and inserts stamp user_id themselves."""
+    if not re.fullmatch(r"[0-9a-f]{32}", uid):
+        raise ValueError(f"bad user id: {uid!r}")
+    mine = f"(user_id IS NULL OR user_id='{uid}')"
+    for t, where in (("threads", mine), ("runs", mine), ("trash", mine), ("messages", f"thread_id IN (SELECT id FROM main.threads WHERE {mine})")):
+        conn.execute(f"CREATE TEMP VIEW {t} AS SELECT rowid AS rowid, * FROM main.{t} WHERE {where}")
+
+
+def spawn(fn, *args):
+    """A daemon thread that keeps the caller's library (a plain Thread starts with no context)."""
+    threading.Thread(target=contextvars.copy_context().run, args=(fn, *args), daemon=True).start()
 
 
 def now():
@@ -373,6 +480,7 @@ def _row(r):
     if r is None:
         return None
     d = dict(r)
+    d.pop("rowid", None)  # the private views (_private) carry it along for ORDER BY rowid
     for k in JSON_COLS & d.keys():
         if d[k] is not None:
             d[k] = json.loads(d[k])
@@ -392,15 +500,15 @@ def _connect():
 
 
 _initialized = set()
-BACKUPS_KEPT = 7
+BACKUPS_KEPT = 7 * 24  # hourly copies: a week of points in time to roll back to
 
 
 def backup(name=None):
-    """A consistent copy of the database under backups/. Without a name: today's daily copy (once a day, the newest
-    BACKUPS_KEPT kept). Returns the new file, or None when today's copy already exists."""
+    """A consistent copy of the database under backups/. Without a name: this hour's copy (once an hour, the newest
+    BACKUPS_KEPT kept). Returns the new file, or None when this hour's copy already exists."""
     folder = home() / "backups"
     folder.mkdir(exist_ok=True)
-    path = folder / (name or f"p2b-{datetime.now():%Y%m%d}.sqlite")
+    path = folder / (name or f"p2b-{datetime.now():%Y%m%d-%H}.sqlite")
     if path.exists():
         return None
     tmp = path.with_suffix(".tmp")
@@ -417,6 +525,51 @@ def backup(name=None):
     return path
 
 
+def backups():
+    """Snapshots under backups/ to roll back to, newest first: (file name, size in bytes)."""
+    return [(p.name, p.stat().st_size) for p in sorted((home() / "backups").glob("*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)]
+
+
+def snapshot_research(name):
+    """The researches in a snapshot (also those deleted since): what a single-research rollback can bring back."""
+    snap = home() / "backups" / name
+    if Path(name).name != name or not snap.is_file():
+        raise rules.Rejected("没有这份备份")
+    db = sqlite3.connect(f"file:{snap}?mode=ro", uri=True)
+    try:
+        return [{"id": i, "title": t} for i, t in db.execute("SELECT id, title FROM research ORDER BY updated_at DESC")]
+    finally:
+        db.close()
+
+
+def restore(name, rid=None):
+    """Roll this library (rid None) or just one research back to the snapshot name. The state before is saved first,
+    so a wrong pick can be undone. Files on disk are never deleted, so papers added after the snapshot stay as files."""
+    snap = home() / "backups" / name
+    if Path(name).name != name or not snap.is_file():
+        raise rules.Rejected("没有这份备份")
+    backup(f"p2b-before-restore-{datetime.now():%Y%m%d-%H%M%S}.sqlite")
+    if rid is None:
+        old, new = sqlite3.connect(snap), _connect()
+        try:
+            old.backup(new)
+        finally:
+            old.close()
+            new.close()
+        _initialized.discard(str(home()))  # a snapshot of an older schema gets migrated on the next use
+        return
+    live = home()
+    with tempfile.TemporaryDirectory() as d:
+        shutil.copy(snap, Path(d) / "p2b.sqlite")
+        with at_home(d):
+            if not get_research(rid):
+                raise rules.Rejected("这份备份里没有这个研究")
+            with at_home(live):
+                if get_research(rid):
+                    delete_research(rid)
+            copy_research(rid, live)
+
+
 def rehome(old):
     """After the data directory came from another machine (ops/handoff.py): point stored absolute paths at this one."""
     old, new = str(old).rstrip("/") + "/", str(home()).rstrip("/") + "/"
@@ -425,6 +578,188 @@ def rehome(old):
     with tx() as c:
         return sum(c.execute(f"UPDATE {t} SET {col} = ? || substr({col}, ?) WHERE substr({col}, 1, ?) = ?",
                              (new, len(old) + 1, len(old), old)).rowcount for t, col in (("papers", "pdf_path"), ("repos", "path")))
+
+
+def library_home(lib_id):
+    """A library's data directory on the shared server."""
+    if not re.fullmatch(r"[0-9a-f]{32}", lib_id or ""):
+        raise ValueError(f"bad library id: {lib_id!r}")
+    return Path(os.environ["P2B_ROOT"]) / "libs" / lib_id
+
+
+def config_of(lib_id):
+    path = library_home(lib_id) / "config.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+_LINKED = "SELECT ref FROM s.research_links WHERE research_id=:r AND kind="
+_THREADS = f"{_LINKED}'thread' UNION SELECT thread_id FROM s.messages WHERE id IN ({_LINKED}'message')"
+_MESSAGES = f"thread_id IN ({_LINKED}'thread') OR id IN ({_LINKED}'message')"
+# what a research takes along into a shared space, parents first; captures, anchors, topics and the rest stay behind
+_COPY = (
+    ("papers", f"id IN ({_LINKED}'paper' UNION SELECT paper_id FROM s.code_maps WHERE research_id=:r)"),
+    ("paper_text", f"paper_id IN ({_LINKED}'paper' UNION SELECT paper_id FROM s.code_maps WHERE research_id=:r)"),
+    ("repos", "id IN (SELECT repo_id FROM s.research_repos WHERE research_id=:r UNION SELECT repo_id FROM s.code_maps WHERE research_id=:r)"),
+    ("research", "id=:r"),
+    *((t, "research_id=:r") for t in ("research_links", "research_repos", "code_maps", "experiments", "research_docs",
+                                       "writing", "plans", "related_work", "exp_figures")),
+    ("threads", f"id IN ({_THREADS})"),
+    ("messages", _MESSAGES),
+    ("runs", f"id IN (SELECT run_id FROM s.messages WHERE {_MESSAGES}) AND status NOT IN {_UNFINISHED_SQL}"),
+    ("notes", f"id IN ({_LINKED}'note')"),
+)
+
+
+def copy_research(rid, dst):
+    """Copy a research and what it uses (papers with their files, linked discussions, docs, repos, code maps, diagrams)
+    into the library at dst, under the same ids; dst may already hold other things (moving a research back home),
+    which stay as they are, as does the original."""
+    src = home()
+    if not get_research(rid):
+        raise rules.Rejected("这个研究不存在或已删除")
+    where = dict(_COPY)
+    with at_home(dst), tx() as c:
+        c.execute("PRAGMA foreign_keys=OFF")  # what was left behind is unlinked below instead
+        c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
+        u = (_viewer.get() or {}).get("id")  # a member takes along only their own discussions and runs
+        mine = {"threads": " AND (user_id IS NULL OR user_id=:u)", "runs": " AND (user_id IS NULL OR user_id=:u)",
+                "messages": " AND thread_id IN (SELECT id FROM s.threads WHERE user_id IS NULL OR user_id=:u)"} if u else {}
+        for t, cond in _COPY:
+            cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({t})"))
+            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE ({cond}){mine.get(t, '')}", {"r": rid, "u": u})
+        r = {"r": rid}
+        c.execute(f"UPDATE main.threads SET agent_id=NULL WHERE {where['threads']}", r)  # the other library starts its own agents
+        c.execute("UPDATE main.threads SET parent_id=NULL WHERE parent_id NOT IN (SELECT id FROM threads)")
+        c.execute("UPDATE main.threads SET fork_message_id=NULL WHERE fork_message_id NOT IN (SELECT id FROM messages)")
+        c.execute("UPDATE notes SET paper_id=NULL WHERE paper_id NOT IN (SELECT id FROM papers)")
+        c.execute("UPDATE notes SET thread_id=NULL WHERE thread_id NOT IN (SELECT id FROM threads)")
+        old, new = str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/"
+        for t, col in (("papers", "pdf_path"), ("repos", "path"), ("research_docs", "path")):
+            c.execute(f"UPDATE {t} SET {col} = ? || substr({col}, ?) WHERE substr({col}, 1, ?) = ?", (new, len(old) + 1, len(old), old))
+        folders = [Path("papers") / p["id"].replace(":", "_").replace("/", "_") for p in c.execute(f"SELECT id FROM s.papers WHERE {where['papers']}", r)]
+        folders += [Path(p["path"][len(old):]) for p in c.execute(f"SELECT path FROM s.repos WHERE {where['repos']}", r) if p["path"].startswith(old)]
+        c.commit()
+        c.execute("DETACH DATABASE s")
+    for f in folders + [Path("diagrams") / rid, Path("assets") / "research" / rid]:
+        if (src / f).is_dir():
+            shutil.copytree(src / f, Path(dst) / f, symlinks=True, dirs_exist_ok=True)
+
+
+def copy_paper(pid, dst):
+    """A paper (row, full text, files) from here into the library at dst, which keeps its own if it has one."""
+    src, folder = home(), Path("papers") / pid.replace(":", "_").replace("/", "_")
+    with at_home(dst), tx() as c:
+        c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
+        for t, col in (("papers", "id"), ("paper_text", "paper_id")):
+            cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({t})"))
+            c.execute(f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM s.{t} WHERE {col}=?", (pid,))
+        old, new = str(src).rstrip("/") + "/", str(dst).rstrip("/") + "/"
+        c.execute("UPDATE papers SET pdf_path = ? || substr(pdf_path, ?) WHERE id=? AND substr(pdf_path, 1, ?) = ?", (new, len(old) + 1, pid, len(old), old))
+        c.commit()
+        c.execute("DETACH DATABASE s")
+    if (src / folder).is_dir() and not (Path(dst) / folder).exists():
+        shutil.copytree(src / folder, Path(dst) / folder, symlinks=True)
+
+
+def copy_thread(tid, dst, uid):
+    """A discussion with its messages and finished runs from here into the library at dst, as uid's private one there;
+    returns its scope, or None when there is no such discussion."""
+    src = home()
+    with tx() as c:
+        t = c.execute("SELECT scope FROM main.threads WHERE id=?", (tid,)).fetchone()  # main.: another member's carry reaches past the viewer's private view
+    if not t:
+        return None
+    with at_home(dst), tx() as c:
+        c.execute("PRAGMA foreign_keys=OFF")
+        c.execute("ATTACH DATABASE ? AS s", (str(src / "p2b.sqlite"),))
+        for table, cond in (("threads", "id=:t"), ("messages", "thread_id=:t"),
+                            ("runs", f"id IN (SELECT run_id FROM s.messages WHERE thread_id=:t) AND status NOT IN {_UNFINISHED_SQL}")):
+            cols = ", ".join(r["name"] for r in c.execute(f"PRAGMA main.table_info({table})"))
+            c.execute(f"INSERT OR IGNORE INTO main.{table} ({cols}) SELECT {cols} FROM s.{table} WHERE {cond}", {"t": tid})
+        c.execute("UPDATE main.threads SET user_id=:u, agent_id=NULL WHERE id=:t", {"u": uid, "t": tid})
+        # a tree carried whole keeps its branches; only parents and fork points left behind are cut
+        c.execute("UPDATE main.threads SET parent_id=NULL WHERE id=:t AND parent_id NOT IN (SELECT id FROM main.threads)", {"t": tid})
+        c.execute("UPDATE main.threads SET fork_message_id=NULL WHERE id=:t AND fork_message_id NOT IN (SELECT id FROM main.messages)", {"t": tid})
+        c.execute("UPDATE main.runs SET user_id=:u WHERE id IN (SELECT run_id FROM main.messages WHERE thread_id=:t)", {"u": uid, "t": tid})
+        c.commit()
+        c.execute("DETACH DATABASE s")
+    return t["scope"]
+
+
+def own_unowned(uid):
+    """A new space's discussions and runs, all copied from uid's library, are uid's own there."""
+    with tx() as c:
+        for t in ("threads", "runs"):
+            c.execute(f"UPDATE main.{t} SET user_id=? WHERE user_id IS NULL", (uid,))
+
+
+def carry_threads_home(uid, dst):
+    """A member's own discussions here (and the papers they were about) copied into the library at dst, keeping what
+    is already there; for when they leave a space or the space is archived. Runs here (the space)."""
+    with at_home(dst), tx() as c:
+        have = {r["id"] for r in c.execute("SELECT id FROM main.threads")}
+    with tx() as c:
+        tids = [r["id"] for r in c.execute("SELECT id FROM main.threads WHERE user_id=? ORDER BY created_at, rowid", (uid,))]
+    for tid in tids:
+        if tid in have:
+            continue
+        scope = copy_thread(tid, dst, uid)
+        if scope and scope.startswith("paper:"):
+            copy_paper(scope[len("paper:"):], dst)
+
+
+def research_of_paper(pid):
+    """The researches here that use this paper (for a personal library's paper page, from the spaces the user is in)."""
+    with tx() as c:
+        return _research_for(c, "paper", [pid]).get(pid, [])
+
+
+def freshen_paper(pid, space_ids):
+    """A paper in this library that also lives in the given spaces: pull what is newer there — the agent's card and
+    report when the space's revision is higher, and the path of a PDF this library never got. Derived artifacts and
+    immutable content only; topics, short names, notes and anchors here stay untouched. Call in the member's own
+    library. Returns (changed, pdf_path).
+    ponytail: revision counters count writes per library, so "higher" is approximate — a home copy regenerated many
+    times looks newer than a space copy written once but later; in practice cards are written once or twice."""
+    with tx() as c:
+        here = c.execute("SELECT card_rev, report_rev, page_count FROM papers WHERE id=?", (pid,)).fetchone()
+    if not here:
+        return False, None
+    card = report = pdf = None
+    for sid in space_ids:
+        with at_home(library_home(sid)), tx() as c:
+            r = c.execute("SELECT card, card_rev, report, report_rev, pdf_path, page_count FROM papers WHERE id=?", (pid,)).fetchone()
+        if not r:
+            continue
+        if r["card"] and r["card_rev"] > here["card_rev"] and (not card or r["card_rev"] > card[1]):
+            card = (r["card"], r["card_rev"])
+        if r["report"] and r["report_rev"] > here["report_rev"] and (not report or r["report_rev"] > report[1]):
+            report = (r["report"], r["report_rev"])
+        if not here["page_count"] and r["page_count"] and r["pdf_path"]:
+            pdf = pdf or r["pdf_path"]
+    if card or report:
+        with tx() as c:
+            if card:
+                c.execute("UPDATE papers SET card=?, card_rev=? WHERE id=?", (card[0], card[1], pid))
+            if report:
+                c.execute("UPDATE papers SET report=?, report_rev=? WHERE id=?", (report[0], report[1], pid))
+    return bool(card or report), pdf
+
+
+def member_papers(uid):
+    """The papers a space member added (captures they brought in) or discussed in their own threads; the personal
+    library lists them as pointers into the space. main.: past the viewer's private view."""
+    with tx() as c:
+        pids = {r[0] for r in c.execute("SELECT DISTINCT substr(scope, 7) FROM main.threads WHERE user_id=? AND scope LIKE 'paper:%'", (uid,))}
+        pids |= {r[0] for r in c.execute("SELECT DISTINCT a.paper_id FROM main.threads t JOIN anchors a ON t.scope='anchor:' || a.id WHERE t.user_id=?", (uid,))}
+        pids |= {r[0] for r in c.execute(
+            "SELECT DISTINCT cp.paper_id FROM main.captures cap JOIN capture_papers cp ON cp.capture_id=cap.id "
+            "WHERE (cap.user_id=? OR cap.user_id IS NULL) AND cp.state='confirmed'", (uid,))}  # NULL: 记录归属之前收下的，全空间共享
+        if not pids:
+            return []
+        return _rows(c.execute(
+            f"SELECT id, title, short_name, authors, published, created_at AS last_captured FROM papers WHERE id IN ({_qs(pids)}) "
+            "ORDER BY created_at DESC", tuple(pids)))
 
 
 def _migrate(conn):
@@ -455,6 +790,8 @@ def tx():
         if key not in _initialized:
             _migrate(conn)
             _initialized.add(key)
+        if _viewer.get():
+            _private(conn, _viewer.get()["id"])
         with conn:
             yield conn
     finally:
@@ -463,8 +800,9 @@ def tx():
 
 def _event(conn, actor, action, target, **detail):
     conn.execute(
-        "INSERT INTO events (at, actor, action, target, detail) VALUES (?,?,?,?,?)",
-        (now(), actor, action, target, json.dumps(detail, ensure_ascii=False) if detail else None),
+        "INSERT INTO events (at, actor, action, target, detail, user_id) VALUES (?,?,?,?,?,?)",
+        (now(), actor, action, target, json.dumps(detail, ensure_ascii=False) if detail else None,
+         _owner() if actor == "user" else None),
     )
 
 
@@ -480,8 +818,8 @@ def add_capture(capture_id, raw, source, thought=None, images=()):
         existing = c.execute("SELECT id FROM captures WHERE id=?", (capture_id,)).fetchone()
         if not existing:
             c.execute(
-                "INSERT INTO captures (id, created_at, raw, source) VALUES (?,?,?,?)",
-                (capture_id, now(), raw, source),
+                "INSERT INTO captures (id, created_at, raw, source, user_id) VALUES (?,?,?,?,?)",
+                (capture_id, now(), raw, source, _owner()),
             )
             if (thought or "").strip():
                 _start_thread(c, f"capture:{capture_id}", thought)
@@ -605,7 +943,7 @@ def delete_capture(capture_id):
                 c.execute(f"DELETE FROM research_links WHERE kind=? AND ref IN ({_qs(ids)})", (kind, *ids))
         pids = [p["id"] for p in plan["papers"]]
         refs = [capture_id, *threads, *pids]
-        c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(refs)})", refs)
+        c.execute(f"DELETE FROM main.runs WHERE ref IN ({_qs(refs)})", refs)
         _drop_threads(c, threads)
         for table, col, ids in (("notes", "id", gone["note"]), ("anchors", "paper_id", pids), ("paper_topics", "paper_id", pids),
                                 ("capture_papers", "paper_id", pids), ("paper_text", "paper_id", pids)):
@@ -645,8 +983,8 @@ def _drop_threads_to_trash(c, snap, ids):
 
 def _to_trash(c, kind, ref, title, detail, snap):
     tid = new_id()
-    c.execute("INSERT INTO trash (id, deleted_at, kind, ref, title, detail, rows) VALUES (?,?,?,?,?,?,?)",
-              (tid, now(), kind, ref, title, detail, json.dumps(snap, ensure_ascii=False)))
+    c.execute("INSERT INTO main.trash (id, deleted_at, kind, ref, title, detail, rows, user_id) VALUES (?,?,?,?,?,?,?,?)",
+              (tid, now(), kind, ref, title, detail, json.dumps(snap, ensure_ascii=False), _owner()))
     _event(c, "user", f"{kind}.delete", ref, trash=tid)
     return tid
 
@@ -671,7 +1009,7 @@ def delete_paper(pid):
         for kind, ids in gone.items():
             if ids:
                 c.execute(f"DELETE FROM research_links WHERE kind=? AND ref IN ({_qs(ids)})", (kind, *ids))
-        c.execute(f"DELETE FROM runs WHERE ref IN ({_qs(refs)})", refs)
+        c.execute(f"DELETE FROM main.runs WHERE ref IN ({_qs(refs)})", refs)
         _drop_threads_to_trash(c, snap, deps["thread"])
         if deps["note"]:
             c.execute(f"DELETE FROM notes WHERE id IN ({_qs(deps['note'])})", deps["note"])
@@ -705,7 +1043,7 @@ def delete_thread(thread_id):
             ("threads", "id=?", [thread_id]), ("messages", "thread_id=?", [thread_id]), ("runs", "ref=?", [thread_id]),
             ("research_links", f"(kind='thread' AND ref=?) OR (kind='message' AND ref IN ({_qs(msgs) or 'NULL'}))", links)))
         c.execute(f"DELETE FROM research_links WHERE (kind='thread' AND ref=?) OR (kind='message' AND ref IN ({_qs(msgs) or 'NULL'}))", links)
-        c.execute("DELETE FROM runs WHERE ref=?", (thread_id,))
+        c.execute("DELETE FROM main.runs WHERE ref=?", (thread_id,))
         _drop_threads_to_trash(c, snap, [thread_id])
         title = t["title"] or (first and first[0][:80]) or "（空讨论）"
         tid = _to_trash(c, "thread", thread_id, title, f"{len(msgs)} 条消息" if msgs else "", snap)
@@ -734,18 +1072,18 @@ def restore_trash(trash_id):
         for table, rows in snap.items():
             for r in rows:
                 try:
-                    c.execute(f"INSERT OR IGNORE INTO {table} ({','.join(r)}) VALUES ({_qs(r)})",  # _row decodes JSON columns
+                    c.execute(f"INSERT OR IGNORE INTO main.{table} ({','.join(r)}) VALUES ({_qs(r)})",  # _row decodes JSON columns
                               [json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v for v in r.values()])
                 except sqlite3.IntegrityError:
                     pass
         back = [r["id"] for r in snap.get("threads", [])]
         if back:  # a parent deleted meanwhile: hang at the top level instead
-            c.execute(f"UPDATE threads SET parent_id=NULL, fork_message_id=NULL WHERE id IN ({_qs(back)}) "
+            c.execute(f"UPDATE main.threads SET parent_id=NULL, fork_message_id=NULL WHERE id IN ({_qs(back)}) "
                       "AND parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM threads)", back)
         for k in kids:
-            c.execute("UPDATE threads SET parent_id=?, fork_message_id=? WHERE id=? AND parent_id IS ?",
+            c.execute("UPDATE main.threads SET parent_id=?, fork_message_id=? WHERE id=? AND parent_id IS ?",
                       (k["parent_id"], k["fork_message_id"], k["id"], k["lifted"]))
-        c.execute("DELETE FROM trash WHERE id=?", (trash_id,))
+        c.execute("DELETE FROM main.trash WHERE id=?", (trash_id,))
         _event(c, "user", f"{e['kind']}.restore", e["ref"])
     files = home() / "trash" / trash_id
     if files.exists():
@@ -763,7 +1101,7 @@ def purge_trash(trash_id=None):
     with tx() as c:
         ids = [trash_id] if trash_id else _ids(c, "SELECT id FROM trash WHERE deleted_at < ?", (cutoff,))
         if ids:
-            c.execute(f"DELETE FROM trash WHERE id IN ({_qs(ids)})", ids)
+            c.execute(f"DELETE FROM main.trash WHERE id IN ({_qs(ids)})", ids)
     for i in ids:
         shutil.rmtree(home() / "trash" / i, ignore_errors=True)
 
@@ -923,25 +1261,70 @@ def counts():
     return out
 
 
-# Your own actions: (at, kind, ref, text, extra). A paper read counts once per paper per day.
-_ACTIVITY = (
-    "SELECT created_at at, 'capture' kind, id ref, COALESCE(title, raw) text, NULL extra FROM captures UNION ALL "
-    "SELECT created_at, 'message', thread_id, text, (SELECT scope FROM threads t WHERE t.id=thread_id) FROM messages WHERE role='user' UNION ALL "
-    "SELECT created_at, 'anchor', paper_id, quote, (SELECT title FROM papers p WHERE p.id=paper_id) FROM anchors WHERE by='user' UNION ALL "
-    "SELECT created_at, 'note', paper_id, text, (SELECT title FROM papers p WHERE p.id=paper_id) FROM notes WHERE by='user' UNION ALL "
-    "SELECT at, 'triage', target, json_extract(detail, '$.triage'), (SELECT COALESCE(title, raw) FROM captures c WHERE c.id=target) "
-    "FROM events WHERE actor='user' AND action='capture.triage' UNION ALL "
-    "SELECT min(at), 'read', target, NULL, (SELECT title FROM papers p WHERE p.id=target) "
-    "FROM events WHERE actor='user' AND action='paper.read' GROUP BY target, date(at, 'localtime')"
-)
+def _activity_sql(uid, seen):
+    """Rows of (at, kind, ref, text, extra). uid set: only that member (a shared space). seen: hide user messages
+    already counted in their personal library, so a discussion copied into a space is not counted twice.
+    A paper read counts once per paper per day."""
+    w = " AND user_id=?" if uid else ""
+    bound = (uid,) if uid else ()
+    msg = " AND thread_id IN (SELECT id FROM threads WHERE user_id=?)" if uid else ""
+    hide = " AND id NOT IN (SELECT id FROM activity_seen)" if seen else ""
+    branches = [
+        f"SELECT created_at at, 'capture' kind, id ref, COALESCE(title, raw) text, NULL extra FROM captures{(' WHERE user_id=?' if uid else '')}",
+        f"SELECT created_at, 'message', thread_id, text, (SELECT scope FROM threads t WHERE t.id=thread_id) FROM messages WHERE role='user'{msg}{hide}",
+        f"SELECT created_at, 'anchor', paper_id, quote, (SELECT title FROM papers p WHERE p.id=paper_id) FROM anchors WHERE by='user'{w}",
+        f"SELECT created_at, 'note', paper_id, text, (SELECT title FROM papers p WHERE p.id=paper_id) FROM notes WHERE by='user'{w}",
+        f"SELECT at, 'triage', target, json_extract(detail, '$.triage'), (SELECT COALESCE(title, raw) FROM captures c WHERE c.id=target) "
+        f"FROM events WHERE actor='user' AND action='capture.triage'{w}",
+        f"SELECT min(at), 'read', target, NULL, (SELECT title FROM papers p WHERE p.id=target) "
+        f"FROM events WHERE actor='user' AND action='paper.read'{w} GROUP BY target, date(at, 'localtime')",
+        f"SELECT at, 'research', target, CASE action WHEN 'research.add' THEN '新建' WHEN 'research.update' THEN '修改' "
+        f"WHEN 'research.accept' THEN '采纳修改稿' WHEN 'research.establish' THEN '确立' ELSE '重新打开' END, "
+        f"(SELECT title FROM research r WHERE r.id=target) FROM events WHERE actor='user' AND action IN "
+        f"('research.add','research.update','research.accept','research.establish','research.reopen'){w}",
+        f"SELECT at, 'experiment', (SELECT research_id FROM experiments e WHERE e.id=target), "
+        f"CASE action WHEN 'experiment.add' THEN '记下' ELSE '修改' END, "
+        f"(SELECT coalesce(nullif(title, ''), substr(raw, 1, 80)) FROM experiments e WHERE e.id=target) "
+        f"FROM events WHERE actor='user' AND action IN ('experiment.add','experiment.edit'){w}",
+        f"SELECT at, 'topics', target, NULL, (SELECT title FROM papers p WHERE p.id=target) "
+        f"FROM events WHERE actor='user' AND action='topics.set'{w}",
+        f"SELECT at, 'link', target, json_extract(detail, '$.paper'), (SELECT coalesce(title, raw) FROM captures c WHERE c.id=target) "
+        f"FROM events WHERE actor='user' AND action='link'{w}",
+        f"SELECT at, 'topic', target, CASE action WHEN 'topic.add' THEN '新建' ELSE '采纳' END, target "
+        f"FROM events WHERE actor='user' AND action IN ('topic.add','topic.accept'){w}",
+        f"SELECT at, 'move', target, NULL, (SELECT coalesce(title, scope) FROM threads t WHERE t.id=target) "
+        f"FROM events WHERE actor='user' AND action='thread.move'{w}",
+        f"SELECT at, 'figures', target, NULL, (SELECT title FROM research r WHERE r.id=target) "
+        f"FROM events WHERE actor='user' AND action='figures.update'{w}",
+        f"SELECT at, 'material', target, CASE json_extract(detail, '$.kind') WHEN 'paper' THEN '论文' WHEN 'thread' THEN '讨论' "
+        f"WHEN 'message' THEN '消息' WHEN 'note' THEN '笔记' WHEN 'capture' THEN '捕获' WHEN 'doc' THEN '文档' "
+        f"ELSE json_extract(detail, '$.kind') END, (SELECT title FROM research r WHERE r.id=target) "
+        f"FROM events WHERE actor='user' AND action='research.link'{w}",
+        f"SELECT at, 'writing', target, CASE action WHEN 'writing.save' THEN '保存' ELSE '采纳修改稿' END, "
+        f"(SELECT title FROM research r WHERE r.id=target) FROM events WHERE actor='user' AND action IN ('writing.save','writing.accept'){w}",
+        f"SELECT at, 'plan', target, NULL, (SELECT title FROM research r WHERE r.id=target) "
+        f"FROM events WHERE actor='user' AND action='plan.accept'{w}",
+    ]
+    sql = " UNION ALL ".join(branches)
+    return sql, bound * sql.count("?")
 
 
-def activity(days=371):
-    """Actions per local day over the last year, the current streak (today may still be empty) and the longest one."""
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+def _activity_ready(c, uid, skip_messages):
+    if uid is None:
+        uid = _owner()
+    if skip_messages:
+        c.execute("CREATE TEMP TABLE activity_seen (id TEXT PRIMARY KEY)")
+        c.executemany("INSERT OR IGNORE INTO activity_seen VALUES (?)", [(i,) for i in skip_messages])
+    return _activity_sql(uid, bool(skip_messages))
+
+
+def user_message_ids():
     with tx() as c:
-        counts = dict(c.execute(
-            f"SELECT date(at, 'localtime') d, count(*) FROM ({_ACTIVITY}) WHERE at >= ? GROUP BY d", (since,)).fetchall())
+        return [r[0] for r in c.execute("SELECT id FROM messages WHERE role='user'")]
+
+
+def activity_summary(counts):
+    """Streak and longest run from a {local day: count} map. Today may still be empty."""
     day = date.today()
     if day.isoformat() not in counts:
         day -= timedelta(days=1)
@@ -957,10 +1340,23 @@ def activity(days=371):
     return {"days": counts, "streak": streak, "best": best}
 
 
-def activity_day(day):
+def activity(days=371, uid=None, skip_messages=()):
+    """Actions per local day over the last year. uid and skip_messages: one member's work in a shared space,
+    without the discussions already counted at home."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    with tx() as c:
+        sql, args = _activity_ready(c, uid, skip_messages)
+        counts = dict(c.execute(
+            f"SELECT date(at, 'localtime') d, count(*) FROM ({sql}) WHERE at >= ? GROUP BY d", (*args, since)).fetchall())
+    return activity_summary(counts)
+
+
+def activity_day(day, uid=None, skip_messages=()):
     """What you did on one local day (YYYY-MM-DD), oldest first."""
     with tx() as c:
-        return [dict(r) for r in c.execute(f"SELECT * FROM ({_ACTIVITY}) WHERE date(at, 'localtime')=? ORDER BY at", (day,))]
+        sql, args = _activity_ready(c, uid, skip_messages)
+        return [dict(r) for r in c.execute(
+            f"SELECT * FROM ({sql}) WHERE date(at, 'localtime')=? ORDER BY at", (*args, day))]
 
 
 def mark_read(pid):
@@ -997,6 +1393,16 @@ def set_short_name(pid, name, by):
         c.execute("UPDATE papers SET short_name=?, short_name_by=? WHERE id=?", (name, by, pid))
 
 
+def set_aliases(pid, names):
+    """The whole list, as the user wrote it: each trimmed to 40 characters, duplicates dropped, at most 8."""
+    names = list(dict.fromkeys(n for n in (re.sub(r"\s+", " ", str(x)).strip()[:40] for x in names or []) if n))
+    if len(names) > 8:
+        raise rules.Rejected("别名最多 8 个")
+    with tx() as c:
+        if not c.execute("UPDATE papers SET aliases=? WHERE id=?", (json.dumps(names, ensure_ascii=False) if names else None, pid)).rowcount:
+            raise rules.Rejected("这篇论文不存在")
+
+
 def unnamed_papers(limit=8):
     """Listed papers nobody has looked for a short name in yet."""
     with tx() as c:
@@ -1005,7 +1411,8 @@ def unnamed_papers(limit=8):
 
 def set_fulltext(pid, pdf_path, pages):
     (paper_dir(pid) / "pages.json").write_text(json.dumps(pages, ensure_ascii=False))
-    (paper_dir(pid) / "structure.json").unlink(missing_ok=True)  # figures and outline come from the PDF
+    for derived in ("structure.json", "paper-zh.pdf", "paper-zh.err"):  # figures, outline and translation come from the PDF
+        (paper_dir(pid) / derived).unlink(missing_ok=True)
     with tx() as c:
         c.execute("UPDATE papers SET pdf_path=?, page_count=? WHERE id=?", (str(pdf_path), len(pages), pid))
         c.execute("INSERT OR REPLACE INTO paper_text VALUES (?,?)", (pid, "\n".join(pages)))
@@ -1090,6 +1497,29 @@ def link(capture_id, pid, by, state="confirmed", evidence=None):
             "INSERT OR REPLACE INTO capture_papers VALUES (?,?,?,?,?,?)", (capture_id, pid, state, by, evidence, now())
         )
         _event(c, by, "link", capture_id, paper=pid, state=state)
+    if state == "confirmed":
+        _take_home(pid)
+
+
+def _take_home(pid):
+    """Engaging with a paper in a shared space also files it in the engager's own library (a capture keeps it listed
+    there). Papers are immutable content; the copies then drift only in what agents derive from them.
+    ponytail: a failure here is swallowed — going home must never block the space's own work; the next engagement retries."""
+    viewer = _viewer.get()
+    if not viewer or not multi():
+        return
+    try:
+        dst = library_home(viewer["library"])
+        if str(dst) == str(home()):
+            return
+        copy_paper(pid, dst)
+        with at_home(dst):
+            if not get_paper(pid)["listed"]:
+                cap, _ = add_capture(new_id(), rules.id_label(pid), "space")
+                link(cap["id"], pid, "user", evidence="在共享空间里添加或讨论的")
+                update_capture(cap["id"], status="mapped")
+    except Exception:
+        pass
 
 
 def unlink(capture_id, pid, by):
@@ -1187,9 +1617,15 @@ def add_topic(name, parent, by, reason=None, papers=()):
     with tx() as c:
         parent = _topic_parent(c, parent)
         path = f"{parent}/{name}" if parent else name
-        if c.execute("SELECT state FROM topics WHERE path=?", (path,)).fetchone():
-            raise rules.Rejected(f"主题 {path} 已经有了（或已被提议）")
         known = _papers_in(c, papers)
+        cur = c.execute("SELECT state, for_papers FROM topics WHERE path=?", (path,)).fetchone()
+        if cur and cur["state"] == "proposed" and by != "user":
+            # papers that arrive while a proposal waits join it, so accepting files them too
+            merged = list(dict.fromkeys(json.loads(cur["for_papers"] or "[]") + known))
+            c.execute("UPDATE topics SET for_papers=? WHERE path=?", (json.dumps(merged) if merged else None, path))
+            return path
+        if cur:
+            raise rules.Rejected(f"主题 {path} 已经有了（或已被提议）")
         position = c.execute("SELECT coalesce(max(position), -1) + 1 FROM topics WHERE parent IS ?", (parent,)).fetchone()[0]
         c.execute("INSERT INTO topics (path, name, parent, position, state, reason, for_papers) VALUES (?,?,?,?,?,?,?)",
                   (path, name, parent, position, "active" if by == "user" else "proposed", (reason or "").strip() or None,
@@ -1216,7 +1652,7 @@ def _repath(c, old, new, name, parent):
     for table in ("paper_topics", "research_topics"):
         c.execute(f"UPDATE {table} SET topic=? WHERE topic=?", (new, old))
     c.execute("UPDATE notes SET topic=? WHERE topic=?", (new, old))
-    c.execute("UPDATE threads SET scope=? WHERE scope=?", (f"topic:{new}", f"topic:{old}"))
+    c.execute("UPDATE main.threads SET scope=? WHERE scope=?", (f"topic:{new}", f"topic:{old}"))
     c.execute("DELETE FROM topics WHERE path=?", (old,))
 
 
@@ -1258,7 +1694,7 @@ def delete_topic(path):
         c.execute("DELETE FROM paper_topics WHERE topic=?", (path,))
         c.execute("DELETE FROM research_topics WHERE topic=?", (path,))
         c.execute("UPDATE notes SET topic=? WHERE topic=?", (up, path))
-        c.execute("UPDATE threads SET scope=? WHERE scope=?", (f"topic:{up}" if up else "library", f"topic:{path}"))
+        c.execute("UPDATE main.threads SET scope=? WHERE scope=?", (f"topic:{up}" if up else "library", f"topic:{path}"))
         c.execute("DELETE FROM topics WHERE path=?", (path,))
         _event(c, "user", "topic.delete", path)
 
@@ -1316,7 +1752,8 @@ def add_note(text, by, paper_id=None, topic=None, thread_id=None):
         raise rules.Rejected("笔记不能为空")
     nid = new_id()
     with tx() as c:
-        c.execute("INSERT INTO notes VALUES (?,?,?,?,?,?,?)", (nid, now(), text.strip(), by, paper_id, topic, thread_id))
+        c.execute("INSERT INTO notes (id, created_at, text, by, paper_id, topic, thread_id, user_id) VALUES (?,?,?,?,?,?,?,?)",
+                  (nid, now(), text.strip(), by, paper_id, topic, thread_id, _owner() if by == "user" else None))
     return nid
 
 
@@ -1430,10 +1867,10 @@ def _threads_of(c, scopes):
 def _start_thread(c, scope, text=None, parent_id=None, tid=None, fork=None):
     """A user who opens a discussion from another one placed it there (parent_by='user')."""
     tid = tid or new_id()
-    added = c.execute("INSERT OR IGNORE INTO threads (id, created_at, scope, parent_id, parent_by, fork_message_id) VALUES (?,?,?,?,?,?)",
-                      (tid, now(), scope, parent_id, parent_id and "user", fork)).rowcount
+    added = c.execute("INSERT OR IGNORE INTO main.threads (id, created_at, scope, parent_id, parent_by, fork_message_id, user_id) "
+                      "VALUES (?,?,?,?,?,?,?)", (tid, now(), scope, parent_id, parent_id and "user", fork, _owner())).rowcount
     if added and (text or "").strip():
-        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (new_id(), now(), tid, "user", text.strip(), None))
+        c.execute("INSERT INTO main.messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (new_id(), now(), tid, "user", text.strip(), None))
     return tid
 
 
@@ -1442,11 +1879,11 @@ def _drop_threads(c, ids):
     if not ids:
         return
     q = _qs(ids)
-    while c.execute(f"UPDATE threads SET parent_id=(SELECT p.parent_id FROM threads p WHERE p.id=threads.parent_id), "
+    while c.execute(f"UPDATE main.threads SET parent_id=(SELECT p.parent_id FROM main.threads p WHERE p.id=threads.parent_id), "
                     f"fork_message_id=NULL WHERE parent_id IN ({q}) AND id NOT IN ({q})", (*ids, *ids)).rowcount:
         pass
-    c.execute(f"DELETE FROM messages WHERE thread_id IN ({q})", ids)
-    c.execute(f"DELETE FROM threads WHERE id IN ({q})", ids)
+    c.execute(f"DELETE FROM main.messages WHERE thread_id IN ({q})", ids)
+    c.execute(f"DELETE FROM main.threads WHERE id IN ({q})", ids)
 
 
 def _scope_title(c, scope):
@@ -1521,7 +1958,16 @@ def new_thread(scope, parent_id=None, text=None, tid=None, fork=None):
             parent_id = r["thread_id"]
         if parent_id and not c.execute("SELECT 1 FROM threads WHERE id=?", (parent_id,)).fetchone():
             raise rules.Rejected("要接着的那段讨论不存在了")
-        return _start_thread(c, scope, text, parent_id, tid, fork)
+        out = _start_thread(c, scope, text, parent_id, tid, fork)
+    kind, _, ref = scope.partition(":")  # discussing a paper in a space engages with it too: it comes home
+    if kind == "paper":
+        _take_home(ref)
+    elif kind == "anchor":
+        with tx() as c:
+            r = c.execute("SELECT paper_id FROM anchors WHERE id=?", (ref,)).fetchone()
+        if r:
+            _take_home(r["paper_id"])
+    return out
 
 
 def set_thread_title(tid, title, by):
@@ -1535,7 +1981,7 @@ def set_thread_title(tid, title, by):
             raise rules.Rejected("这段讨论不存在了")
         if by != "user" and cur["title_by"] == "user":
             raise rules.Rejected("用户已手动改过这段讨论的标题，agent 不能修改")
-        c.execute("UPDATE threads SET title=?, title_by=? WHERE id=?", (title, by, tid))
+        c.execute("UPDATE main.threads SET title=?, title_by=? WHERE id=?", (title, by, tid))
 
 
 def move_thread(tid, parent_id, by):
@@ -1557,7 +2003,7 @@ def move_thread(tid, parent_id, by):
             if not r:
                 raise rules.Rejected(f"要挂到的讨论 {up} 不存在")
             up = r["parent_id"]
-        c.execute("UPDATE threads SET parent_id=?, parent_by=?, fork_message_id=NULL WHERE id=?", (parent_id or None, by, tid))
+        c.execute("UPDATE main.threads SET parent_id=?, parent_by=?, fork_message_id=NULL WHERE id=?", (parent_id or None, by, tid))
         _event(c, by, "thread.move", tid, parent=parent_id)
 
 
@@ -1568,21 +2014,239 @@ def pending_titles(limit=12):
                        "(SELECT 1 FROM messages m WHERE m.thread_id=t.id AND m.role='user') ORDER BY t.created_at LIMIT ?", (limit,))
 
 
+def _live_thread(c, tid):
+    if not c.execute("SELECT 1 FROM messages WHERE thread_id=? LIMIT 1", (tid,)).fetchone():
+        raise rules.Rejected(f"讨论 {tid} 不存在，或还没有消息")
+
+
+def _map_pair(pairs, a, b, label):
+    key = tuple(sorted((a, b)))
+    if key in pairs:
+        raise rules.Rejected(f"「{label}」的两端之间已经有一条关系")
+    pairs.add(key)
+
+
+def _map_scope(c):
+    """None on a personal library. In a shared space, nodes whose source discussions this member can all see."""
+    if not _owner():
+        return None
+    visible = {r["id"] for r in c.execute("SELECT id FROM threads")}
+    srcs = {}
+    for r in c.execute("SELECT node_id, thread_id FROM main.map_sources"):
+        srcs.setdefault(r["node_id"], set()).add(r["thread_id"])
+    return {nid for nid, tids in srcs.items() if tids <= visible}
+
+
+def thread_owners():
+    """Distinct user ids on discussions, None included when some threads are everyone's."""
+    with tx() as c:
+        return [r["user_id"] for r in c.execute("SELECT DISTINCT user_id FROM main.threads")]
+
+
+def pending_map(limit=20):
+    """Titled discussions the map has not read since their latest message. One still being talked in waits:
+    an unfinished chat, or a message under 10 minutes old (same-second edits still count once it is quiet)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(timespec="seconds")
+    with tx() as c:
+        return _rows(c.execute(
+            "SELECT t.id, max(m.created_at) AS last_at, count(m.id) AS n FROM threads t JOIN messages m ON m.thread_id=t.id "
+            f"WHERE t.title IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.ref=t.id AND r.kind='chat' AND r.status IN {_UNFINISHED_SQL}) "
+            "GROUP BY t.id "
+            "HAVING (max(m.created_at) > coalesce((SELECT at FROM map_seen s WHERE s.thread_id=t.id), '') "
+            "OR count(m.id) != coalesce((SELECT n FROM map_seen s WHERE s.thread_id=t.id), -1)) "
+            "AND max(m.created_at) <= ? ORDER BY last_at DESC, t.rowid DESC LIMIT ?", (cutoff, limit)))
+
+
+def get_map():
+    """Groups, nodes and cross edges. A node's sources are the discussions that say that sentence."""
+    with tx() as c:
+        groups = [{"id": r["id"], "name": r["name"]} for r in c.execute("SELECT id, name FROM map_groups ORDER BY position, name")]
+        by_node = {}
+        for s in c.execute(
+                "SELECT s.node_id, s.thread_id, t.title, "
+                "(SELECT text FROM messages u WHERE u.thread_id=t.id AND u.role='user' ORDER BY u.created_at, u.rowid LIMIT 1) AS first "
+                "FROM map_sources s JOIN threads t ON t.id=s.thread_id ORDER BY t.created_at"):
+            by_node.setdefault(s["node_id"], []).append({"id": s["thread_id"], "title": s["title"] or s["first"] or s["thread_id"]})
+        nodes = [{"id": r["id"], "group": r["group_id"], "kind": r["kind"], "text": r["text"], "parent": r["parent_id"],
+                  "rel": r["rel"], "partial": bool(r["partial"]), "text_by": r["text_by"], "hidden": bool(r["hidden"]),
+                  "sources": by_node.get(r["id"], [])}
+                 for r in c.execute("SELECT * FROM map_nodes ORDER BY created_at, rowid")]
+        edges = [{"src": r["src"], "dst": r["dst"], "rel": r["rel"]} for r in c.execute("SELECT src, dst, rel FROM map_edges ORDER BY src, dst")]
+        scope = _map_scope(c)
+        if scope is not None:
+            nodes = [n for n in nodes if n["id"] in scope]
+            ids = {n["id"] for n in nodes}
+            edges = [e for e in edges if e["src"] in ids and e["dst"] in ids]
+            used = {n["group"] for n in nodes}
+            groups = [g for g in groups if g["id"] in used]
+    return {"groups": groups, "nodes": nodes, "edges": edges}
+
+
+def put_map(doc):
+    """Merge an agent update. Omitted nodes stay. `drop` removes an agent node nothing hangs under. `edges` adds or
+    replaces those pairs; `drop_edges` removes those pairs; omit both to leave cross edges. User-edited sentences
+    and hidden nodes stay. `seen` marks threads just read, including ones that produced no node.
+    ponytail: group order is creation order; the agent cannot reorder regions."""
+    doc = rules.validate_map(doc)
+    with tx() as c:
+        scope = _map_scope(c)
+        existing = {r["id"]: _row(r) for r in c.execute("SELECT * FROM map_nodes")}
+        if scope is not None:
+            existing = {i: n for i, n in existing.items() if i in scope}
+        groups = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM map_groups")}
+        drop, incoming = set(doc["drop"]), {n["id"]: n for n in doc["nodes"]}
+        if drop & incoming.keys():
+            raise rules.Rejected("同一个节点不能又提交又去掉")
+        for nid in drop:
+            cur = existing.get(nid)
+            if not cur:
+                raise rules.Rejected(f"要去掉的节点不在地图上：{nid}")
+            if cur["text_by"] == "user" or cur["hidden"]:
+                raise rules.Rejected(f"用户留着的节点不能去掉：{cur['text']}")
+        final = {nid: {**cur, "sources": None} for nid, cur in existing.items() if nid not in drop}
+        for n in doc["nodes"]:
+            cur = existing.get(n["id"])
+            if cur and cur["hidden"]:
+                if n["text"] != cur["text"] or n["kind"] != cur["kind"]:
+                    raise rules.Rejected(f"节点已藏起，agent 不能改：{cur['text']}")
+                continue
+            if cur and cur["text_by"] == "user" and (n["text"] != cur["text"] or n["kind"] != cur["kind"]):
+                raise rules.Rejected(f"用户已手动改过这句，agent 不能修改：{cur['text']}")
+            for tid in n["sources"]:
+                _live_thread(c, tid)
+            kept = cur and cur["text_by"] == "user"
+            final[n["id"]] = {"id": n["id"], "group_id": n["group"], "kind": cur["kind"] if kept else n["kind"],
+                              "text": cur["text"] if kept else n["text"], "parent_id": n["parent"], "rel": n["rel"],
+                              "partial": int(n["partial"]), "text_by": cur["text_by"] if cur else "agent", "hidden": 0,
+                              "sources": n["sources"], "created_at": cur["created_at"] if cur else None}
+        for g in doc["groups"]:
+            groups[g["id"]] = g["name"]
+        for n in final.values():
+            if n["group_id"] not in groups:
+                raise rules.Rejected(f"节点「{n['text']}」的分组不存在：{n['group_id']}")
+            parent = n["parent_id"]
+            if parent and parent not in final:
+                raise rules.Rejected(f"「{n['text']}」的上级不在地图上")
+            if parent:
+                rules.map_spine(n["rel"], final[parent]["kind"], n["kind"])
+                if n["group_id"] != final[parent]["group_id"]:
+                    raise rules.Rejected(f"「{n['rel']}」的两端要在同一分组，跨分组用对照、支撑或待证")
+            elif n["rel"]:
+                raise rules.Rejected(f"「{n['text']}」没有上级，不能标「{n['rel']}」")
+        for start in final:
+            seen, nid = set(), start
+            while nid:
+                if nid in seen:
+                    raise rules.Rejected("节点互相指成了环")
+                seen.add(nid)
+                nid = final[nid]["parent_id"]
+        # only what this update touches: older flat nodes and groups do not block it
+        for n in doc["nodes"]:
+            row = final[n["id"]]
+            if row["kind"] == "conclusion" and not row["parent_id"] and not row["hidden"]:
+                raise rules.Rejected(f"结论「{row['text']}」要挂在它回答的问题下面（回答），或作另一条结论的前提；"
+                                     "这组还没有主问题就先补一个")
+        for gid in {final[n["id"]]["group_id"] for n in doc["nodes"]}:
+            k = sum(1 for x in final.values() if x["group_id"] == gid and not x["hidden"])
+            if k > rules.MAP_GROUP_MAX:
+                raise rules.Rejected(f"分组「{groups[gid]}」有 {k} 个节点，最多 {rules.MAP_GROUP_MAX} 个："
+                                     "把说同一件事的合成一句，次要的细节放进 drop，留在讨论里")
+        pairs = set()
+        for n in final.values():
+            if n["parent_id"]:
+                _map_pair(pairs, n["id"], n["parent_id"], n["text"])
+        by_pair = {tuple(sorted((r["src"], r["dst"]))): {"src": r["src"], "dst": r["dst"], "rel": r["rel"]}
+                   for r in c.execute("SELECT src, dst, rel FROM main.map_edges")
+                   if r["src"] not in drop and r["dst"] not in drop and (scope is None or (r["src"] in scope and r["dst"] in scope))}
+        for e in doc["drop_edges"]:
+            if e["src"] in drop or e["dst"] in drop:
+                continue
+            pair = tuple(sorted((e["src"], e["dst"])))
+            cur = by_pair.get(pair)
+            if not cur or (cur["src"], cur["dst"], cur["rel"]) != (e["src"], e["dst"], e["rel"]):
+                raise rules.Rejected(f"要去掉的跨线不在地图上：{e['src']} {e['rel']} {e['dst']}")
+            del by_pair[pair]
+        for e in doc["edges"]:
+            by_pair[tuple(sorted((e["src"], e["dst"])))] = e
+        cross = list(by_pair.values())
+        for e in cross:
+            if e["src"] not in final or e["dst"] not in final:
+                raise rules.Rejected(f"跨线的两端要是地图上的节点（{e['rel']}）")
+            rules.map_cross(e["rel"], final[e["src"]]["kind"], final[e["dst"]]["kind"])
+            _map_pair(pairs, e["src"], e["dst"], final[e["src"]]["text"])
+        for tid in doc["seen"]:
+            _live_thread(c, tid)
+        stamp, pos = now(), c.execute("SELECT coalesce(max(position), -1) FROM map_groups").fetchone()[0]
+        for g in doc["groups"]:
+            if c.execute("SELECT 1 FROM map_groups WHERE id=?", (g["id"],)).fetchone():
+                c.execute("UPDATE map_groups SET name=? WHERE id=?", (g["name"], g["id"]))
+            else:
+                pos += 1
+                c.execute("INSERT INTO map_groups (id, name, position) VALUES (?,?,?)", (g["id"], g["name"], pos))
+        for nid in drop:
+            c.execute("DELETE FROM map_nodes WHERE id=?", (nid,))
+        for n in doc["nodes"]:
+            if existing.get(n["id"], {}).get("hidden"):
+                continue
+            row = final[n["id"]]
+            if n["id"] in existing:
+                c.execute("UPDATE map_nodes SET group_id=?, kind=?, text=?, parent_id=?, rel=?, partial=?, updated_at=? WHERE id=?",
+                          (row["group_id"], row["kind"], row["text"], row["parent_id"], row["rel"], row["partial"], stamp, n["id"]))
+            else:
+                c.execute("INSERT INTO map_nodes (id, group_id, kind, text, parent_id, rel, partial, text_by, hidden, created_at, updated_at) "
+                          "VALUES (?,?,?,?,?,?,?,'agent',0,?,?)",
+                          (n["id"], row["group_id"], row["kind"], row["text"], row["parent_id"], row["rel"], row["partial"], stamp, stamp))
+            c.execute("DELETE FROM map_sources WHERE node_id=?", (n["id"],))
+            c.executemany("INSERT INTO map_sources (node_id, thread_id) VALUES (?,?)", [(n["id"], t) for t in row["sources"]])
+        if doc["edges"] or doc["drop_edges"]:
+            if scope is None:
+                c.execute("DELETE FROM map_edges")
+            else:
+                keep = list(final)
+                if keep:
+                    c.execute(f"DELETE FROM main.map_edges WHERE src IN ({_qs(keep)}) AND dst IN ({_qs(keep)})", [*keep, *keep])
+            c.executemany("INSERT INTO map_edges (src, dst, rel) VALUES (?,?,?)", [(e["src"], e["dst"], e["rel"]) for e in cross])
+        c.execute("DELETE FROM map_groups WHERE id NOT IN (SELECT group_id FROM map_nodes)")
+        for tid in doc["seen"]:
+            at, nmsg = c.execute("SELECT max(created_at), count(*) FROM messages WHERE thread_id=?", (tid,)).fetchone()
+            # plain update: INSERT ON CONFLICT fires both sync triggers and the second insert collides
+            if c.execute("SELECT 1 FROM map_seen WHERE thread_id=?", (tid,)).fetchone():
+                c.execute("UPDATE map_seen SET at=?, n=? WHERE thread_id=?", (at, nmsg, tid))
+            else:
+                c.execute("INSERT INTO map_seen (thread_id, at, n) VALUES (?,?,?)", (tid, at, nmsg))
+    return {"ok": True, "nodes": len(final), "seen": len(doc["seen"])}
+
+
+def set_map_node(nid, text=None, hidden=None):
+    """The user rewrites a sentence (the agent then leaves it) or hides the node."""
+    if text is None and hidden is None:
+        raise rules.Rejected("没有要改的")
+    with tx() as c:
+        scope = _map_scope(c)
+        cur = c.execute("SELECT kind FROM map_nodes WHERE id=?", (nid,)).fetchone()
+        if not cur or (scope is not None and nid not in scope):
+            raise rules.Rejected("这个节点不在地图上")
+        if text is not None:
+            c.execute("UPDATE map_nodes SET text=?, text_by='user', updated_at=? WHERE id=?", (rules.map_sentence(text, cur["kind"]), now(), nid))
+        if hidden is not None:
+            c.execute("UPDATE map_nodes SET hidden=?, updated_at=? WHERE id=?", (1 if hidden else 0, now(), nid))
+
+
 def set_thread_agent(thread_id, agent_id):
     with tx() as c:
-        c.execute("UPDATE threads SET agent_id=? WHERE id=?", (agent_id, thread_id))
+        c.execute("UPDATE main.threads SET agent_id=? WHERE id=?", (agent_id, thread_id))
 
 
 def add_message(thread_id, role, text, run_id=None):
     mid = new_id()
     with tx() as c:
-        c.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
+        c.execute("INSERT INTO main.messages (id, created_at, thread_id, role, text, run_id) VALUES (?,?,?,?,?,?)", (mid, now(), thread_id, role, text, run_id))
     return mid
 
 
 def drop_messages(ids):
     with tx() as c:
-        c.execute(f"DELETE FROM messages WHERE id IN ({_qs(ids)})", ids)
+        c.execute(f"DELETE FROM main.messages WHERE id IN ({_qs(ids)})", ids)
 
 
 # ---------- research ----------
@@ -1742,6 +2406,8 @@ def link_research(rid, kind, ref, by, role=None):
         if role is not None:
             c.execute("UPDATE research_links SET role=? WHERE research_id=? AND kind=? AND ref=?", (role or None, rid, kind, ref))
         c.execute("UPDATE research SET updated_at=? WHERE id=?", (now(), rid))
+        if by == "user":
+            _event(c, "user", "research.link", rid, kind=kind, ref=ref)
 
 
 def rejected_in_research(rid):
@@ -1933,6 +2599,8 @@ def update_experiment(eid, by, base_rev=None, asked=False, **fields):
         cols = ", ".join(f"{k}=?" for k in fields)
         c.execute(f"UPDATE experiments SET {cols}, updated_at=?, edited_by=?, revision=revision+1 WHERE id=?",
                   (*fields.values(), now(), by, eid))
+        if by == "user":
+            _event(c, "user", "experiment.edit", eid)
         return cur["revision"] + 1
 
 
@@ -1956,6 +2624,12 @@ def get_writing(rid):
                  "updated_at": None, "edited_by": None, "overleaf": None}
 
 
+def overleaf_researches(project):
+    """The researches of this library written in this Overleaf project (they share its checkout)."""
+    with tx() as c:
+        return [r[0] for r in c.execute("SELECT research_id FROM writing WHERE overleaf=?", (project,))]
+
+
 def set_overleaf(rid, project):
     with tx() as c:
         c.execute("INSERT OR IGNORE INTO writing (research_id, revision) VALUES (?, 0)", (rid,))
@@ -1971,6 +2645,8 @@ def update_writing(rid, base_rev=None, by="user", **sections):
         cols = ", ".join(f"{k}=?" for k in sections)
         c.execute(f"UPDATE writing SET {cols}, updated_at=?, edited_by=?, revision=revision+1 WHERE research_id=?",
                   (*sections.values(), now(), by, rid))
+        if by == "user":
+            _event(c, "user", "writing.save", rid)
         return (cur["revision"] if cur else 0) + 1
 
 
@@ -1992,6 +2668,7 @@ def accept_writing(rid, base_rev=None, fields=None):
     update_writing(rid, base_rev, "agent", **{k: p[k] for k in ("abstract", "introduction") if p.get(k) and (fields is None or k in fields)})
     with tx() as c:
         c.execute("UPDATE writing SET proposal=NULL WHERE research_id=?", (rid,))
+        _event(c, "user", "writing.accept", rid)
 
 
 def discard_writing(rid):
@@ -2031,6 +2708,8 @@ def accept_plan(rid, base_rev=None):
         raise rules.Rejected("没有待确认的计划修改稿")
     update_plan(rid, p["tasks"], "agent", base_rev)
     discard_plan(rid)
+    with tx() as c:
+        _event(c, "user", "plan.accept", rid)
 
 
 def discard_plan(rid):
@@ -2041,31 +2720,55 @@ def discard_plan(rid):
 def get_figures(rid):
     with tx() as c:
         f = _row(c.execute("SELECT * FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
+        if f:
+            f["events"] = _rows(c.execute("SELECT at, actor, action FROM events WHERE target=? AND action LIKE 'figures.%' "
+                                          "ORDER BY at DESC LIMIT 5", (rid,)))
     return f or {"research_id": rid, "design": None, "figures": [], "cells": [], "proposal": None, "revision": 0, "updated_at": None, "edited_by": None}
 
 
-def update_figures(rid, figures, by, base_rev=None, design=None):
+def update_figures(rid, figures, by, base_rev=None, design=None, renames=None):
     """figures: already checked by rules.validate_figures; design (rules.validate_setup) None keeps the old setup.
-    Cells of rows, series or figures that are gone are dropped."""
+    renames {old name: new name}: a method renamed everywhere, its cells follow. Cells of rows, series or figures
+    that are gone are dropped."""
     keep = {(f["id"], r, s) for f in figures for r in f["rows"] for s in f["series"]}
+    ren = lambda v: (renames or {}).get(v, v)  # noqa: E731
     with tx() as c:
         cur = _row(c.execute("SELECT revision, cells FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
         rules.check_revision(cur["revision"] if cur else 0, base_rev)
-        cells = [x for x in (cur["cells"] if cur else []) if (x["figure"], x["row"], x["series"]) in keep]
+        cells = [{**x, "row": ren(x["row"]), "series": ren(x["series"])} for x in (cur["cells"] if cur else [])]
+        cells = [x for x in cells if (x["figure"], x["row"], x["series"]) in keep]
         c.execute("INSERT OR IGNORE INTO exp_figures (research_id) VALUES (?)", (rid,))
         c.execute("UPDATE exp_figures SET figures=?, cells=?, design=COALESCE(?, design), updated_at=?, edited_by=?, revision=revision+1 "
                   "WHERE research_id=?", (json.dumps(figures, ensure_ascii=False), json.dumps(cells, ensure_ascii=False),
                                           json.dumps(design, ensure_ascii=False) if design else None, now(), by, rid))
+        _event(c, by, "figures.update", rid)
         return (cur["revision"] if cur else 0) + 1
+
+
+def _last(p, n=3):
+    """The draft p replaced, and the ones before it, n deep: enough to step back over the drafts of one answer."""
+    return p and {**p, "prev": _last(p.get("prev"), n - 1) if n > 1 else None}
 
 
 def propose_figures(rid, figures, note, by, base_rev=None, design=None):
     with tx() as c:
-        cur = c.execute("SELECT revision FROM exp_figures WHERE research_id=?", (rid,)).fetchone()
+        cur = _row(c.execute("SELECT revision, proposal FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
         rules.check_revision(cur["revision"] if cur else 0, base_rev)
         c.execute("INSERT OR IGNORE INTO exp_figures (research_id) VALUES (?)", (rid,))
         c.execute("UPDATE exp_figures SET proposal=? WHERE research_id=?",
-                  (json.dumps({"design": design, "figures": figures, "note": note, "by": by, "at": now()}, ensure_ascii=False), rid))
+                  (json.dumps({"design": design, "figures": figures, "note": note, "by": by, "at": now(),
+                               "prev": _last(cur and cur["proposal"])}, ensure_ascii=False), rid))
+        _event(c, by, "figures.propose", rid)
+
+
+def rollback_figures(rid, since):
+    """Drop the drafts proposed at or after since (an ISO time), bringing back the one they replaced."""
+    p = was = get_figures(rid)["proposal"]
+    while p and p["at"] >= since:
+        p = p.get("prev")
+    if p is not was:
+        with tx() as c:
+            c.execute("UPDATE exp_figures SET proposal=? WHERE research_id=?", (p and json.dumps(p, ensure_ascii=False), rid))
 
 
 def accept_figures(rid, base_rev=None):
@@ -2081,16 +2784,73 @@ def discard_figures(rid):
         c.execute("UPDATE exp_figures SET proposal=NULL WHERE research_id=?", (rid,))
 
 
-def fill_cells(rid, cells):
-    """cells: already checked by rules.validate_cells; each replaces whatever filled that cell (experiment None clears it)."""
+def fill_cells(rid, cells, by="agent"):
+    """cells: already checked by rules.validate_cells; each replaces whatever filled that cell (experiment None clears it).
+    A cell already pointing at a user-edited experiment stays: the user typed that number, or edited that record."""
     with tx() as c:
         cur = _row(c.execute("SELECT cells FROM exp_figures WHERE research_id=?", (rid,)).fetchone())
         if not cur:
             raise rules.Rejected("这个研究还没有实验设计")
         key = lambda x: (x["figure"], x["row"], x["series"])  # noqa: E731
+        if by != "user":
+            locked = {r[0] for r in c.execute("SELECT id FROM experiments WHERE research_id=? AND edited_by='user'", (rid,))}
+            owned = {key(x) for x in cur["cells"] if x.get("experiment") in locked}
+            cells = [x for x in cells if key(x) not in owned]
         new = {key(x): x for x in cur["cells"]} | {key(x): x for x in cells}
         c.execute("UPDATE exp_figures SET cells=? WHERE research_id=?",
                   (json.dumps([x for x in new.values() if x["experiment"]], ensure_ascii=False), rid))
+        _event(c, by, "figures.fill", rid)
+
+
+def _hand_exp(e):
+    return e.get("edited_by") == "user" and not (e.get("raw") or "").strip()
+
+
+def set_cell_value(rid, figure, row, series, value):
+    """A number the user typed into one cell. It is stored as an experiment result, which is where every other
+    number already lives. ponytail: one hand record per row title, result name = series; two figures sharing a row
+    title share that record. Split them when a row stands for different things on different figures."""
+    value = str(value if value is not None else "").strip()
+    if len(value) > 40:
+        raise rules.Rejected("格子里的结果不超过 40 字")
+    fg = get_figures(rid)
+    fig = next((f for f in fg["figures"] if f["id"] == figure), None)
+    if not fig or row not in fig["rows"] or series not in fig["series"]:
+        raise rules.Rejected("这张图没有这个格子")
+    exps = {e["id"]: e for e in get_research(rid)["experiments"]}
+    cell = next((c for c in fg["cells"]
+                 if c["figure"] == figure and c["row"] == row and c["series"] == series and c.get("experiment") in exps), None)
+
+    def write(e, name):
+        results = [dict(r) for r in (e.get("results") or [])]
+        hit = next((r for r in results if r["name"] == name), None)
+        if hit:
+            hit["value"] = value
+        else:
+            results.append({"name": name, "value": value, "note": None})
+        update_experiment(e["id"], "user", e["revision"], results=results)
+        return e["id"]
+
+    if not value:
+        if not cell:
+            return
+        fill_cells(rid, [{"figure": figure, "row": row, "series": series, "experiment": None, "result": None}], "user")
+        e = exps[cell["experiment"]]
+        if _hand_exp(e):
+            results = [r for r in (e.get("results") or []) if r["name"] != cell["result"]]
+            if results or e.get("setup") or e.get("conclusion_text") or e.get("target"):
+                update_experiment(e["id"], "user", e["revision"], results=results)
+            else:
+                delete_experiment(e["id"])
+        return
+    if cell:
+        write(exps[cell["experiment"]], cell["result"] or series)
+        return
+    e = next((e for e in exps.values() if _hand_exp(e) and e.get("title") == row), None)
+    eid = write(e, series) if e else add_experiment(rid, "", "user", row)
+    if not e:
+        update_experiment(eid, "user", 1, results=[{"name": series, "value": value, "note": None}])
+    fill_cells(rid, [{"figure": figure, "row": row, "series": series, "experiment": eid, "result": series}], "user")
 
 
 def get_related(rid):
@@ -2189,7 +2949,9 @@ def add_anchor(pid, surface, quote, by, page=None, section=None):
     with tx() as c:
         if not c.execute("SELECT 1 FROM papers WHERE id=?", (pid,)).fetchone():
             raise rules.Rejected("论文不在库里")
-        c.execute("INSERT INTO anchors VALUES (?,?,?,?,?,?,?,?)", (aid, now(), pid, surface, quote, page, section, by))
+        c.execute(
+            "INSERT INTO anchors (id, created_at, paper_id, surface, quote, page, section, by, user_id) VALUES (?,?,?,?,?,?,?,?,?)",
+            (aid, now(), pid, surface, quote, page, section, by, _owner() if by == "user" else None))
     return aid
 
 
@@ -2220,16 +2982,17 @@ def delete_anchor(aid):
 def add_run(run_id, agent_id, kind, ref, prompt, status, launch=None):
     with tx() as c:
         c.execute(
-            "INSERT OR IGNORE INTO runs (id, created_at, updated_at, agent_id, kind, ref, prompt, status, launch) VALUES (?,?,?,?,?,?,?,?,?)",
-            (run_id, now(), now(), agent_id, kind, ref, prompt, status, launch and json.dumps(launch, ensure_ascii=False)),
+            "INSERT OR IGNORE INTO main.runs (id, created_at, updated_at, agent_id, kind, ref, prompt, status, launch, user_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (run_id, now(), now(), agent_id, kind, ref, prompt, status, launch and json.dumps(launch, ensure_ascii=False), _owner()),
         )
 
 
 def replace_run(placeholder, run_id, agent_id, status):
     """Swap the placeholder shown while Cursor was still creating the agent for the real run."""
     with tx() as c:
-        c.execute("UPDATE runs SET id=?, agent_id=?, status=?, updated_at=? WHERE id=?", (run_id, agent_id, status, now(), placeholder))
-        c.execute("UPDATE messages SET run_id=? WHERE run_id=?", (run_id, placeholder))
+        c.execute("UPDATE main.runs SET id=?, agent_id=?, status=?, updated_at=? WHERE id=?", (run_id, agent_id, status, now(), placeholder))
+        c.execute("UPDATE main.messages SET run_id=? WHERE run_id=?", (run_id, placeholder))
 
 
 def update_run(run_id, **fields):
@@ -2238,7 +3001,13 @@ def update_run(run_id, **fields):
     fields["updated_at"] = now()
     cols = ", ".join(f"{k}=?" for k in fields)
     with tx() as c:
-        c.execute(f"UPDATE runs SET {cols} WHERE id=?", (*fields.values(), run_id))
+        c.execute(f"UPDATE main.runs SET {cols} WHERE id=?", (*fields.values(), run_id))
+
+
+def claim_run(run_id):
+    """CREATING -> RUNNING, for exactly one taker."""
+    with tx() as c:
+        return c.execute("UPDATE main.runs SET status='RUNNING', updated_at=? WHERE id=? AND status='CREATING'", (now(), run_id)).rowcount == 1
 
 
 def get_run(run_id):
@@ -2255,6 +3024,12 @@ def unfinished_runs():
     """Oldest first, so waiting runs start in the order they were asked for."""
     with tx() as c:
         return _rows(c.execute(f"SELECT * FROM runs WHERE status IN {_UNFINISHED_SQL} ORDER BY created_at, rowid"))
+
+
+def agent_live(agent_id):
+    """Whether this library has a run of this agent under way (an agent only calls ./p2b while it runs)."""
+    with tx() as c:
+        return bool(c.execute(f"SELECT 1 FROM runs WHERE agent_id=? AND status IN {_UNFINISHED_SQL}", (agent_id,)).fetchone())
 
 
 # Research-page tab a run lands on. experiment's ref is an experiment id, resolved separately.
@@ -2353,6 +3128,8 @@ def _working_item(c, r):
             label, go = "讨论", {"to": "thread", "scope": t["scope"], "id": ref}
     elif kind == "distill":
         label, title, go = "起标题", "给讨论起标题", {"to": "discuss"}
+    elif kind == "map":
+        label, title, go = "整理地图", "把讨论收成问题和结论", {"to": "discuss"}
     else:
         title = ref
     return {"id": r["id"], "label": label, "title": title or label, "status": r["status"], "go": go}
@@ -2368,14 +3145,14 @@ def stale_runs(cutoff):
 def forget_agent(agent_id):
     """An agent that was never created: threads and captures must not keep following up on it."""
     with tx() as c:
-        c.execute("UPDATE threads SET agent_id=NULL WHERE agent_id=?", (agent_id,))
+        c.execute("UPDATE main.threads SET agent_id=NULL WHERE agent_id=?", (agent_id,))
         c.execute("UPDATE captures SET agent_id=NULL WHERE agent_id=?", (agent_id,))
         c.execute("UPDATE kv SET value='' WHERE value=?", (agent_id,))
 
 
 # ---------- search ----------
 
-PAPER_FIELDS = ("p.title", "p.short_name", "p.id", "p.authors", "p.abstract", "p.card", "p.report", "pt.text")
+PAPER_FIELDS = ("p.title", "p.short_name", "p.aliases", "p.id", "p.authors", "p.abstract", "p.card", "p.report", "pt.text")
 
 
 def _every_word(terms, fields, op=" AND "):
@@ -2421,7 +3198,7 @@ def _search(terms, op, limit):
         where, args = _every_word(terms, PAPER_FIELDS, op)
         # ponytail: ranks every matching paper in Python; fine for a personal library, move scoring to FTS5 past ~10k papers.
         papers = _rows(c.execute(
-            f"SELECT p.id, p.title, p.short_name, p.authors, p.abstract, p.card, p.report, pt.text AS fulltext FROM papers p "
+            f"SELECT p.id, p.title, p.short_name, p.aliases, p.authors, p.abstract, p.card, p.report, pt.text AS fulltext FROM papers p "
             f"LEFT JOIN paper_text pt ON pt.paper_id=p.id WHERE {LISTED} AND {where}", args))
         where, args = _every_word(terms, ["raw", "title", "snapshot_text", "author"], op)
         captures = _rows(c.execute(
@@ -2441,14 +3218,17 @@ def _search(terms, op, limit):
                                    f"ORDER BY updated_at DESC LIMIT ?", (*args, limit)))
     for p in papers:
         card, report = p.pop("card"), p.pop("report")
-        fields = {"标题": p["title"], "缩写": p["short_name"], "编号": p["id"], "作者": " ".join(p["authors"] or []), "摘要": p.pop("abstract"),
+        fields = {"标题": p["title"], "缩写": " ".join(filter(None, [p["short_name"], *(p.pop("aliases") or [])])), "编号": p["id"], "作者": " ".join(p["authors"] or []), "摘要": p.pop("abstract"),
                   "快读卡": card and json.dumps(card, ensure_ascii=False), "深读报告": report and json.dumps(report, ensure_ascii=False),
                   "原文": p.pop("fulltext")}
         low = {k: v.lower() for k, v in fields.items() if v}
         p["hits"] = [k for k, v in low.items() if any(t.lower() in v for t in terms)]
-        p["_score"] = sum(max((HIT_WEIGHT[k] for k, v in low.items() if t.lower() in v), default=0) for t in terms)
+        n = lambda ks: sum(any(t.lower() in low.get(k, "") for k in ks) for t in terms)
+        # title words first, then abstract words, then everything else by weight
+        p["_score"] = (n(("标题", "缩写", "编号")), n(("摘要",)),
+                       sum(max((HIT_WEIGHT[k] for k, v in low.items() if t.lower() in v), default=0) for t in terms))
         p["tldr"] = card and card.get("tldr")
-    papers = sorted(papers, key=lambda p: -p.pop("_score"))[:limit]
+    papers = sorted(papers, key=lambda p: p.pop("_score"), reverse=True)[:limit]
     for p in papers:
         if "原文" in p["hits"]:
             texts = pages(p["id"])

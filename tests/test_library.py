@@ -3,6 +3,8 @@ import base64
 import os
 import tempfile
 import unittest
+import urllib.parse
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ["P2B_HOME"] = tempfile.mkdtemp(prefix="p2b-test-")
@@ -88,6 +90,22 @@ class Rules(unittest.TestCase):
         with self.assertRaisesRegex(rules.Rejected, "第 1 节第 4 段：在依据的那句话后面写"):
             rules.validate_report({"sections": [{**ok, "points": ok["points"] + [{"text": "d[2]", "citations": cite("laundry folding")}]}]}, PAGES)
 
+    def test_map_sentences_and_relations(self):
+        q = {"id": "q", "group": "g", "kind": "question", "text": "原因是什么？", "sources": ["t1"]}
+        with self.assertRaisesRegex(rules.Rejected, "问句"):
+            rules.validate_map({"nodes": [{**q, "text": "原因是什么"}]})
+        with self.assertRaisesRegex(rules.Rejected, "判断句"):
+            rules.validate_map({"nodes": [{**q, "kind": "conclusion", "text": "是预训练吗？"}]})
+        with self.assertRaisesRegex(rules.Rejected, "回答"):
+            rules.validate_map({"nodes": [q, {"id": "c", "group": "g", "kind": "question", "text": "C2R 为何单独高？", "parent": "q", "rel": "回答", "sources": ["t2"]}]})
+        with self.assertRaisesRegex(rules.Rejected, "部分"):
+            rules.validate_map({"nodes": [{"id": "c", "group": "g", "kind": "question", "text": "C2R 为何单独高？", "parent": "q", "rel": "收窄", "partial": True, "sources": ["t2"]}]})
+        out = rules.validate_map({"nodes": [
+            {"id": "b", "group": "g", "kind": "conclusion", "text": "要拉长历史", "sources": ["t1"]},
+            {"id": "a", "group": "g", "kind": "conclusion", "text": "一次噪声就够", "sources": ["t2"]},
+        ], "edges": [{"src": "b", "dst": "a", "rel": "对照"}]})
+        self.assertEqual((out["edges"][0]["src"], out["edges"][0]["dst"], out["edges"] is not None), ("a", "b", True))
+
 
 class Store(unittest.TestCase):
     def setUp(self):
@@ -119,6 +137,20 @@ class Store(unittest.TestCase):
         self.assertEqual(store.activity()["days"][today], before + 2)
         kinds = [x["kind"] for x in store.activity_day(today)]
         self.assertEqual((kinds.count("read"), kinds[-2:]), (1, ["message", "read"]))
+
+    def test_activity_counts_the_research_work_you_actually_did(self):
+        from datetime import date
+
+        today = date.today().isoformat()
+        before = store.activity()["days"].get(today, 0)
+        rid = store.add_research("一个研究", "user")
+        store.update_writing(rid, abstract="摘要")
+        store.add_experiment(rid, "跑了一次", "user", title="试验")
+        store.add_experiment(rid, "agent 记的", "agent")  # the agent's record is not your day
+        store.link(self.cid, "arxiv:2410.24164", "user")
+        self.assertEqual(store.activity()["days"][today], before + 4)
+        kinds = {x["kind"] for x in store.activity_day(today)}
+        self.assertTrue({"research", "writing", "experiment", "link"} <= kinds)
 
     def test_current_and_longest_streak(self):
         from datetime import datetime, timedelta, timezone
@@ -429,7 +461,7 @@ class Store(unittest.TestCase):
                  "controls": [{"name": "fixed-rate"}], "metrics": [{"name": "SR", "better": "higher"}]}
         for bad, msg in (({"method": ""}, "setup.method"), ({"controls": [{"name": "ours"}]}, "不能重复"),
                          ({"baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "periodic"}]}, "已发表的方法"),
-                         ({"baselines": setup["baselines"][:1]}, "2-6"), ({"benchmarks": [{"name": "S", "note": "长" * 151}]}, "150 字"),
+                         ({"baselines": setup["baselines"][:1]}, "至少 2"), ({"benchmarks": [{"name": "S", "note": "长" * 151}]}, "150 字"),
                          ({"metrics": [{"name": "SR", "better": "up"}]}, "higher / lower"), ({"questions": []}, "questions")):
             with self.assertRaisesRegex(rules.Rejected, msg):
                 rules.validate_setup({**setup, **bad}, known)
@@ -437,18 +469,31 @@ class Store(unittest.TestCase):
         self.assertEqual(design["baselines"][1]["paper"], "arxiv:2607.26789")
         words = {"arxiv:2410.24164": "π0: A Vision-Language-Action Flow Model", "arxiv:2607.26789": "CheckVLA: Execution-Time Verification"}.get
         rules.validate_setup({**setup, "baselines": [{"name": "π0 (5Hz)", "paper": "arxiv:2410.24164"}, setup["baselines"][1]]}, known, words)
+        newer = {**setup, "baselines": [setup["baselines"][0], {"name": "CheckVLA-1.7", "paper": "2607.26789"}]}
+        with self.assertRaisesRegex(rules.Rejected, "CheckVLA-1.7"):
+            rules.validate_setup(newer, known, lambda pid: "pi0" if "2410" in pid else words(pid))
+        store.upsert_paper("arxiv:2607.26789", "CheckVLA: Execution-Time Verification")
+        store.add_capture("alias-cap", "x", "web")
+        store.link("alias-cap", "arxiv:2607.26789", "rule")
+        store.set_aliases("arxiv:2607.26789", [" CheckVLA-1.7 ", "CheckVLA-1.7", ""])
+        aliases = store.get_paper("arxiv:2607.26789", with_anchors=False)["aliases"]
+        self.assertEqual(aliases, ["CheckVLA-1.7"])
+        rules.validate_setup(newer, known, lambda pid: "pi0" if "2410" in pid else " ".join([words(pid), *aliases]))
+        self.assertIn("缩写", store.search("CheckVLA-1.7")["papers"][0]["hits"])
         with self.assertRaisesRegex(rules.Rejected, "Independent AC Predictor"):
             rules.validate_setup({**setup, "baselines": [setup["baselines"][0], {"name": "Independent AC Predictor", "paper": "2607.26789"}]}, known, words)
         fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
                "rows": ["Spatial", "Object"], "series": ["ours", "pi0", "CheckVLA", "fixed-rate"], "target": {"value": 0.85}}
         figs = rules.validate_figures([fig], ctx, design)
+        self.assertEqual(figs[0]["width"], "full", "a figure that names no width takes the whole row")
+        self.assertEqual(rules.validate_figures([{**fig, "kind": "hbar", "width": "half"}], ctx, design)[0]["width"], "half")
         rules.check_coverage(design, figs)
         with self.assertRaisesRegex(rules.Rejected, r"\['CheckVLA'\] 没进主结果"):
             rules.check_coverage(design, rules.validate_figures([{**fig, "series": ["ours", "pi0"]}], ctx, design))
         for bad, msg in (({"target": {"value": 0.9}}, "三要素里找不到"), ({"rows": ["a", "a"]}, "不重复"), ({"kind": "pie"}, "kind"),
                          ({"series": ["ours", "OpenVLA"]}, "不在 setup.baselines"), ({"series": ["ours", "fixed-rate"]}, "已发表的 baseline"),
                          ({"metric": "acc"}, "不在 setup.metrics"), ({"question": 2}, "question"), ({"caption": ""}, "caption"),
-                         ({"section": "results"}, "section")):
+                         ({"section": "results"}, "section"), ({"width": "third"}, "width")):
             with self.assertRaisesRegex(rules.Rejected, msg):
                 rules.validate_figures([{**fig, **bad}], ctx, design)
         with self.assertRaisesRegex(rules.Rejected, "先定实验设置"):
@@ -470,6 +515,103 @@ class Store(unittest.TestCase):
         self.assertEqual([c["row"] for c in store.get_figures(rid)["cells"]], ["Spatial"])
         store.update_figures(rid, [{**store.get_figures(rid)["figures"][0], "rows": ["Object"]}], "user", 1)
         self.assertEqual(store.get_figures(rid)["cells"], [])
+        from paper2brain import server
+        for pid in known:
+            store.upsert_paper(pid, pid)
+        f0 = {**store.get_figures(rid)["figures"][0], "target": None}
+        server.figures_update({}, {"setup": {**setup, "questions": ["Q one", "Q two"]}, "figures": [{**f0, "question": 2}],
+                                   "cells": [{**cell, "row": "Object"}], "base_rev": 2}, rid)
+        fg = store.get_figures(rid)
+        self.assertEqual((fg["design"]["questions"][1], fg["figures"][0]["question"], [c["row"] for c in fg["cells"]]), ("Q two", 2, ["Object"]))
+        with self.assertRaisesRegex(rules.Rejected, "rows"):
+            server.figures_update({}, {"figures": [{**f0, "rows": []}], "base_rev": 3}, rid)
+        store.set_cell_value(rid, fid, "Object", "pi0", "0.71")
+        store.set_cell_value(rid, fid, "Object", "CheckVLA", "0.50")
+        hand = next(e for e in store.get_research(rid)["experiments"] if e["title"] == "Object")
+        self.assertEqual(sorted((r["name"], r["value"]) for r in hand["results"]), [("CheckVLA", "0.50"), ("pi0", "0.71")])
+        store.fill_cells(rid, [{"figure": fid, "row": "Object", "series": "pi0", "experiment": eid, "result": "Spatial 成功率"}])
+        self.assertEqual(next(c["experiment"] for c in store.get_figures(rid)["cells"] if c["series"] == "pi0"), hand["id"])
+        store.set_cell_value(rid, fid, "Object", "ours", "0.99")
+        self.assertEqual(store.get_experiment(eid)["results"][0]["value"], "0.99")
+        store.fill_cells(rid, [{"figure": fid, "row": "Object", "series": "ours", "experiment": hand["id"], "result": "pi0"}])
+        self.assertEqual(next(c["experiment"] for c in store.get_figures(rid)["cells"] if c["series"] == "ours"), eid)
+        store.set_cell_value(rid, fid, "Object", "pi0", "")
+        store.set_cell_value(rid, fid, "Object", "CheckVLA", "")
+        self.assertIsNone(store.get_experiment(hand["id"]))
+        self.assertFalse(any(c["series"] == "pi0" for c in store.get_figures(rid)["cells"]))
+        with self.assertRaisesRegex(rules.Rejected, "没有这个格子"):
+            store.set_cell_value(rid, fid, "Spatial", "pi0", "1")
+
+    def test_saving_a_chart_with_an_unknown_method_asks_the_agent_to_find_it(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        known = {"arxiv:2410.24164", "arxiv:2607.26789"}
+        for pid in known:
+            store.upsert_paper(pid, pid)
+        setup = {"questions": ["Does it work?"], "method": "ours", "benchmarks": [{"name": "Spatial"}],
+                 "baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA", "paper": "2607.26789"}],
+                 "metrics": [{"name": "SR", "better": "higher"}]}
+        design = rules.validate_setup(setup, known)
+        fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
+               "rows": ["Spatial"], "series": ["ours", "pi0", "CheckVLA"]}
+        rid = store.add_research("lookup", "user")
+        store.propose_figures(rid, rules.validate_figures([fig], "", design), None, "agent", 0, design)
+        store.accept_figures(rid, 0)
+        f0 = store.get_figures(rid)["figures"][0]
+        named = {**f0, "series": ["ours", "pi0", "LingBot-VA"]}
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": False}):
+            with self.assertRaisesRegex(rules.Rejected, "LingBot-VA"):
+                server.figures_update({}, {"figures": [named], "base_rev": 1}, rid)
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "discuss", return_value="run") as asked:
+            got = server.figures_update({}, {"figures": [named], "base_rev": 1}, rid)
+        self.assertEqual((got["lookup"], got["methods"], asked.call_args.args[0]), (True, ["LingBot-VA"], f"experiment:{rid}"))
+        self.assertIn("LingBot-VA", asked.call_args.args[1])
+        self.assertEqual(store.thread_for(thread_id=got["thread_id"])["scope"], f"experiment:{rid}")
+        self.assertNotIn("LingBot-VA", store.get_figures(rid)["figures"][0]["series"])
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "discuss", return_value="run") as asked:
+            with self.assertRaisesRegex(rules.Rejected, "caption"):
+                server.figures_update({}, {"figures": [{**named, "caption": ""}], "base_rev": 1}, rid)
+        asked.assert_not_called()
+        store.set_aliases("arxiv:2607.26789", ["CheckVLA 1.7"])
+        store.set_cell_value(rid, f0["id"], "Spatial", "CheckVLA", "88.1")
+        rev = store.get_figures(rid)["revision"]
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "discuss", return_value="run") as asked:
+            got = server.figures_update({}, {"figures": [{**f0, "series": ["ours", "pi0", "CheckVLA-1.7"]}], "base_rev": rev}, rid)
+        asked.assert_not_called()
+        fg = store.get_figures(rid)
+        self.assertEqual((got, [b["name"] for b in fg["design"]["baselines"]]), ({"ok": True}, ["pi0", "CheckVLA-1.7"]))
+        self.assertEqual([c["series"] for c in fg["cells"]], ["CheckVLA-1.7"], "the filled cell follows the rename")
+
+    def test_accepting_a_caption_edit_does_not_send_the_agent_to_fill_cells(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        known = {"arxiv:2410.24164", "arxiv:2607.26789"}
+        setup = {"questions": ["Does it work?"], "method": "ours", "benchmarks": [{"name": "Spatial"}],
+                 "baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA", "paper": "2607.26789"}],
+                 "metrics": [{"name": "SR", "better": "higher"}]}
+        design = rules.validate_setup(setup, known)
+        fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
+               "rows": ["Spatial"], "series": ["ours", "pi0", "CheckVLA"]}
+        rid = store.add_research("fill", "user")
+        store.propose_figures(rid, rules.validate_figures([fig], "", design), None, "agent", 0, design)
+        store.accept_figures(rid, 0)
+        eid = store.add_experiment(rid, "spatial 0.92", "user")
+        store.update_experiment(eid, "agent", 1, results=[{"name": "Spatial SR", "value": "0.92"}])
+        f0 = store.get_figures(rid)["figures"][0]
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "fill_figures", return_value="run") as fill:
+            store.propose_figures(rid, [{**f0, "caption": "Success rate (%, ↑)."}], None, "agent", 1, design)
+            self.assertNotIn("run_id", server.figures_proposal({}, {"action": "accept", "base_rev": 1}, rid))
+            store.propose_figures(rid, [{**f0, "rows": ["Spatial", "Object"]}], None, "agent", 2, design)
+            self.assertEqual(server.figures_proposal({}, {"action": "accept", "base_rev": 2}, rid)["run_id"], "run")
+        self.assertEqual(fill.call_count, 1)
 
     def test_agent_cannot_overwrite_user_edited_experiment(self):
         rid = store.add_research("exp", "user")
@@ -653,6 +795,30 @@ class Store(unittest.TestCase):
         self.assertEqual((path / "main.tex").read_text(), "Hallo\n")
         self.assertEqual(overleaf.changed(pid), 1)
 
+    def test_overleaf_compile_builds_pdf_outside_the_checkout(self):
+        import shutil
+        if not shutil.which("latexmk"):
+            self.skipTest("没装 latexmk")
+        import subprocess
+        from paper2brain import overleaf
+        git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True, capture_output=True, text=True).stdout  # noqa: E731
+        pid = "fedcba9876543210fedcba98"
+        tmp = Path(tempfile.mkdtemp())
+        git("init", "-q", "--bare", "-b", "master", str(tmp / "remote.git"))
+        git("clone", "-q", str(tmp / "remote.git"), str(tmp / "theirs"))
+        (tmp / "theirs" / "main.tex").write_text("\\documentclass{article}\n\\begin{document}\nHello $x^2$.\n\\end{document}\n")
+        git("-C", str(tmp / "theirs"), "add", ".")
+        git("-C", str(tmp / "theirs"), "commit", "-qm", "init")
+        git("-C", str(tmp / "theirs"), "push", "-q", "origin", "HEAD")
+        path = overleaf.clone(pid, str(tmp / "remote.git"))
+        out = overleaf.compile(pid)
+        self.assertTrue(Path(out["pdf"]).is_file())
+        self.assertEqual(overleaf.compiled_pdf(pid), Path(out["pdf"]))
+        self.assertEqual(overleaf.changed(pid), 0, "编译产物不能算未推送改动")
+        (path / "main.tex").write_text("\\documentclass{article}\n\\begin{document}\n\\nosuchmacro\n\\end{document}\n")
+        with self.assertRaisesRegex(rules.Rejected, "编译失败"):
+            overleaf.compile(pid)
+
     def test_latex_export_turns_citations_into_cite(self):
         from paper2brain import export
         store.upsert_paper("arxiv:2410.24164", "π0: A Vision-Language-Action Flow Model", ["Kevin Black", "Noah Brown"], None, "2024-10-31")
@@ -749,6 +915,64 @@ class Store(unittest.TestCase):
             store.update_run("c1", status="ERROR")
             cursor_api.card_pending()
             self.assertEqual(started, [pid])
+
+    def test_translation_runs_once_per_pdf_in_the_background(self):
+        import time
+        from unittest import mock
+
+        from paper2brain import translate
+
+        pid = "arxiv:2601.00777"
+        store.upsert_paper(pid, "Translate Me")
+        store.link(self.cid, pid, "user")
+        pdf = store.paper_dir(pid) / "paper.pdf"
+        pdf.write_bytes(b"%PDF-1.4 en")
+        store.set_fulltext(pid, pdf, PAGES)
+        fake = Path(tempfile.mkdtemp()) / "pdf2zh"  # copies the PDF to <stem>-mono.pdf in the -o folder, as pdf2zh does
+        fake.write_text('#!/bin/sh\nsrc="$1"; while [ "$1" != -o ]; do shift; done; cp "$src" "$2/$(basename "$src" .pdf)-mono.pdf"\n')
+        fake.chmod(0o755)
+        paper = lambda: store.get_paper(pid, with_anchors=False)  # noqa: E731
+        with mock.patch.object(translate, "BIN", fake):
+            self.assertEqual(translate.engine(), "search")
+            translate.backfill()  # the quick search API is not set up: nothing starts
+            self.assertFalse(translate._busy.locked())
+            translate.set_engine("bing")
+            self.assertEqual(translate.status(paper()), "pending")
+            for _ in range(200):  # other tests' papers with a PDF may come first, one at a time
+                if translate.status(paper()) != "pending":
+                    break
+                translate.backfill()
+                time.sleep(0.05)
+            self.assertEqual(translate.status(paper()), "done")
+            self.assertEqual(translate.zh_path(pid).read_bytes(), b"%PDF-1.4 en")
+            store.set_fulltext(pid, pdf, PAGES)  # a new PDF: the old translation is gone
+            self.assertEqual(translate.status(paper()), "pending")
+            fake.write_text("#!/bin/sh\necho boom >&2; exit 1\n")
+            while translate._busy.locked():
+                time.sleep(0.05)
+            translate.translate(pid)
+            self.assertEqual(translate.status(paper()), "failed")
+        with mock.patch.object(translate, "BIN", fake.with_name("missing")):
+            self.assertIsNone(translate.status(paper()))  # pdf2zh not installed
+        translate.set_engine("search")  # switching engines retries the failures
+        self.assertEqual(translate.status(paper()), "pending")
+
+    def test_translation_bridge_hands_paragraphs_to_the_quick_search_api(self):
+        import json
+        import urllib.error
+        import urllib.request
+        from unittest import mock
+
+        from paper2brain import cursor_api, translate
+
+        with mock.patch.object(cursor_api, "_chat", return_value="你好") as chat, translate._bridge({"base_url": "x"}) as env:
+            ask = lambda key: urllib.request.urlopen(urllib.request.Request(  # noqa: E731
+                env["OPENAI_BASE_URL"] + "/chat/completions", method="POST", headers={"Authorization": f"Bearer {key}"},
+                data=json.dumps({"model": "quick", "messages": [{"role": "user", "content": "Translate: hello"}]}).encode()))
+            self.assertEqual(json.loads(ask(env["OPENAI_API_KEY"]).read())["choices"][0]["message"]["content"], "你好")
+            self.assertEqual(chat.call_args[0], ({"base_url": "x"}, "Translate: hello"))
+            with self.assertRaises(urllib.error.HTTPError):
+                ask("wrong")
 
     def test_figures_are_cropped_from_captions_and_picked_by_number(self):
         import pymupdf
@@ -856,6 +1080,27 @@ class Store(unittest.TestCase):
         self.assertNotEqual(store.get_run(r2)["agent_id"], store.get_run(r1)["agent_id"])
         self.assertEqual(t["model"], {"id": "other-model"})
 
+    def test_regenerating_in_an_experiment_discussion_takes_back_the_drafts_of_that_answer(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        rid = store.add_research("figs", "user")
+        at = lambda s: mock.patch.object(store, "now", return_value=f"2026-01-01T00:00:{s}+00:00")  # noqa: E731
+        with at("00"):
+            store.propose_figures(rid, [], "before", "agent")
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "config", return_value=AGENT_CFG), mock.patch.object(cursor_api, "_spawn"):
+            with at("10"):
+                run = server.chat({}, {"scope": f"experiment:{rid}", "text": "加一张消融"})["run_id"]
+            with at("20"):
+                store.propose_figures(rid, [], "answer 1", "agent")
+            with at("21"):
+                store.propose_figures(rid, [], "answer 2", "agent")
+            store.update_run(run, status="FINISHED")
+            server.chat({}, {"scope": f"experiment:{rid}", "thread_id": store.thread_for(f"experiment:{rid}")["id"], "redo": True})
+        self.assertEqual(store.get_figures(rid)["proposal"]["note"], "before")
+
     def test_finding_from_a_research_uses_its_papers_as_seeds_and_avoids_rejects(self):
         from unittest import mock
 
@@ -919,6 +1164,79 @@ class Store(unittest.TestCase):
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])
         self.assertIn("V-JEPA", tree["WAM"])
 
+    def test_idea_map_keeps_user_words_and_rereads_new_messages(self):
+        with scratch_home():
+            a = store.new_thread("library", text="PatchWAM 为什么大涨")
+            b = store.new_thread("library", text="C2C 和 C2R 不是一个原因")
+            chore = store.new_thread("library", text="再找一遍代码")
+            store.set_thread_title(a, "PatchWAM 相对 FastWAM 大涨的原因", "agent")
+            store.set_thread_title(b, "C2C 与 C2R 不是同一个原因", "agent")
+            self.assertEqual(store.pending_map(), [])
+            old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat(timespec="seconds")
+            with store.tx() as c:
+                c.execute("UPDATE messages SET created_at=?", (old,))
+            self.assertEqual({t["id"] for t in store.pending_map()}, {a, b})
+            store.add_run("live", "", "chat", a, "", "RUNNING")
+            self.assertEqual([t["id"] for t in store.pending_map()], [b])
+            store.update_run("live", status="FINISHED")
+            self.assertEqual({t["id"] for t in store.pending_map()}, {a, b})
+            why = {"id": "why", "group": "pw", "kind": "question", "text": "PatchWAM 相对 FastWAM 大涨的原因是什么？", "sources": [a]}
+            split = {"id": "split", "group": "pw", "kind": "conclusion", "text": "C2C 和 C2R 的涨幅不是同一个原因", "parent": "why", "rel": "回答", "partial": True, "sources": [b]}
+            store.put_map({"groups": [{"id": "pw", "name": "PatchWAM 的机制"}], "nodes": [why, split], "seen": [a, b, chore]})
+            got = {n["id"]: n for n in store.get_map()["nodes"]}
+            self.assertTrue(got["split"]["partial"] and got["split"]["sources"][0]["title"].startswith("C2C"))
+            self.assertEqual(store.pending_map(), [])
+            store.set_map_node("why", text="PatchWAM 大涨究竟是什么原因？")
+            with self.assertRaisesRegex(rules.Rejected, "手动改过"):
+                store.put_map({"nodes": [{**why, "text": "agent 改掉的问句？"}, split]})
+            self.assertEqual(got_text := next(n["text"] for n in store.get_map()["nodes"] if n["id"] == "why"), "PatchWAM 大涨究竟是什么原因？")
+            with self.assertRaisesRegex(rules.Rejected, "不能去掉"):
+                store.put_map({"drop": ["why"]})
+            with self.assertRaisesRegex(rules.Rejected, "同一分组"):
+                store.put_map({"groups": [{"id": "other", "name": "别处"}], "nodes": [{**split, "group": "other"}]})
+            other = {"id": "other", "group": "pw", "kind": "conclusion", "text": "涨幅来自动作写成 patch", "sources": [b]}
+            with self.assertRaisesRegex(rules.Rejected, "要挂在"):
+                store.put_map({"nodes": [other]})
+            store.put_map({"nodes": [{**other, "parent": "why", "rel": "回答"}],
+                           "edges": [{"src": "split", "dst": "other", "rel": "对照"}]})
+            store.put_map({"seen": [a]})
+            store.put_map({"edges": []})
+            self.assertEqual(store.get_map()["edges"], [{"src": "other", "dst": "split", "rel": "对照"}])
+            third = {"id": "third", "group": "pw", "kind": "conclusion", "text": "涨幅来自视频没去噪完", "parent": "why", "rel": "回答", "sources": [b]}
+            store.put_map({"nodes": [third], "edges": [{"src": "third", "dst": "split", "rel": "支撑"}]})
+            self.assertEqual({(e["src"], e["dst"], e["rel"]) for e in store.get_map()["edges"]},
+                             {("other", "split", "对照"), ("third", "split", "支撑")})
+            with self.assertRaisesRegex(rules.Rejected, "最多 8 个"):
+                store.put_map({"nodes": [{**third, "id": f"more-{i}", "text": f"涨幅的第 {i} 个细节"} for i in range(5)]})
+            store.put_map({"edges": [{"src": "third", "dst": "split", "rel": "对照"}]})
+            self.assertEqual({(e["src"], e["dst"], e["rel"]) for e in store.get_map()["edges"]},
+                             {("other", "split", "对照"), ("split", "third", "对照")})
+            store.put_map({"drop_edges": [{"src": "split", "dst": "third", "rel": "对照"}]})
+            self.assertEqual(store.get_map()["edges"], [{"src": "other", "dst": "split", "rel": "对照"}])
+            with self.assertRaisesRegex(rules.Rejected, "不在地图上"):
+                store.put_map({"drop_edges": [{"src": "split", "dst": "third", "rel": "对照"}]})
+            store.add_message(a, "user", "再问一句")
+            self.assertEqual(store.pending_map(), [])
+            with store.tx() as c:
+                c.execute("UPDATE messages SET created_at=? WHERE thread_id=?", (old, a))
+            self.assertEqual([t["id"] for t in store.pending_map()], [a])
+            kept = "PatchWAM 大涨究竟是什么原因？"
+            with self.assertRaisesRegex(rules.Rejected, "环"):
+                store.put_map({"nodes": [
+                    {**why, "text": kept, "parent": "split", "rel": "引出"},
+                    {**split, "parent": "why"},
+                ]})
+            self.assertIsNone(next(n["parent"] for n in store.get_map()["nodes"] if n["id"] == "why"))
+            store.put_map({"drop": ["other"]})
+            self.assertEqual(store.get_map()["edges"], [])
+            store.set_map_node("split", hidden=True)
+            store.put_map({"seen": [b]})
+            self.assertTrue(next(n["hidden"] for n in store.get_map()["nodes"] if n["id"] == "split"))
+            with self.assertRaisesRegex(rules.Rejected, "藏起"):
+                store.put_map({"nodes": [{**split, "text": "另一句已经定下的结论"}]})
+            with self.assertRaisesRegex(rules.Rejected, "不存在"):
+                store.put_map({"nodes": [{"id": "x", "group": "pw", "kind": "conclusion", "text": "库里没有这段讨论", "parent": "why", "rel": "回答", "sources": ["missing-thread"]}]})
+
 
 class Server(unittest.TestCase):
     @classmethod
@@ -955,6 +1273,18 @@ class Server(unittest.TestCase):
         self.assertEqual(self.req("DELETE", "/api/anchors/x", Origin="http://evil.example"), 403)
         self.assertEqual(self.req("POST", "/api/threads", body, **{"Content-Type": "application/json", "Origin": own}), 200)
         self.assertEqual(sum(t["first"] == "跨站写入" for t in store.recent_threads()), 1)
+
+    def test_pdf_comes_in_byte_ranges(self):
+        import http.client
+        pid = "arxiv:2601.00888"
+        store.upsert_paper(pid, "Ranged")
+        pdf = store.paper_dir(pid) / "paper.pdf"
+        pdf.write_bytes(b"%PDF-0123456789")
+        store.set_fulltext(pid, pdf, PAGES)
+        c = http.client.HTTPConnection("127.0.0.1", self.port)
+        c.request("GET", f"/api/papers/{pid}/pdf", headers={"Host": f"127.0.0.1:{self.port}", "Range": "bytes=5-8"})
+        r = c.getresponse()
+        self.assertEqual((r.status, r.read(), r.headers["Content-Range"]), (206, b"0123", "bytes 5-8/15"))
 
     def test_tunnel_host_needs_the_password(self):
         from unittest import mock
@@ -1229,6 +1559,109 @@ class Diagrams(unittest.TestCase):
         store.delete_diagram(rid, "framework")
         self.assertEqual(store.diagrams(rid), [])
 
+    def test_render_chart_exports_a_filled_figure(self):
+        import importlib.util
+        if not importlib.util.find_spec("playwright"):
+            self.skipTest("没装 playwright")
+        import pymupdf
+        from paper2brain import diagram
+        known = {"arxiv:2410.24164", "arxiv:2607.26789"}
+        setup = {"questions": ["Q1"], "method": "ours", "benchmarks": [{"name": "Spatial"}],
+                 "baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA", "paper": "2607.26789"}],
+                 "metrics": [{"name": "SR", "unit": "%", "better": "higher"}]}
+        design = rules.validate_setup(setup, known)
+        rid = store.add_research("chart", "user")
+        figs = rules.validate_figures([
+            {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "SR.", "metric": "SR",
+             "rows": ["pi0", "CheckVLA", "ours"], "series": ["Spatial"]},
+            {"title": "主表", "kind": "table", "section": "ablation", "question": 1, "caption": "SR table.", "metric": "SR",
+             "rows": ["ours", "w/o x"], "series": ["Spatial"]}], "", design)
+        store.update_figures(rid, figs, "user", design=design)
+        eid = store.add_experiment(rid, "pi0 85.0, CheckVLA 88.1, ours 92.3", "user")
+        store.update_experiment(eid, "agent", 1, results=[{"name": f"{m} SR", "value": v}
+                                                          for m, v in (("pi0", "85.0"), ("CheckVLA", "88.1"), ("ours", "92.3"))])
+        fid = figs[0]["id"]
+        cells = [{"figure": fid, "row": m, "series": "Spatial", "experiment": eid, "result": f"{m} SR"}
+                 for m in ("pi0", "CheckVLA", "ours")]
+        store.fill_cells(rid, rules.validate_cells(cells, store.get_figures(rid)["figures"], store.get_research(rid)["experiments"]))
+        try:
+            out = diagram.render_chart(rid, fid)
+        except rules.Rejected as e:
+            self.skipTest(str(e))
+        self.assertEqual((out["kind"], out["figure"], out["title"]), ("chart", fid, "主结果"))
+        with pymupdf.open(out["pdf"]) as d:
+            self.assertEqual(len(d), 1)
+        html = (store.diagram_dir(rid, f"chart-{fid}") / "figure.html").read_text()
+        self.assertIn("92.3", html)
+        with self.assertRaisesRegex(rules.Rejected, "没有找到这张图表"):
+            diagram.render_chart(rid, "no-such-figure")
+        tab = diagram.render_chart(rid, figs[1]["id"])  # 表格：没填的格子是 —，最高值加粗
+        thtml = (store.diagram_dir(rid, f"chart-{figs[1]['id']}") / "figure.html").read_text()
+        self.assertIn("—", thtml)
+        self.assertEqual(store.diagrams(rid)[0]["kind"], "chart")
+        self.assertTrue(Path(tab["png"]).is_file())
+
+    def test_markdown_html_table_keeps_only_table_tags(self):
+        import importlib.util
+        if not importlib.util.find_spec("playwright"):
+            self.skipTest("没装 playwright")
+        from playwright.sync_api import sync_playwright
+        web = Path(__file__).resolve().parent.parent / "web"
+        mime = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml"}
+
+        def answer(route):
+            path = urllib.parse.urlsplit(route.request.url).path
+            f = (web / path.lstrip("/")).resolve()
+            if f == web:
+                return route.fulfill(content_type="text/html", body="""<!doctype html><script type="importmap">
+                    {"imports": {"preact": "/vendor/preact/preact.mjs", "preact/hooks": "/vendor/preact/hooks.mjs",
+                                 "@preact/signals-core": "/vendor/preact/signals-core.mjs",
+                                 "@preact/signals": "/vendor/preact/signals.mjs", "htm": "/vendor/preact/htm.mjs"}}</script>""")
+            if f.is_file() and web in f.parents:
+                return route.fulfill(path=str(f), content_type=mime.get(f.suffix, "text/plain"))
+            route.abort()
+
+        try:
+            with sync_playwright() as p:
+                page = p.chromium.launch().new_page()
+                page.route("**/*", answer)
+                page.goto("http://p2b.test/")
+                out = page.evaluate("""async () => {
+                    const { mdHtml } = await import('/app/lib.js');
+                    const host = document.createElement('div');
+                    document.body.appendChild(host);
+                    host.innerHTML = mdHtml('| 方法 | SR |\\n| --- | --- |\\n| pi0 | 85.0 |\\n| ours | 92.3 |\\n| CheckVLA | 88.1 |');
+                    const th = host.querySelectorAll('th')[1];
+                    th.click();
+                    const asc = [...host.querySelectorAll('tbody td:first-child')].map((c) => c.textContent);
+                    th.click();
+                    const desc = [...host.querySelectorAll('tbody td:first-child')].map((c) => c.textContent);
+                    const noThead = document.createElement('div');  // agent 的 HTML 表没有 thead 时首行是表头
+                    document.body.appendChild(noThead);
+                    noThead.innerHTML = mdHtml('<table><tr><th>m</th><th>v</th></tr><tr><td>b</td><td>2</td></tr><tr><td>a</td><td>10</td></tr></table>');
+                    noThead.querySelectorAll('th')[1].click();
+                    const noTheadAsc = [...noThead.querySelectorAll('td:first-child')].map((c) => c.textContent);
+                    return {
+                      ok: mdHtml('<table><thead><tr><th colspan="2">结果</th></tr></thead><tr><td>**92.3**</td><td>[arxiv:2410.24164]</td></tr></table>'),
+                      evil: mdHtml('<table onclick="alert(1)" style="x"><tr><td><img src=x onerror="alert(1)">safe</td></tr></table>'),
+                      script: mdHtml('前文<script>alert(2)</scr' + 'ipt>后文'),
+                      asc, desc, noTheadAsc,
+                    };
+                }""")
+        except Exception as e:
+            self.skipTest(f"Chromium 不可用：{str(e)[:120]}")
+        self.assertIn('colspan="2"', out["ok"])
+        self.assertIn("<b>92.3</b>", out["ok"])
+        self.assertIn('data-pid="arxiv:2410.24164"', out["ok"])
+        self.assertIn('class="md-table"', out["ok"])
+        for bad in ("onclick", "onerror", "<img", "style="):
+            self.assertNotIn(bad, out["evil"])
+        self.assertIn("safe", out["evil"])
+        self.assertNotIn("<script", out["script"])
+        self.assertEqual(out["asc"], ["pi0", "CheckVLA", "ours"], "点表头按数值升序")
+        self.assertEqual(out["desc"], ["ours", "CheckVLA", "pi0"], "再点一次降序")
+        self.assertEqual(out["noTheadAsc"], ["b", "a"], "没有 thead 时第一行是表头，不参与排序")
+
 
 class scratch_home:
     """A fresh P2B_HOME for tests that need an empty (or hand-made) database."""
@@ -1483,6 +1916,7 @@ class Topics(unittest.TestCase):
         with scratch_home():
             store.upsert_paper("arxiv:2303.04137", "Diffusion Policy")
             store.upsert_paper("arxiv:2304.13705", "ACT")
+            store.upsert_paper("arxiv:2410.24164", "π0")
             store.set_topics("arxiv:2304.13705", ["VLA"], "user")  # the user fixed this one
             with self.assertRaisesRegex(rules.Rejected, "--why"):
                 store.add_topic("灵巧手", None, "agent")
@@ -1492,8 +1926,14 @@ class Topics(unittest.TestCase):
             self.assertEqual([p["path"] for p in store.topic_proposals()], [path])
             with self.assertRaisesRegex(rules.Rejected, "未知主题"):
                 store.set_topics("arxiv:2303.04137", [path], "agent")
+            store.set_topics("arxiv:2410.24164", ["VLA"], "agent")  # arrives while the proposal waits: joins it
+            self.assertEqual(store.add_topic("模仿学习", "VLA", "agent", "同上", ["arxiv:2410.24164"]), path)
+            self.assertEqual(len(store.topic_proposals()), 1)
             store.decide_topic(path, True)
             self.assertEqual(store.get_paper("arxiv:2303.04137")["topics"], [path])
+            self.assertIn(path, store.get_paper("arxiv:2410.24164")["topics"])
+            with self.assertRaisesRegex(rules.Rejected, "已经有了"):
+                store.add_topic("模仿学习", "VLA", "agent", "同上")
             self.assertEqual(store.get_paper("arxiv:2304.13705")["topics"], ["VLA"])
             store.add_topic("灵巧手", None, "agent", "没位置")
             store.decide_topic("灵巧手", False)
@@ -1585,9 +2025,10 @@ class Search(unittest.TestCase):
             store.add_capture(cid, "x", "web")
             store.upsert_paper("arxiv:2501.00011", "某个方法", abstract="用灵巧手抓取")
             store.upsert_paper("arxiv:2501.00012", "灵巧手抓取")
-            for pid in ("arxiv:2501.00011", "arxiv:2501.00012"):
+            store.upsert_paper("arxiv:2501.00013", "另一个方法", ["灵巧手"])
+            for pid in ("arxiv:2501.00011", "arxiv:2501.00012", "arxiv:2501.00013"):
                 store.link(cid, pid, "rule")
-            self.assertEqual([p["id"] for p in store.search("灵巧手")["papers"]], ["arxiv:2501.00012", "arxiv:2501.00011"])
+            self.assertEqual([p["id"] for p in store.search("灵巧手")["papers"]], ["arxiv:2501.00012", "arxiv:2501.00011", "arxiv:2501.00013"])
             r = store.search("灵巧手的抓取")  # typed without spaces, no literal match
             self.assertEqual((r["loose"], r["papers"][0]["id"]), (True, "arxiv:2501.00012"))
 
@@ -1814,15 +2255,30 @@ class Migrations(unittest.TestCase):
             self.assertEqual(len(before), 1)
             self.assertEqual(sqlite3.connect(before[0]).execute("SELECT text FROM thoughts").fetchone()[0], "旧想法")
 
-    def test_daily_backup_once_a_day_keeps_seven(self):
+    def test_hourly_backup_once_an_hour_keeps_a_week(self):
         with scratch_home() as home:
             store.counts()
             folder = home / "backups"
-            for d in range(1, 10):
-                store.backup(f"p2b-202601{d:02d}.sqlite")
+            for d in range(1, store.BACKUPS_KEPT + 3):
+                store.backup(f"p2b-2026{d:04d}-00.sqlite")
             self.assertIsNotNone(store.backup())
             self.assertIsNone(store.backup())
             self.assertEqual(len(list(folder.glob("p2b-[0-9]*.sqlite"))), store.BACKUPS_KEPT)
+
+    def test_rollback_a_library_or_one_research_to_a_snapshot(self):
+        with scratch_home():
+            keep, gone = store.add_research("留着", "user"), store.add_research("会被删", "user")
+            store.backup("t1.sqlite")
+            store.update_research(keep, title="改过了")
+            store.delete_research(gone)
+            store.restore("t1.sqlite", gone)  # one research comes back, the other keeps its newer edit
+            self.assertEqual((store.get_research(gone)["title"], store.get_research(keep)["title"]), ("会被删", "改过了"))
+            self.assertEqual([r["title"] for r in store.snapshot_research("t1.sqlite")].count("会被删"), 1)
+            store.restore("t1.sqlite")  # the whole library
+            self.assertEqual(store.get_research(keep)["title"], "留着")
+            self.assertTrue(any(n.startswith("p2b-before-restore-") for n, _ in store.backups()))
+            with self.assertRaises(rules.Rejected):
+                store.restore("../x.sqlite")
 
 
 if __name__ == "__main__":

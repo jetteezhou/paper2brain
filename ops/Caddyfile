@@ -1,0 +1,8 @@
+# HTTPS in front of the shared server; DOMAIN is filled in by ops/server.sh. Caddy gets and renews the certificate.
+DOMAIN {
+	encode zstd gzip
+	request_body {
+		max_size 200MB
+	}
+	reverse_proxy 127.0.0.1:8765
+}

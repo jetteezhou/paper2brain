@@ -1,6 +1,7 @@
 """Cursor Cloud Agents API: start agents on this Mac's worker and record what they do.
 Docs: https://cursor.com/docs/cloud-agent/api/endpoints"""
 import base64
+import contextvars
 import json
 import os
 import re
@@ -20,15 +21,21 @@ from . import rules, store
 
 API = "https://api.cursor.com/v1"
 TERMINAL = {"FINISHED", "ERROR", "CANCELLED", "EXPIRED"}
+# the shared server's agents work in a checkout of this on the member's Mac: ./p2b forwarding back, no server code
+CLIENT_REPO = "https://github.com/jetteezhou/paper2brain-client"
+# there the librarian specs live on the server, so every task first fetches the current ones into that checkout
+GUIDE_FIRST = "（先运行 `./p2b guide`，把 librarian/ 工作规范更新到服务器上的当前版本，再按下面做。）\n"
 
 
 def config():
     path = store.home() / "config.json"
     cfg = json.loads(path.read_text()) if path.exists() else {}
+    # a shared space runs its agents on one member's Cursor key and worker, kept in that member's own library
+    who = store.config_of(cfg["agent_library"]) if cfg.get("agent_library") else cfg
     return {
-        "api_key": os.environ.get("CURSOR_API_KEY") or cfg.get("cursor_api_key"),
-        "machine": os.environ.get("P2B_MACHINE") or cfg.get("machine"),
-        "repo": cfg.get("repo") or "https://github.com/jetteezhou/paper2brain",
+        "api_key": os.environ.get("CURSOR_API_KEY") or who.get("cursor_api_key"),
+        "machine": os.environ.get("P2B_MACHINE") or who.get("machine"),
+        "repo": cfg.get("repo") or (CLIENT_REPO if store.multi() else "https://github.com/jetteezhou/paper2brain"),
         "model": cfg.get("model"),
         "models": cfg.get("models") or {},
         "auto_agent": cfg.get("auto_agent", True),
@@ -59,6 +66,8 @@ def set_backend(backend):
 
 
 def _missing(backend):
+    if store.multi():  # both run on the member's Mac, which says what it has each time it asks for work
+        return [] if runner_online(backend) else [f"在线的本机 {'TCodex' if backend == 'tcodex' else 'agent'}（在 Mac 上运行 paper2brain-client 的 setup.sh）"]
     if backend == "tcodex":
         return [] if _tcodex_bin() else ["tcodex 命令"]
     cfg = config()
@@ -67,7 +76,7 @@ def _missing(backend):
 
 def status():
     cfg, ready = config(), [b for b in BACKENDS if not _missing(b)]
-    names = {"cursor": cfg["machine"], "tcodex": "TCodex"}
+    names = {"cursor": runner_info().get("machine") if store.multi() else cfg["machine"], "tcodex": "TCodex"}
     return {"enabled": bool(ready), "missing": [] if ready else _missing(cfg["backend"]), "machine": " + ".join(names[b] for b in ready),
             "auto_agent": cfg["auto_agent"], "backend": cfg["backend"], "backends": {b: b in ready for b in BACKENDS},
             "search_ai": search_ai_ready(), "search_api": bool(search_api())}
@@ -90,11 +99,11 @@ MODULES = {
     "discuss": "讨论：论文、主题、论文库、划词、找论文",
     "capture": "收下：整理收下的内容、写快读卡",
     "deepread": "深读报告",
-    "distill": "给讨论起标题",
+    "distill": "给讨论起标题、整理讨论地图",
     "search": "快速搜索：没配下面的搜索接口时，搜索框第一条的 AI 推荐用的模型（只能用 TCodex 模型；默认 deepseek-v4.1-flash）",
 }
 KIND_MODULE = {"draft": "research", "writing": "research", "plan": "research", "related": "research", "codemap": "research", "experiment": "research",
-               "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill"}
+               "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill", "map": "distill"}
 
 
 def model_for(module):
@@ -133,16 +142,21 @@ def list_models():
     """The models of every ready backend, each tagged with its backend, with their parameters (context window,
     reasoning effort...). Cursor's list is cached 10 minutes."""
     items = []
-    if not _missing("cursor"):
-        if time.time() - _models_cache.get("at", 0) > 600:
-            _models_cache.update(items=_json("GET", "/models")["items"], at=time.time())
-        items += [{**m, "backend": "cursor"} for m in _models_cache["items"]]
+    if store.multi():  # the member's Mac lists its Cursor account's models when it asks for work
+        items += [{**m, "backend": "cursor"} for m in runner_info().get("models", []) if not _missing("cursor")]
+    elif not _missing("cursor"):
+        cache = _models_cache.setdefault(config()["api_key"], {})  # per key: each user's account offers its own models
+        if time.time() - cache.get("at", 0) > 600:
+            cache.update(items=_json("GET", "/models")["items"], at=time.time())
+        items += [{**m, "backend": "cursor"} for m in cache["items"]]
     if not _missing("tcodex"):
         items += TCODEX_MODELS
     return items
 
 
 def _request(method, path, body=None, accept="application/json", timeout=None):
+    if store.multi():  # Cursor judges the region by the caller: there the member's Mac calls it (claim)
+        raise AgentError("共享服务器不直接调用 Cursor")
     cfg = config()
     if not cfg["api_key"]:
         raise AgentError("未配置 CURSOR_API_KEY")
@@ -186,7 +200,7 @@ _pump_lock = threading.Lock()
 
 
 def _spawn(fn, *args):
-    threading.Thread(target=fn, args=args, daemon=True).start()
+    store.spawn(fn, *args)
 
 
 def _bind(kind, ref, agent_id):
@@ -199,6 +213,8 @@ def _bind(kind, ref, agent_id):
         store.set_thread_agent(store.thread_for(f"find:{ref}")["id"], agent_id)
     if kind == "distill":
         store.kv_set(DISTILL_AGENT, agent_id)
+    if kind == "map":
+        store.kv_set(MAP_AGENT, agent_id)
 
 
 def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, module=None, model=None):
@@ -213,6 +229,8 @@ def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=No
     if _missing(backend):
         raise AgentError(f"{'TCodex' if backend == 'tcodex' else 'Cursor'} 后端未配置：缺 " + "、".join(_missing(backend)))
     agent_id = agent_id or f"{'codex' if backend == 'tcodex' else 'bc'}-{uuid.uuid4()}"
+    if store.multi():
+        text = GUIDE_FIRST + text
     store.add_run(placeholder, agent_id, kind, ref, text, "WAITING", launch={"name": name, "new": new, "model": model})
     if images:
         _images[placeholder] = list(images)
@@ -265,6 +283,8 @@ def _send(agent_id, text, images=(), name=None, new=False, model=None):
 
 def _launch(r):
     placeholder, launch = r["id"], r["launch"] or {}
+    if store.multi():
+        return _queue(r, "tc-" if _backend_of(agent_id=r["agent_id"]) == "tcodex" else "cr-")
     if _backend_of(agent_id=r["agent_id"]) == "tcodex":
         return _codex_launch(r)
     try:
@@ -398,7 +418,9 @@ _PATH = os.pathsep.join([os.environ.get("PATH", ""), os.path.expanduser("~/.loca
 
 
 def _tcodex_bin():
-    return shutil.which("tcodex", path=_PATH)
+    # never on the shared server itself, where it could reach every library: there members' Macs run it (claim)
+    # ponytail: so the quick one-shot TCodex calls (search bar, titles) stay off there; they need the search API instead
+    return None if store.multi() else shutil.which("tcodex", path=_PATH)
 
 
 def _codex_launch(r):
@@ -430,6 +452,29 @@ def _codex_args(session, text, images, model):
 def _codex(agent_id, run_id, text, images, model):
     """One Codex turn. Our agent id maps to Codex's session id (kv), so a follow-up resumes the same conversation."""
     key, started = f"codex:{agent_id}", time.time()
+
+    def progress(out, tools, session):
+        if session:
+            store.kv_set(key, session)
+        store.update_run(run_id, text=out, tools=tools)
+
+    out, tools, error = codex_turn(store.kv_get(key), text, images, model, progress, lambda p: _procs.__setitem__(run_id, p))
+    if (store.get_run(run_id) or {}).get("status") not in LIVE:
+        return  # cancelled or expired here
+    _codex_done(agent_id, run_id, out, tools, error, int((time.time() - started) * 1000))
+
+
+def _codex_done(agent_id, run_id, out, tools, error, duration_ms):
+    if error and not out:
+        store.forget_agent(agent_id)  # a session that failed to start or resume: the next message starts fresh
+        store.kv_set(f"codex:{agent_id}", "")
+    store.update_run(run_id, status="ERROR" if error else "FINISHED", error=error, text=out, tools=tools, duration_ms=duration_ms)
+
+
+def codex_turn(session, text, images, model, progress, started=None, env=None):
+    """Run one `tcodex exec` turn on this machine (single-user; paper2brain-client has the same for members' Macs).
+    images: [(bytes, mime)]. progress(text, tools, new session id or None) after each event; started(process) lets
+    the caller stop it. Returns (text, tools, error)."""
     out, tools, error, notice = "", {}, None, None
     with tempfile.TemporaryDirectory() as tmp:
         paths = []
@@ -438,17 +483,19 @@ def _codex(agent_id, run_id, text, images, model):
             with open(paths[-1], "wb") as f:
                 f.write(data)
         with open(os.path.join(tmp, "stderr"), "w+") as err, \
-                subprocess.Popen(_codex_args(store.kv_get(key), text, paths, model), cwd=REPO_DIR, stdin=subprocess.DEVNULL,
-                                 env={**os.environ, "PATH": _PATH}, stdout=subprocess.PIPE, stderr=err, text=True, start_new_session=True) as p:
-            _procs[run_id] = p
+                subprocess.Popen(_codex_args(session, text, paths, model), cwd=REPO_DIR, stdin=subprocess.DEVNULL,
+                                 env={**os.environ, "PATH": _PATH, **(env or {})}, stdout=subprocess.PIPE, stderr=err, text=True,
+                                 start_new_session=True) as p:
+            if started:
+                started(p)
             for line in p.stdout:
                 try:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                kind, item = ev.get("type"), ev.get("item") or {}
+                kind, item, new = ev.get("type"), ev.get("item") or {}, None
                 if kind == "thread.started":
-                    store.kv_set(key, ev["thread_id"])
+                    new = ev["thread_id"]
                 elif kind == "turn.failed":
                     error = (ev.get("error") or {}).get("message")
                 elif kind == "error":  # also "Reconnecting... 2/5" mid-turn: fatal only if the turn fails or the process exits non-zero
@@ -460,27 +507,165 @@ def _codex(agent_id, run_id, text, images, model):
                                          "args": _short(item) or _short({"path": ", ".join(c.get("path", "") for c in item.get("changes") or [])})}
                 else:
                     continue
-                store.update_run(run_id, text=out, tools=list(tools.values()))
+                progress(out, list(tools.values()), new)
             p.wait()
             err.seek(0)
             if p.returncode and not error:
                 error = notice or err.read()[-300:].strip() or f"tcodex 退出码 {p.returncode}"
-    if (store.get_run(run_id) or {}).get("status") not in LIVE:
-        return  # cancelled or expired here
-    if error and not out:
-        store.forget_agent(agent_id)  # a session that failed to start or resume: the next message starts fresh
-        store.kv_set(key, "")
-    store.update_run(run_id, status="ERROR" if error else "FINISHED", error=error, text=out, tools=list(tools.values()),
-                     duration_ms=int((time.time() - started) * 1000))
+    return out, list(tools.values()), error
+
+
+# ---------- the shared server: a member's Mac takes each run (paper2brain-client) and calls Cursor or runs TCodex there,
+# so Cursor sees the Mac's region and the key never leaves it; the server only queues and records ----------
+
+_jobs = {}  # ponytail: a queued run's images live in memory; after a server restart it is sent without them
+_runners = {}  # a member's personal library id -> {"at", "backends", "machine", "models"} from their Mac
+RUNNER_FRESH = 90  # seconds: the Mac asks again at least every ~25 s while it is on
+PREFIX = {"tcodex": "tc-", "cursor": "cr-"}
+
+
+def _mac():
+    """The personal library whose Mac serves this request: the member's own in a space, else the library's agent member."""
+    return (store.viewer() or {}).get("library") or store.config().get("agent_library") or store.home().name
+
+
+def runner_info():
+    """What the Mac that runs this library's agents last said about itself, while it keeps asking for work."""
+    info = _runners.get(_mac()) or {}
+    return info if time.time() - info.get("at", 0) < RUNNER_FRESH else {}
+
+
+def runner_online(backend):
+    return backend in runner_info().get("backends", ())
+
+
+# calls to the quick search API, made by the member's Mac while a request here waits for the answer
+_calls, _answers, _wake, _calls_lock = {}, {}, {}, threading.Lock()
+
+
+def _woken(lib):
+    with _calls_lock:
+        return _wake.setdefault(lib, threading.Event())
+
+
+def wait_for_work(lib, seconds):
+    """The Mac's claim waits here between looks, so a search call reaches it at once."""
+    ev = _woken(lib)
+    ev.wait(seconds)
+    ev.clear()
+
+
+def _remote(op, timeout, **args):
+    lib, cid, done = _mac(), str(uuid.uuid4()), threading.Event()
+    with _calls_lock:
+        _answers[cid] = {"event": done, "lib": lib}
+        _calls.setdefault(lib, []).append({"backend": "api", "call_id": cid, "op": op, "timeout": timeout, **args})
+    _woken(lib).set()
+    if not done.wait(timeout + 10):
+        with _calls_lock:
+            _answers.pop(cid, None)
+            _calls[lib] = [c for c in _calls.get(lib, []) if c["call_id"] != cid]
+        raise AgentError("本机的搜索接口没有回应：Mac 开着吗？")
+    got = _answers.pop(cid)
+    if got.get("error"):
+        raise AgentError(str(got["error"])[:300])
+    return got["result"] if isinstance(got.get("result"), dict) else {}
+
+
+def answer(lib, call_id, result=None, error=None):
+    """The Mac's answer to a search call it took; only the Mac the call was meant for can give it."""
+    with _calls_lock:
+        a = _answers.get(call_id)
+        if not a or a["lib"] != lib:
+            return False
+        a.update(result=result, error=error)
+    a["event"].set()
+    return True
+
+
+def _queue(r, prefix):
+    """The run waits as CREATING until the Mac that runs this library's agents takes it (claim)."""
+    try:
+        if (store.get_run(r["id"]) or {}).get("status") in ("CANCELLED", "EXPIRED"):
+            return
+        run_id = f"{prefix}{uuid.uuid4()}"
+        _jobs[run_id] = _images.pop(r["id"], ())
+        store.replace_run(r["id"], run_id, r["agent_id"], "CREATING")
+    finally:
+        pump()
+
+
+def claim(libraries, user, backends, machine=None, models=None, take=None):
+    """For a member's Mac: the oldest run (or quick search call) waiting for one of its backends in the libraries
+    whose agents it runs, now running there. It says which backends it has, its worker's name and its Cursor
+    account's models; take: the backends it has room for now (all when not given). In a space it takes the member's
+    own runs, and the unowned ones when the space's background work is theirs."""
+    mine = user["library"]
+    old = _runners.get(mine, {})
+    models = [m for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)][:300] if isinstance(models, list) else old.get("models", [])
+    _runners[mine] = {"at": time.time(), "backends": [b for b in backends if b in (*BACKENDS, "api")] if isinstance(backends, list) else [],
+                      "machine": str(machine)[:60] if machine else old.get("machine"), "models": models}
+    take = [b for b in take if b in _runners[mine]["backends"]] if isinstance(take, list) else _runners[mine]["backends"]
+    prefixes = tuple(PREFIX[b] for b in take if b in PREFIX)
+    if "api" in take:
+        with _calls_lock:
+            if _calls.get(mine):
+                return _calls[mine].pop(0)
+    for lib in libraries:
+        with store.at_home(store.library_home(lib)):
+            for r in store.unfinished_runs():
+                ours = r["user_id"] == user["id"] if r["user_id"] else lib == mine or store.config_of(lib).get("agent_library") == mine
+                if ours and prefixes and r["id"].startswith(prefixes) and r["status"] == "CREATING" and store.claim_run(r["id"]):
+                    launch, codex = r["launch"] or {}, r["id"].startswith("tc-")
+                    job = {"backend": "tcodex" if codex else "cursor", "library": lib, "run_id": r["id"], "agent_id": r["agent_id"],
+                           "prompt": r["prompt"], "model": launch.get("model"),
+                           "images": [{"data": base64.b64encode(d).decode(), "mime": m} for d, m in _jobs.pop(r["id"], ())]}
+                    if codex:
+                        job["session"] = store.kv_get(f"codex:{r['agent_id']}") or None
+                    else:
+                        job.update(new=bool(launch.get("new")), name=launch.get("name"), repo=config()["repo"])
+                        if job["model"]:
+                            job["model"] = {k: v for k, v in job["model"].items() if k != "backend"}
+                    return job
+    return None
+
+
+def progress(run_id, text, tools, session=None, done=False, error=None, duration_ms=None, status=None):
+    """A member's Mac reports on a run it took. False when the run was stopped here: the Mac then stops it too."""
+    r = store.get_run(run_id) if str(run_id).startswith(tuple(PREFIX.values())) else None
+    if not r or r["status"] not in LIVE:
+        return False
+    text, error = str(text or "")[:200_000], error and str(error)[:2000]
+    tools = [t for t in tools if isinstance(t, dict)][:500] if isinstance(tools, list) else []
+    duration_ms = duration_ms if isinstance(duration_ms, int) else None
+    if session and run_id.startswith("tc-"):
+        store.kv_set(f"codex:{r['agent_id']}", str(session)[:200])
+    if not done:
+        store.update_run(run_id, text=text, tools=tools, status="RUNNING")
+        return True
+    if run_id.startswith("tc-"):
+        _codex_done(r["agent_id"], run_id, text, tools, error, duration_ms)
+    else:
+        status = status if status in TERMINAL else "ERROR" if error else "FINISHED"
+        # the Mac could not start or continue the agent (as _launch does here): the next message starts a fresh one
+        if error and error.startswith("Cursor API") and ((r["launch"] or {}).get("new") or re.search(r"Cursor API (404|410)|archived", error, re.I)):
+            store.forget_agent(r["agent_id"])
+        store.update_run(run_id, status=status, error=error, text=text, tools=tools, duration_ms=duration_ms)
+    pump()
+    return True
 
 
 SEARCH_MODEL = {"id": "deepseek-v4.1-flash", "backend": "tcodex", "params": [{"id": "effort", "value": "low"}]}
 
 
 def search_api():
-    """The OpenAI-compatible chat API the search bar calls directly (config.json "search_api"), or None."""
-    path = store.home() / "config.json"
-    api = (json.loads(path.read_text()) if path.exists() else {}).get("search_api") or {}
+    """The OpenAI-compatible chat API the search bar calls directly (config.json "search_api"), or None. A shared
+    space without its own uses the one of the member who runs its agents. On the shared server it is the member's
+    Mac that calls it (with its own key and proxy, so region-locked models work): {"remote": True} while it is on."""
+    if store.multi():
+        return {"remote": True} if runner_online("api") else None
+    cfg = store.config()
+    api = cfg.get("search_api") or (store.config_of(cfg["agent_library"]).get("search_api") if cfg.get("agent_library") else None) or {}
     return api if api.get("base_url") and api.get("api_key") and api.get("model") else None
 
 
@@ -504,6 +689,10 @@ def _google(api):
 
 def _web(api, prompt, timeout=60):
     """One Gemini turn grounded in Google Search (about 4 s): (text, [{title, url}] of the pages it used)."""
+    if api.get("remote"):
+        got = _remote("web", timeout, prompt=prompt)
+        return str(got.get("text") or ""), [{"title": str(p.get("title") or ""), "url": str(p.get("url") or "")}
+                                            for p in got.get("pages") or [] if isinstance(p, dict)][:8]
     # ponytail: Google itself, or zhizengzeng's <host>/google/v1beta; another provider needs its own path here.
     root = "https://generativelanguage.googleapis.com" if _google(api) else re.sub(r"/v1/?$", "", api["base_url"]) + "/google"
     url = root + f"/v1beta/models/{api.get('web_model') or WEB_MODEL}:generateContent?" + urllib.parse.urlencode({"key": api["api_key"]})
@@ -551,6 +740,8 @@ def search_ai_ready():
 
 
 def _chat(api, prompt):
+    if api.get("remote"):
+        return str(_remote("chat", 30, prompt=prompt).get("text") or "")
     req = urllib.request.Request(api["base_url"] + "/chat/completions", method="POST", headers={
         "Authorization": f"Bearer {api['api_key']}", "Content-Type": "application/json"}, data=json.dumps({
             "model": api["model"], "messages": [{"role": "user", "content": prompt}],
@@ -588,8 +779,8 @@ def ai_search(q):
         except Exception:
             pass  # the web answer still comes, without library picks
 
-    jobs = [threading.Thread(target=pick_from_library, daemon=True),
-            threading.Thread(target=lambda: named.extend(_named_papers(q)), daemon=True)]
+    jobs = [threading.Thread(target=contextvars.copy_context().run, args=(pick_from_library,), daemon=True),
+            threading.Thread(target=contextvars.copy_context().run, args=(lambda: named.extend(_named_papers(q)),), daemon=True)]
     for j in jobs:
         j.start()
     try:
@@ -748,7 +939,7 @@ def login(cli):
 
 
 def cancel(agent_id, run_id):
-    if run_id.startswith("tc-"):
+    if run_id.startswith(tuple(PREFIX.values())):  # a member's Mac stops a run it took at its next report
         store.update_run(run_id, status="CANCELLED")
         if run_id in _procs:
             os.killpg(_procs[run_id].pid, signal.SIGTERM)
@@ -760,8 +951,8 @@ def resume_watchers():
     """After a restart: keep watching live runs; a run whose request was in flight is found by its agent id or, when
     it never reached Cursor, queued to be sent again (a repeated create is idempotent); waiting runs wait on."""
     for r in store.unfinished_runs():
-        if r["id"].startswith("tc-"):
-            store.update_run(r["id"], status="ERROR", error="服务重启，TCodex 进程已中断，请重试")
+        if r["id"].startswith(tuple(PREFIX.values())):
+            store.update_run(r["id"], status="ERROR", error="服务重启，这次任务已中断，请重试")
         elif not r["id"].startswith("pending-"):
             watch(r["agent_id"], r["id"])
         elif r["status"] != "WAITING" and not r["agent_id"]:
@@ -897,7 +1088,8 @@ def discuss(scope, text, thread_id=None, start=False, images=(), model=None, red
     """Continue the scope's latest discussion, or an older one the user jumped back to. start=True opens a new
     research: the agent first reads what the user brought and drafts, instead of just answering. A model switches
     the discussion to a new agent on it, told what was said so far (an agent keeps the model it was created with).
-    redo=True drops the last question and its answer and asks it again of a new agent, which never saw that answer."""
+    redo=True drops the last question and its answer and asks it again of a new agent, which never saw that answer;
+    in an experiment discussion the figure drafts that answer proposed go too."""
     thread = store.thread_for(scope, thread_id)
     if redo:
         last = thread["messages"][-2:]
@@ -909,6 +1101,8 @@ def discuss(scope, text, thread_id=None, start=False, images=(), model=None, red
         if q["forks"] or a["forks"] or q["research"] or a["research"]:
             raise rules.Rejected("这一问一答已经分出了讨论或加入了研究，换个方式：从上一条分叉再问")
         store.drop_messages([q["id"], a["id"]])
+        if scope.startswith("experiment:"):
+            store.rollback_figures(scope.partition(":")[2], q["created_at"])
         thread["messages"], text = thread["messages"][:-2], q["text"]
     if model or redo:
         thread["agent_id"] = None
@@ -1015,6 +1209,49 @@ def distill_pending():
 
 
 _distill_lock = threading.Lock()
+
+MAP_AGENT, MAP_TRIED = "map_agent", "map_tried"
+
+
+def map_pending():
+    """Fold newly titled discussions into the idea map, six at a time. Each signature (last message time and
+    count) is tried at most twice. No fast-API shortcut: the agent has to read the threads and run ./p2b map put.
+    On the shared server a space is walked one member at a time, so one person's batch cannot read another's.
+    ponytail: `edges` only touches the pairs it names, so a batch cannot wipe cross edges it never read."""
+    if store.multi() and not store.viewer():
+        owners = [u for u in store.thread_owners() if u]
+        if owners:
+            for uid in owners:
+                with store.viewing({"id": uid}):
+                    _map_pending_batch()
+            return
+    _map_pending_batch()
+
+
+def _map_pending_batch():
+    who = (store.viewer() or {}).get("id")
+    if not status()["enabled"] or any(r["kind"] == "map" and (r.get("user_id") or None) == who for r in store.unfinished_runs()):
+        return
+    tried = json.loads(store.kv_get(MAP_TRIED) or "{}")
+    due = []
+    for row in store.pending_map(6):
+        sig = f"{row['last_at']}:{row['n']}"
+        rec = tried.get(row["id"]) or {}
+        n = rec.get("n", 0) if rec.get("sig") == sig else 0
+        if n < 2:
+            due.append((row["id"], sig, n))
+    if not due:
+        return
+    agent_key = MAP_AGENT if not who else f"{MAP_AGENT}:{who}"
+    last = store.last_run("map")
+    if last and last["status"] == "ERROR" and (last.get("user_id") or None) == who and "agent_busy" not in (last["error"] or ""):
+        store.kv_set(agent_key, "")
+    for tid, sig, n in due:
+        tried[tid] = {"sig": sig, "n": n + 1}
+    store.kv_set(MAP_TRIED, json.dumps(tried))
+    ids = " ".join(tid for tid, _, _ in due)
+    text = f"先读 librarian/README.md 和 librarian/discuss.md，按「整理地图」一节处理这些讨论：{ids}"
+    start_async("map", "threads", text, name="整理讨论地图", agent_id=store.kv_get(agent_key) or None)
 
 
 def _scope_label(scope):
@@ -1126,6 +1363,21 @@ def structure_experiment(eid):
         f"研究有预期图表时，再按“填预期图表”一节用 ./p2b figures-plan fill {e['research_id']} 把这条实验的结果填进对应格子。"
     )
     return start_async("experiment", eid, text, name=f"整理实验：{(e['title'] or e['raw'])[:40]}")
+
+
+def lookup_methods(rid, gaps):
+    """The user saved a main-result figure that names methods the setup does not have. Open a new experiment
+    discussion and send the agent to find each one (library, then the web) per librarian/experiment.md."""
+    lines = [f"- 图表「{g['title']}」（id {g['id'] or '无'}）：{'、'.join(g['names'])}。"
+             f"要保存的行：{'、'.join(g['rows'])}。列：{'、'.join(g['series'])}。" for g in gaps]
+    text = ("我保存主结果图表时，下面这些方法还不在实验设置的对比方法或对照里，所以这张图没有保存。\n"
+            + "\n".join(lines) + "\n请按 librarian/experiment.md 的「图表里的新方法」处理。")
+    scope = f"experiment:{rid}"
+    tid = store.new_thread(scope)
+    names = "、".join(dict.fromkeys(n for g in gaps for n in g["names"]))
+    store.set_thread_title(tid, f"找图表里的方法：{names}"[:80], "agent")
+    discuss(scope, text, tid)
+    return tid
 
 
 def draft_figures(rid, instruction=None):

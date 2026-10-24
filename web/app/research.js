@@ -12,7 +12,7 @@ import { Chat } from './discuss.js';
 const STAGE = { forming: ['构思中', 'chip amber'], established: ['已确立', 'chip green-solid'] };
 export const StageChip = ({ stage }) => html`<span class=${STAGE[stage][1]}>${STAGE[stage][0]}</span>`;
 export const ROLE_NAME = { method: '方法借鉴', baseline: 'baseline', support: '支持证据', counter: '反面证据', reproduce: '待复现' };
-export const ResearchChip = ({ x }) => html`<a href="#" class="chip research-chip" title="打开这个研究" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); openResearch(x.id); }}>${STAGE[x.stage][0]} · ${short(x.title, 22)}${x.role ? ` · 作为 ${ROLE_NAME[x.role]}` : ''}</a>`;
+export const ResearchChip = ({ x }) => html`<a href="#" class="chip research-chip" title="打开这个研究" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); x.space ? openShared(x) : openResearch(x.id); }}>${STAGE[x.stage][0]} · ${short(x.title, 22)}${x.role ? ` · 作为 ${ROLE_NAME[x.role]}` : ''}</a>`;
 const ElementsChip = ({ n }) => html`<span class=${`chip ${n === 3 ? 'green' : ''}`} title="研究问题 / 研究方法 / 验证方案">三要素 ${n}/3</span>`;
 
 const FIELDS = [
@@ -50,7 +50,19 @@ function RunsBlock({ runs, label, spec }) {
 
 // ---------- overview: the three elements ----------
 
-const Diff = ({ a, b }) => html`<div class="diff">${diffText(a, b).map(([op, t]) => (op === '=' ? t : html`<${op === '+' ? 'ins' : 'del'}>${t}<//>`))}</div>`;
+/** Changed sentences only. Unchanged stretches collapse to ···, the way a diff shows hunks and not the whole text. */
+const Diff = ({ a, b }) => {
+  const nodes = [];
+  let skip = false;
+  for (const [op, t] of diffText(a, b)) {
+    if (op === '=') { skip = true; continue; }
+    if (skip) nodes.push(html`<span class="diff-skip"> ··· </span>`);
+    skip = false;
+    nodes.push(html`<${op === '+' ? 'ins' : 'del'}>${t}<//>`);
+  }
+  if (skip && nodes.length) nodes.push(html`<span class="diff-skip"> ··· </span>`);
+  return html`<div class="diff">${nodes}</div>`;
+};
 
 /** One row per changed part of a draft: what is there now against what the agent proposes, ticked to take it. */
 function DraftRows({ rows, cur, p, pick, setPick }) {
@@ -191,11 +203,38 @@ function Materials({ x }) {
 
 const linkTitles = (x) => Object.fromEntries(x.links.filter((l) => l.kind === 'paper').map((l) => [l.ref, l.label]));
 
+const workCell = (r, title) => (r.paper === 'ours' ? html`<b>${r.name || '我们'}</b>` : html`${r.name ? html`<b>${r.name}</b><br />` : null}<${PaperChip} peek id=${r.paper} title=${title[r.paper] || idLabel(r.paper)} />`);
+
 function Comparison({ t, title }) {
   return html`<div class="cmp-wrap"><table class="cmp"><thead><tr><th>工作</th>${t.columns.map((c) => html`<th>${c}</th>`)}</tr></thead>
     <tbody>${t.rows.map((r) => html`<tr class=${r.paper === 'ours' ? 'ours' : ''}>
-      <td>${r.paper === 'ours' ? html`<b>${r.name || '我们'}</b>` : html`${r.name ? html`<b>${r.name}</b><br />` : null}<${PaperChip} peek id=${r.paper} title=${title[r.paper] || idLabel(r.paper)} />`}</td>
+      <td>${workCell(r, title)}</td>
       ${r.cells.map((c) => html`<td>${c}</td>`)}</tr>`)}</tbody></table></div>`;
+}
+
+/** A changed comparison: only rows and cells that differ. A new table is shown whole, once. */
+function ComparisonDiff({ prev, next, title }) {
+  if (!prev) return html`<${Comparison} t=${next} title=${title} />`;
+  const prevRow = Object.fromEntries(prev.rows.map((r) => [r.paper, r]));
+  const nextIds = new Set(next.rows.map((r) => r.paper));
+  const was = (row, col) => { const i = prev.columns.indexOf(col); return i < 0 ? '' : (row.cells[i] || ''); };
+  const changed = next.rows.filter((r) => {
+    const o = prevRow[r.paper];
+    return !o || (o.name || '') !== (r.name || '') || next.columns.some((c, i) => was(o, c) !== (r.cells[i] || ''));
+  });
+  const gone = prev.rows.filter((r) => !nextIds.has(r.paper)).map((r) => r.name || (r.paper === 'ours' ? '我们' : (title[r.paper] || idLabel(r.paper))));
+  const dropped = prev.columns.filter((c) => !next.columns.includes(c));
+  return html`<div class="cmp-wrap"><table class="cmp"><thead><tr><th>工作</th>${next.columns.map((c) => html`<th>${prev.columns.includes(c) ? c : html`<ins>${c}</ins>`}</th>`)}</tr></thead>
+    <tbody>${changed.map((r) => {
+      const o = prevRow[r.paper];
+      return html`<tr class=${r.paper === 'ours' ? 'ours' : ''}><td>${o && (o.name || '') !== (r.name || '') ? html`<del>${o.name || '—'}</del> ` : null}${workCell(r, title)}</td>
+        ${r.cells.map((c, i) => {
+          const old = o ? was(o, next.columns[i]) : null;
+          return html`<td>${old == null ? html`<ins>${c || ''}</ins>` : old === (c || '') ? c : html`<del>${old || '—'}</del> <ins>${c || '—'}</ins>`}</td>`;
+        })}</tr>`;
+    })}</tbody></table>
+    ${gone.length ? html`<div class="hint">删行：${gone.join('、')}</div>` : null}
+    ${dropped.length ? html`<div class="hint">删列：${dropped.join('、')}</div>` : null}</div>`;
 }
 
 function RelatedProposal({ x }) {
@@ -213,7 +252,7 @@ function RelatedProposal({ x }) {
           ${g.diff ? html`<div class="hint">我们的区别：<${Html} s=${inlineMd(g.diff)} /></div>` : null}<div class="hint">${g.papers.length} 篇论文</div></div>`}</div>`)
       : newTable ? null : html`<div class="hint">和现在的一样。</div>`}
     ${newTable ? html`<div class="pr-row"><label class="pr-label"><b>对比表</b><span class="chip">${r.comparison ? '修改' : '新增'}</span></label>
-      <${Comparison} t=${newTable} title=${linkTitles(x)} /></div>` : null}
+      <${ComparisonDiff} prev=${r.comparison} next=${newTable} title=${linkTitles(x)} /></div>` : null}
     <div class="proposal-acts"><button class="btn primary" onClick=${() => decide('accept')}>采用</button>
       <button class="btn" onClick=${talk}>继续调整（在右侧讨论里说）</button><button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>`;
 }
@@ -382,7 +421,7 @@ const loadChart = () => chartjs ||= import('/vendor/chartjs/chart.umd.min.js').t
   return globalThis.Chart;
 });
 
-function ExpChart({ c }) {
+function ExpChart({ c, h }) {
   const ref = useRef();
   useEffect(() => {
     let chart, gone = false;
@@ -393,7 +432,7 @@ function ExpChart({ c }) {
     }).catch(fail);
     return () => { gone = true; chart?.destroy(); };
   }, [JSON.stringify(c)]);
-  return html`<div class="exp-chart"><canvas ref=${ref} role="img" aria-label=${c.title || '实验图表'}></canvas></div>`;
+  return html`<div class="exp-chart" style=${h ? { height: `${h}px` } : null}><canvas ref=${ref} role="img" aria-label=${c.title || '实验图表'}></canvas></div>`;
 }
 
 function ExpCard({ e }) {
@@ -419,10 +458,17 @@ function ExpCard({ e }) {
 
 // ---------- experiment design: the paper's Experiments section, planned before the runs, filled by their results ----------
 
-const FIG_KIND = { table: '表', bar: '柱状图', line: '折线图', radar: '雷达图' };
+const FIG_KIND = { table: '表', bar: '柱状图', hbar: '条形图', line: '折线图', radar: '雷达图' };
+const FIG_WIDTH = { full: '单栏', half: '双栏' };
 const FIG_SECTION = { main: '主结果', ablation: '消融实验', analysis: '分析', appendix: '附录' };
 const num = (v) => { const n = parseFloat(String(v).replace(/,/g, '')); return Number.isFinite(n) ? n : null; };
 const cellKey = (r, s) => `${r}\u0000${s}`;
+async function saveCell(x, f, row, series, raw, prev) {
+  const value = raw.trim();
+  if (value === (prev || '')) return;
+  try { await post(`/api/research/${enc(x.id)}/figures/cell`, { figure: f.id, row, series, value }); refresh(); }
+  catch (err) { fail(err); }
+}
 const metricOf = (d, name) => d?.metrics.find((m) => m.name === name);
 const arrow = (m) => (m ? (m.better === 'lower' ? '↓' : '↑') : '');
 const metricLabel = (m) => (m ? `${m.name}${m.unit ? ` (${m.unit})` : ''} ${arrow(m)}` : '');
@@ -437,8 +483,9 @@ function numbered(figs) {
     .map((f) => { const k = f.kind === 'table' ? 'Table' : 'Figure'; n[k] += 1; return [f, `${k} ${n[k]}`]; });
 }
 
-function DesignView({ d }) {
+function DesignView({ d, edit }) {
   return html`<div class="exp-card design">
+    ${edit ? html`<div class="exp-head"><b>实验设置</b><span class="grow"></span><button class="btn sm ghost" onClick=${edit}>编辑</button></div>` : null}
     <div class="exp-row"><span class="hint">问题</span><ol class="quotable">${d.questions.map((q) => html`<li>${q}</li>`)}</ol></div>
     <div class="exp-row"><span class="hint">基准</span><span class="quotable">${d.benchmarks.map((b, i) => html`${i ? '；' : ''}<b>${b.name}</b>${b.note ? html`<span class="hint">（<${Html} s=${inlineMd(b.note)} />）</span>` : null}`)}</span></div>
     <div class="exp-row"><span class="hint">对比</span><span class="quotable"><b>${d.method}</b>（我们）vs ${d.baselines.map((b, i) => html`${i ? '、' : ''}<span title=${b.note || ''}>${b.name}</span>${b.paper ? html` <${Html} s=${inlineMd(`[${b.paper}]`)} />` : null}`)}</span></div>
@@ -447,12 +494,92 @@ function DesignView({ d }) {
     ${d.implementation ? html`<div class="exp-row"><span class="hint">实现</span><${Html} cls="quotable" s=${inlineMd(d.implementation)} /></div>` : null}</div>`;
 }
 
+// The setup's lists edited as text: one item per line, its fields split by |.
+const DESIGN_LISTS = [['benchmarks', '基准', ['name', 'note'], '名字 | 说明'], ['baselines', '对比', ['name', 'paper', 'note'], '方法名 | 论文 id | 说明'],
+  ['controls', '对照', ['name', 'note'], '名字 | 说明'], ['metrics', '指标', ['name', 'unit', 'better'], '名字 | 单位 | higher 或 lower']];
+const linesOf = (v) => (v || '').split('\n').map((l) => l.trim()).filter(Boolean);
+
+function DesignForm({ x, d, done }) {
+  const submit = async (ev) => {
+    ev.preventDefault();
+    const f = new FormData(ev.target), setup = { questions: linesOf(f.get('questions')), method: f.get('method'), implementation: f.get('implementation') };
+    for (const [k, , keys] of DESIGN_LISTS) setup[k] = linesOf(f.get(k)).map((l) => { const v = l.split('|').map((s) => s.trim()), n = keys.length - 1;
+      return Object.fromEntries(keys.map((key, i) => [key, (i < n ? v[i] : v.slice(n).join(' | ')) || null])); });
+    try { await post(`/api/research/${enc(x.id)}/figures`, { setup, base_rev: x.figures.revision }); toast('已保存'); done(); refresh(); } catch (err) { fail(err); }
+  };
+  return html`<form class="exp-card exp-form" onSubmit=${submit}>
+    <label class="hint">研究问题（每行一个）<textarea name="questions" rows="3">${d.questions.join('\n')}</textarea></label>
+    <label class="hint">我们的方法在表里的名字<input name="method" defaultValue=${d.method} /></label>
+    ${DESIGN_LISTS.map(([k, l, keys, hint]) => html`<label class="hint">${l}（每行一项：${hint}）
+      <textarea name=${k} rows="3">${(d[k] || []).map((b) => keys.map((key) => b[key] || '').join(' | ').replace(/( \| )+$/, '')).join('\n')}</textarea></label>`)}
+    <label class="hint">实现细节<textarea name="implementation" rows="3">${d.implementation || ''}</textarea></label>
+    <div style="display:flex;gap:8px;align-items:center"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button>
+      <span class="hint">改了方法名，用到它的图表要一起改，否则会保存不了。</span></div></form>`;
+}
+
+/** A figure's own fields, plus which experiment result fills each cell: a cell only ever points at a recorded result. */
+function FigureForm({ x, f, d, done }) {
+  const [rows, setRows] = useState(f.rows.join('\n')), [series, setSeries] = useState(f.series.join('\n'));
+  const [pick, setPick] = useState(() => Object.fromEntries(x.figures.cells.filter((c) => c.figure === f.id)
+    .map((c) => [cellKey(c.row, c.series), `${c.experiment}\u0000${c.result}`])));
+  const results = x.experiments.flatMap((e) => (e.results || []).map((r) => [`${e.id}\u0000${r.name}`, `${e.title || short(firstLine(e.raw), 30)} · ${r.name} = ${r.value}`]));
+  const rs = linesOf(rows), ss = linesOf(series);
+  const submit = async (ev) => {
+    ev.preventDefault();
+    const v = Object.fromEntries(new FormData(ev.target)), t = v.target_value.trim();
+    const nf = { ...f, title: v.title, section: v.section, kind: v.kind, width: v.width, question: +v.question, metric: v.metric || null,
+      rows: rs, series: ss, caption: v.caption, claim: v.claim, x_title: v.x_title, y_title: v.y_title,
+      target: t ? { value: Number(t), label: v.target_label } : null };
+    const cells = rs.flatMap((r) => ss.map((s) => { const [experiment, result] = (pick[cellKey(r, s)] || '').split('\u0000');
+      return { figure: f.id, row: r, series: s, experiment: experiment || null, result: result || null }; }));
+    try {
+      const r = await post(`/api/research/${enc(x.id)}/figures`, { figures: x.figures.figures.map((g) => (g.id === f.id ? nf : g)), cells, base_rev: x.figures.revision });
+      if (r.lookup) {
+        toast(`${r.methods.join('、')} 还不在对比方法里。已打开讨论：agent 先在库里找，没有就上网找，找到会入库再跟你确认。这张图还没保存。`);
+        showResearch(x.id, 'experiments', r.thread_id);
+        refresh();
+        return;
+      }
+      toast('已保存'); done(); refresh();
+    } catch (err) { fail(err); }
+  };
+  const select = (name, opts, cur) => html`<select name=${name}>${opts.map(([k, l]) => html`<option value=${k} selected=${String(cur ?? '') === String(k)}>${l}</option>`)}</select>`;
+  return html`<form class="exp-card exp-form" onSubmit=${submit}>
+    <input name="title" defaultValue=${f.title} placeholder="简短的名字，不写编号" />
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${select('section', Object.entries(FIG_SECTION), f.section)}${select('kind', Object.entries(FIG_KIND), f.kind)}
+      ${select('width', Object.entries(FIG_WIDTH), f.width || 'full')}${select('question', (d?.questions || []).map((q, i) => [i + 1, `Q${i + 1}`]), f.question)}
+      ${select('metric', [['', '指标按列（列都是指标时）'], ...(d?.metrics || []).map((m) => [m.name, metricLabel(m)])], f.metric)}</div>
+    <div style="display:flex;gap:8px"><label class="hint" style="flex:1">行（每行一个）<textarea rows="4" value=${rows} onInput=${(e) => setRows(e.target.value)}></textarea></label>
+      <label class="hint" style="flex:1">系列 / 列（每行一个）<textarea rows="4" value=${series} onInput=${(e) => setSeries(e.target.value)}></textarea></label></div>
+    <textarea name="caption" rows="2" placeholder="图注（论文里的 caption）">${f.caption || ''}</textarea>
+    <input name="claim" defaultValue=${f.claim || ''} placeholder="要证明的结论（一句话）" />
+    <div style="display:flex;gap:8px"><input name="x_title" defaultValue=${f.x_title || ''} placeholder="横轴标题（可选）" /><input name="y_title" defaultValue=${f.y_title || ''} placeholder="纵轴标题（可选）" /></div>
+    <div style="display:flex;gap:8px"><input name="target_value" defaultValue=${f.target?.value ?? ''} placeholder="成功线数值（可选，要出自三要素）" /><input name="target_label" defaultValue=${f.target?.label || ''} placeholder="成功线说明" /></div>
+    ${rs.length && ss.length ? html`<div class="hint">格子：选已有实验记录，或直接在图上的格子里填写</div><div class="table-wrap"><table class="cmap paper"><thead><tr><th></th>${ss.map((s) => html`<th>${s}</th>`)}</tr></thead>
+      <tbody>${rs.map((r) => html`<tr><td>${r}</td>${ss.map((s) => html`<td><select value=${pick[cellKey(r, s)] || ''} onChange=${(e) => setPick({ ...pick, [cellKey(r, s)]: e.target.value })}>
+        <option value="">—</option>${results.map(([k, l]) => html`<option value=${k}>${l}</option>`)}</select></td>`)}</tr>`)}</tbody></table></div>` : null}
+    <div style="display:flex;gap:8px;align-items:center"><button class="btn sm primary">保存</button><button type="button" class="btn sm ghost" onClick=${done}>取消</button>
+      <span class="hint">主结果里写了还没有的方法、并且 agent 已连接时，会打开讨论去找论文，这张图先不保存。</span></div></form>`;
+}
+
+/** Two consecutive half-width figures share a row; a full-width one (the default) keeps the row to itself. */
+function figRows(fs) {
+  const rows = []; let buf = [];
+  const flush = () => { if (buf.length) { rows.push(buf); buf = []; } };
+  for (const item of fs) {
+    if (item[0].width !== 'half') { flush(); rows.push([item]); }
+    else if (buf.push(item) === 2) flush();
+  }
+  flush();
+  return rows;
+}
+
 function Sections({ x, d, figs, remove }) {
   const list = numbered(figs);
   return Object.entries(FIG_SECTION).map(([k, name]) => {
     const fs = list.filter(([f]) => f.section === k);
     return fs.length ? html`<div class="fig-section"><div class="fig-section-title">${name}</div><div class="fig-grid">
-      ${fs.map(([f, label]) => html`<${FigureCard} key=${f.id} x=${x} f=${f} d=${d} label=${label} remove=${remove && (() => remove(f))} />`)}</div></div>` : null;
+      ${figRows(fs).map((row) => html`<div class="fig-row">${row.map(([f, label]) => html`<${FigureCard} key=${f.id} x=${x} f=${f} d=${d} label=${label} remove=${remove && (() => remove(f))} />`)}</div>`)}</div></div>` : null;
   });
 }
 
@@ -467,6 +594,16 @@ function cellsOf(x, f) {
 }
 
 function FigureCard({ x, f, d, label, remove }) {
+  const [editing, setEditing] = useState(false), [exporting, setExporting] = useState(false);
+  if (editing) return html`<${FigureForm} x=${x} f=${f} d=${d} done=${() => setEditing(false)} />`;
+  const exported = x.diagrams.find((g) => g.kind === 'chart' && g.figure === f.id);
+  const exportPdf = async () => {
+    setExporting(true);
+    try { await post(`/api/research/${enc(x.id)}/figures/${enc(f.id)}/render`); toast('已导出 PDF/PNG，可放进论文'); refresh(); }
+    catch (e) { fail(e); }
+    setExporting(false);
+  };
+  const exportUrl = (file) => `/api/research/${enc(x.id)}/diagrams/${exported.name}/${file}?v=${encodeURIComponent(exported.at)}`;
   const cells = cellsOf(x, f), at = (r, s) => cells[cellKey(r, s)];
   const n = Object.keys(cells).length, total = f.rows.length * f.series.length;
   const sources = [...new Set(Object.values(cells).map(({ e }) => e.title || short(firstLine(e.raw), 30)))];
@@ -475,26 +612,36 @@ function FigureCard({ x, f, d, label, remove }) {
     const m = colMetric(s), vals = f.rows.map((r) => at(r, s) && num(at(r, s).value)).filter((v) => v != null);
     return [s, m && vals.length > 1 ? (m.better === 'lower' ? Math.min : Math.max)(...vals) : null];
   }));
+  const how = f.kind, yLabel = f.y_title || metricLabel(metricOf(d, f.metric));
   const axis = (t) => ({ title: { display: !!t, text: t || '' } });
-  const chart = f.kind !== 'table' && { type: f.kind, data: { labels: f.rows, datasets: [
+  const chart = how !== 'table' && { type: how === 'hbar' ? 'bar' : how, data: { labels: f.rows, datasets: [
     ...f.series.map((s) => ({ label: s, data: f.rows.map((r) => (at(r, s) ? num(at(r, s).value) : null)), spanGaps: true })),
-    ...(f.target ? [{ ...(f.kind === 'bar' ? { type: 'line' } : {}), label: f.target.label || `目标 ${f.target.value}`, data: f.rows.map(() => f.target.value), borderDash: [6, 4], pointRadius: 0, fill: false }] : [])] },
-    options: f.kind === 'radar' ? {} : { scales: { x: axis(f.x_title), y: axis(f.y_title || metricLabel(metricOf(d, f.metric))) } } };
+    ...(f.target ? [{ ...(how === 'bar' || how === 'hbar' ? { type: 'line' } : {}), label: f.target.label || `目标 ${f.target.value}`, data: f.rows.map(() => f.target.value), borderDash: [6, 4], pointRadius: 0, fill: false }] : [])] },
+    options: how === 'radar' ? {} : how === 'hbar' ? { indexAxis: 'y', scales: { x: axis(yLabel), y: axis(f.x_title) } }
+      : { scales: { x: axis(f.x_title), y: axis(yLabel) } } };
   const caption = f.caption ? html`<div class="fig-caption quotable"><b>${label}:</b> <${Html} s=${inlineMd(f.caption)} /></div>` : null;
   const q = d?.questions[f.question - 1];
+  const typed = (r, s) => {
+    const c = at(r, s), v = c ? c.value : '';
+    if (!remove) return !c ? html`<span class="hint">—</span>` : num(v) === best[s] ? html`<b>${v}</b>` : v;
+    return html`<input class=${`cell-in${c && num(v) === best[s] ? ' best' : ''}`} key=${v} defaultValue=${v} placeholder="填写"
+      title=${c ? `${c.e.title || '实验记录'}${c.note ? ` · ${c.note}` : ''}` : '直接填写这个格子'}
+      onBlur=${(ev) => saveCell(x, f, r, s, ev.target.value, v)}
+      onKeyDown=${(ev) => { if (ev.key === 'Enter') ev.currentTarget.blur(); }} />`;
+  };
+  const grid = html`<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
+      ${f.series.map((s) => html`<th>${s}${!f.metric && colMetric(s) ? ` ${arrow(colMetric(s))}` : ''}</th>`)}</tr></thead>
+    <tbody>${f.rows.map((r) => html`<tr class=${r === d?.method ? 'ours' : ''}><td>${r}</td>${f.series.map((s) => html`<td class="mono">${typed(r, s)}</td>`)}</tr>`)}</tbody></table></div>`;
   return html`<div class="exp-card"><div class="exp-head"><b>${label}</b><span class="quotable">${f.title}</span>
-      ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[f.kind]}</span>
+      ${q ? html`<span class="chip" title=${q}>Q${f.question}</span>` : null}<span class="chip">${FIG_KIND[how]}</span>
       <span class=${`chip ${n === total ? 'green' : ''}`} title="已经有实验结果的格子">已填 ${n}/${total}</span><span class="grow"></span>
-      ${remove ? html`<span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
+      ${remove ? html`<button class="btn sm ghost" disabled=${exporting} title="把这张图连已填的数据渲染成论文用的单页 PDF（同时出 PNG），同名覆盖" onClick=${exportPdf}>${exporting ? html`<${Mark} spin />` : ''}${exported ? '重新导出' : '导出 PDF'}</button>
+        <button class="btn sm ghost" onClick=${() => setEditing(true)}>编辑</button><span class="task-acts"><button class="x" title="删除这张图表" onClick=${remove}>×</button></span>` : null}</div>
     ${f.claim ? html`<div class="hint quotable">要证明：<${Html} s=${inlineMd(f.claim)} /></div>` : null}
-    ${chart ? html`<${ExpChart} c=${chart} />${caption}` : html`${caption}<div class="table-wrap"><table class="cmap paper"><thead><tr><th>${metricLabel(metricOf(d, f.metric))}</th>
-        ${f.series.map((s) => html`<th>${s}${!f.metric && colMetric(s) ? ` ${arrow(colMetric(s))}` : ''}</th>`)}</tr></thead>
-      <tbody>${f.rows.map((r) => html`<tr class=${r === d?.method ? 'ours' : ''}><td>${r}</td>${f.series.map((s) => {
-        const c = at(r, s), v = c && c.value;
-        return html`<td class="mono" title=${c ? `${c.e.title || ''}${c.note ? ` · ${c.note}` : ''}` : '还没有实验结果'}>${!c ? html`<span class="hint">—</span>` : num(v) === best[s] ? html`<b>${v}</b>` : v}</td>`;
-      })}</tr>`)}</tbody></table></div>`}
+    ${chart ? html`<${ExpChart} c=${chart} h=${how === 'hbar' ? Math.min(520, 28 * f.rows.length + 48) : null} />` : null}${caption}${grid}
     ${f.target && !chart ? html`<div class="hint">目标：${f.target.label || ''} ${f.target.value}</div>` : null}
-    <div class="hint">${sources.length ? `数字来自：${sources.join('、')}` : '还没有实验结果填进来；记下实验后 agent 会把对应的结果填进格子。'}</div></div>`;
+    <div class="hint">${sources.length ? `数字来自：${sources.join('、')}` : '直接在格子里填写。填过的数字会记成实验记录，agent 不会改。'}</div>
+    ${exported ? html`<div class="hint">已导出 ${ago(exported.at)}：<a href=${exportUrl('figure.pdf')} target="_blank">PDF</a> · <a href=${exportUrl('figure.png')} target="_blank">PNG</a>（格子数据变了点「重新导出」）</div>` : null}</div>`;
 }
 
 function FiguresProposal({ x }) {
@@ -503,7 +650,7 @@ function FiguresProposal({ x }) {
   const names = (a, b, what) => { const add = b.filter((v) => !a.includes(v)), gone = a.filter((v) => !b.includes(v));
     return [add.length && `加${what}：${add.join('、')}`, gone.length && `删${what}：${gone.join('、')}`].filter(Boolean); };
   const diff = (o, f) => [o.title !== f.title && `改名：${o.title}`, o.section !== f.section && `${FIG_SECTION[o.section] || '未分节'} → ${FIG_SECTION[f.section]}`,
-    o.kind !== f.kind && `${FIG_KIND[o.kind]} → ${FIG_KIND[f.kind]}`, o.question !== f.question && `改答 Q${f.question}`, o.metric !== f.metric && `指标改为 ${f.metric || '按列'}`,
+    o.kind !== f.kind && `${FIG_KIND[o.kind]} → ${FIG_KIND[f.kind]}`, (o.width || 'full') !== (f.width || 'full') && `${FIG_WIDTH[o.width || 'full']} → ${FIG_WIDTH[f.width || 'full']}`, o.question !== f.question && `改答 Q${f.question}`, o.metric !== f.metric && `指标改为 ${f.metric || '按列'}`,
     ...names(o.rows, f.rows, '行'), ...names(o.series, f.series, '系列'), JSON.stringify(o.target) !== JSON.stringify(f.target) && '目标线有改动'].filter(Boolean);
   const texts = (o, f) => [['claim', '论点'], ['caption', '图注']].filter(([k]) => (o[k] || '') !== (f[k] || ''));
   const shape = (f) => `${FIG_SECTION[f.section]} · ${FIG_KIND[f.kind]} · ${f.rows.length} 行 × ${f.series.length} 系列${f.claim ? ` · ${f.claim}` : ''}`;
@@ -528,15 +675,14 @@ function FiguresProposal({ x }) {
     ${rows.length ? rows.map(([k, cls, f, why]) => html`<div class="task-diff"><span class=${`chip ${cls}`}>${k}</span><span class=${`quotable ${k === '删除' ? 'struck' : ''}`}>${f.title}</span>
         <span class="hint">${why.length ? why.join('；') : k === '修改' ? '' : shape(f)}</span></div>
       ${k === '修改' ? texts(cur[f.id], f).map(([t, l]) => html`<div class="exp-row"><span class="hint">${l}</span><${Diff} a=${cur[f.id][t] || ''} b=${f[t] || ''} /></div>`) : null}`) : design ? null : html`<div class="hint">和现在的实验设计一样。</div>`}
-    ${design || rows.length ? html`<details><summary class="hint">预览采用后的实验部分</summary>${p.design ? html`<${DesignView} d=${p.design} />` : null}
-      <${Sections} x=${x} d=${p.design || fg.design} figs=${p.figures} /></details>` : null}
+    ${design && !fg.design ? html`<${DesignView} d=${p.design} />` : null}
     <div class="proposal-acts"><button class="btn primary" onClick=${() => decide('accept')}>采用</button>
       <button class="btn" onClick=${talk}>继续调整（去讨论）</button><button class="btn ghost" onClick=${() => decide('discard')}>放弃</button></div></div>`;
 }
 
 function Figures({ x }) {
   const fg = x.figures, run = liveRun(runsOf(x, 'figures'));
-  const [ins, setIns] = useState('');
+  const [ins, setIns] = useState(''), [editing, setEditing] = useState(false);
   const draft = async (e) => {
     e.preventDefault();
     try { await post(`/api/research/${enc(x.id)}/figures/draft`, { instruction: ins }); setIns(''); toast('已交给 agent，设计好后会作为修改稿等你确认'); refresh(); } catch (err) { fail(err); }
@@ -548,7 +694,7 @@ function Figures({ x }) {
       <button class="btn sm primary" disabled=${!agentOn.value || !!run}>${run ? html`<${Mark} spin />处理中` : fg.design ? '让 agent 更新实验设计' : '让 agent 设计实验'}</button></form>
     ${run ? html`<div class="card-wait"><${Mark} spin />Agent 正在处理实验设计：定实验设置和图表，或把实验结果填进格子…</div>` : null}
     ${fg.proposal ? html`<${FiguresProposal} key=${fg.proposal.at} x=${x} />` : null}
-    ${fg.design ? html`<${DesignView} d=${fg.design} />` : null}
+    ${!fg.design ? null : editing ? html`<${DesignForm} x=${x} d=${fg.design} done=${() => setEditing(false)} />` : html`<${DesignView} d=${fg.design} edit=${() => setEditing(true)} />`}
     ${fg.figures.length ? html`<${Sections} x=${x} d=${fg.design} figs=${fg.figures} remove=${remove} />`
       : fg.proposal ? null : html`<div class="hint">还没有实验设计。先按论文的样子定下要回答的研究问题、基准、对比方法和指标，以及主结果、消融、分析各放哪些图表，再去跑实验：每个格子就是一个要跑的实验，跑完的结果会被填进来。</div>`}
     <${RunsBlock} runs=${runsOf(x, 'figures')} label="实验设计" spec="librarian/experiment.md" /></div>`;
@@ -557,14 +703,20 @@ function Figures({ x }) {
 function Experiments({ x }) {
   const exps = x.experiments;
   const [raw, setRaw] = useState('');
+  const box = useRef();
+  useEffect(() => { if (!raw && box.current) box.current.style.height = ''; }, [raw]);
   const add = async (e) => {
     e.preventDefault();
     if (!raw.trim()) return;
-    try { await post(`/api/research/${enc(x.id)}/experiments`, { raw: raw.trim() }); setRaw(''); toast(agentOn.value ? '已记下，agent 正在整理' : '已记下'); refresh(); } catch (err) { fail(err); }
+    try {
+      await post(`/api/research/${enc(x.id)}/experiments`, { raw: raw.trim() });
+      setRaw('');
+      toast(agentOn.value ? '已记下，agent 正在整理' : '已记下'); refresh();
+    } catch (err) { fail(err); }
   };
   const metrics = [...new Set(exps.flatMap((e) => (e.results || []).map((r) => r.name)))].slice(0, 8);
   return html`<form class="exp-add" onSubmit=${add}>
-      <textarea rows="3" value=${raw} onInput=${(e) => setRaw(e.target.value)} placeholder="贴实验结果：评测日志、终端输出、wandb 汇总，或者一句话“LIBERO 跑完了 92.3，比 baseline 高 4 个点”"></textarea>
+      <textarea ref=${box} rows="3" value=${raw} onInput=${(e) => setRaw(e.target.value)} placeholder="贴实验结果：评测日志、终端输出、wandb 汇总，或者一句话“LIBERO 跑完了 92.3，比 baseline 高 4 个点”"></textarea>
       <div style="display:flex;gap:8px;align-items:center"><button class="btn primary sm">记下</button>
       <span class="hint">${agentOn.value ? 'agent 会整理成结构化记录，数字必须出自你贴的原文，并把结果填进实验设计的图表；结论和三要素冲突时会提交修改稿。' : '连接 agent 后会自动整理；现在可以先记下，再手动编辑。'}</span></div></form>
     <${Figures} x=${x} />
@@ -673,6 +825,13 @@ function OverleafChanges({ x }) {
 function Overleaf({ x }) {
   const pid = x.writing.overleaf;
   const [url, setUrl] = useState(''), [busy, setBusy] = useState(false);
+  const [pdf, setPdf] = useState(0), [compiling, setCompiling] = useState(false);
+  const compile = async () => {
+    setCompiling(true);
+    try { await post(`/api/research/${enc(x.id)}/overleaf/compile`); setPdf(Date.now()); toast('编译通过，预览已更新'); }
+    catch (e) { fail(e); }
+    setCompiling(false);
+  };
   const link = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -689,8 +848,10 @@ function Overleaf({ x }) {
   }
   return html`<div class="block"><div class="block-title">Overleaf 项目${viaGithub(pid) ? html`<span class="hint">　经 GitHub 同步：${pid.slice(7)}</span>` : null}<span class="line"></span>
       <a class="btn sm ghost" href=${viaGithub(pid) ? `https://github.com/${pid.slice(7)}` : `https://www.overleaf.com/project/${pid}`} target="_blank">打开 ↗</a>
+      <button class="btn sm ghost" disabled=${compiling} title="用本机 latexmk 编译本地目录（含未推送的改动），产物不放进项目" onClick=${compile}>${compiling ? html`<${Mark} spin />编译中` : '编译预览'}</button>
       <button class="btn sm ghost" disabled=${!!x.overleaf_changed} title=${x.overleaf_changed ? '先推送或放弃未推送的改动' : ''} onClick=${pull}>拉取最新</button>
       <button class="btn sm ghost" onClick=${unlink}>解除关联</button></div>
+    ${pdf ? html`<iframe class="pdf-view" src=${`/api/research/${enc(x.id)}/overleaf/pdf?v=${pdf}`} title="论文 PDF 预览"></iframe>` : null}
     <${OverleafChanges} x=${x} /></div>`;
 }
 
@@ -752,6 +913,7 @@ function ResearchDetail({ id }) {
   const [tab, setTab] = useState(tabOf[id] || 'overview');
   const focus = researchFocus.value;
   useEffect(() => { if (focus?.id === id && focus.tab) setTab(focus.tab); }, [focus, id]);
+  useEffect(() => { if (x?.space) openShared(x); }, [x?.space?.id]);  // a pointer in the personal library
   if (err) return html`<div class="empty"><b>打不开</b>${err}</div>`;
   if (!x) return html`<div class="empty"><span class="spin"></span></div>`;
   const exps = x.experiments, by = (c) => exps.filter((e) => e.conclusion === c).length, ps = planStats(x.plan.tasks);
@@ -763,6 +925,15 @@ function ResearchDetail({ id }) {
     toast('已删除');
     refresh();
   };
+  const acc = appState.value?.account;
+  const inSpace = acc && acc.libraries.find((l) => l.id === acc.library)?.kind === 'space';
+  const moveHome = async () => {
+    if (!confirm('把这个研究移回你的个人库？\n\n它现在的样子（连同用到的论文、讨论、附件）会复制回个人库，然后从这个空间移走，其他成员就看不到了。空间里没有别的研究时，空间会归档。')) return;
+    try { await post(`/api/research/${enc(x.id)}/move-home`); } catch (e) { return fail(e); }
+    sessionStorage.setItem(OPEN_AFTER_SWITCH, x.id);
+    location.hash = '#/research';
+    location.reload();
+  };
   const head = html`<div class="src-bar"><button class="btn sm ghost wide-only" title="研究列表" onClick=${() => setList(!listOn.value)}>${listOn.value ? '‹ 收起列表' : '› 研究列表'}</button><${StageChip} stage=${x.stage} /><${ElementsChip} n=${x.elements_done} />
       ${exps.length ? html`<span class="chip" title="实验记录">实验 ${exps.length}（支持 ${by('supports')} · 反驳 ${by('refutes')}）</span>` : null}
       ${x.repos.length ? html`<span class="chip">仓库 ${x.repos.length}</span>` : null}${x.writing.abstract || x.writing.introduction ? html`<span class="chip">有草稿</span>` : null}
@@ -772,6 +943,7 @@ function ResearchDetail({ id }) {
       ${x.figures.proposal ? html`<a href="#" class="chip violet" onClick=${toTab('experiments')}>实验设计修改稿待确认</a>` : null}
       ${x.overleaf_changed ? html`<a href="#" class="chip violet" title="agent 改了论文，去写作页查看并推送" onClick=${toTab('writing')}>Overleaf 改动待推送 ${x.overleaf_changed}</a>` : null}
       <span>${x.stage === 'established' ? `${ago(x.established_at)}确立` : `更新于 ${ago(x.updated_at)}`}</span><span class="grow"></span>
+      ${inSpace && acc.role === 'owner' ? html`<button class="btn sm ghost" title="只有空间的所有者能移回" onClick=${moveHome}>移回个人库</button>` : null}
       <button class="btn sm ghost danger" onClick=${remove}>删除</button></div>`;
   const scope = `${{ overview: 'research', materials: 'related', experiments: 'experiment' }[tab] || tab}:${x.id}`;
   const tid = focus?.id === id && focus.tab === tab ? focus.thread : null;
@@ -790,20 +962,33 @@ function ResearchDetail({ id }) {
     ${body}`);
 }
 
+// a research of a shared space, listed in the personal library: opening it switches the page to that space
+const OPEN_AFTER_SWITCH = 'p2b.openResearch';
+async function openShared(x) {
+  try { await post('/api/libraries/switch', { library: x.space.id }); } catch (e) { return fail(e); }
+  sessionStorage.setItem(OPEN_AFTER_SWITCH, x.id);
+  location.hash = '#/research';
+  location.reload();
+}
+
 function ResearchItem({ x, on }) {
-  return html`<div class=${`item ${on ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${on ? 'true' : null} onClick=${() => (selected.value = { kind: 'research', id: x.id })}>
-    <div class="item-meta"><${StageChip} stage=${x.stage} /><${ElementsChip} n=${x.elements_done} />${x.has_proposal ? html`<span class="chip violet">修改稿待确认</span>` : null}<time>${ago(x.updated_at)}</time></div>
+  return html`<div class=${`item ${on ? 'on' : ''}`} role="link" tabIndex="0" aria-current=${on ? 'true' : null} onClick=${() => (x.space ? openShared(x) : (selected.value = { kind: 'research', id: x.id }))}>
+    <div class="item-meta"><${StageChip} stage=${x.stage} /><${ElementsChip} n=${x.elements_done} />${x.space ? html`<span class="chip" title="在共享空间里，点开进入那个空间">共享 · ${x.space.name}</span>` : null}${x.has_proposal ? html`<span class="chip violet">修改稿待确认</span>` : null}<time>${ago(x.updated_at)}</time></div>
     <div class="item-title">${x.title}</div>${x.summary ? html`<div class="item-tldr">${x.summary}</div>` : null}
     <div class="item-tags">${x.topics.map((t) => html`<span class="chip topic">${t}</span>`)}${x.link_count ? html`<span class="chip">${x.link_count} 份素材</span>` : null}
       ${x.exp_count ? html`<span class="chip">实验 ${x.exp_count}</span>` : null}${x.repo_count ? html`<span class="chip">仓库 ${x.repo_count}</span>` : null}</div></div>`;
 }
 
 export function ResearchView({ topic }) {
-  const [list] = useLive('/api/research' + (topic ? `?topic=${enc(topic)}` : ''));
+  const [list] = useLive('/api/research' + (topic ? `?topic=${enc(topic)}` : '?shared=1'));
   const [papers] = useLive(topic ? `/api/papers?topic=${enc(topic)}` : null);
   const [name, setName] = useState('');
   const s = selected.value, sel = s?.kind === 'research' ? s.id : null;
-  useEffect(() => { if (list?.length && (!sel || !list.some((x) => x.id === sel)) && innerWidth > 900) selected.value = { kind: 'research', id: list[0].id }; }, [list, sel]);
+  useEffect(() => {
+    const own = (list || []).filter((x) => !x.space), want = sessionStorage.getItem(OPEN_AFTER_SWITCH);
+    if (want && own.some((x) => x.id === want)) { sessionStorage.removeItem(OPEN_AFTER_SWITCH); selected.value = { kind: 'research', id: want }; return; }
+    if (own.length && (!sel || !own.some((x) => x.id === sel)) && innerWidth > 900) selected.value = { kind: 'research', id: own[0].id };
+  }, [list, sel]);
   const create = async (e) => {
     e.preventDefault();
     if (!name.trim()) return;

@@ -10,7 +10,7 @@
 - **万能栏（⌘K 或 `/`）**：收下、搜索、找论文、记想法、开始研究、对当前论文的操作、跳到任何页面和主题，都在这一个栏里。在页面任何地方粘贴链接、截图或 PDF，或者把文件拖进来，它会带着内容弹出；输入文字时边打边出库里的论文、讨论和研究。关掉时内容会留着。
 - **找论文**：在万能栏说"帮我找……的论文"（或输入描述后选"找论文"），agent 检索、挑 3–6 篇入库，并直接开启这组论文的讨论（`librarian/find.md`）。论文列表多选后也可以"一起讨论"。
 
-- **讨论**：以你和 agent 的对话为核心组成一棵树，论文则以论文为核心归在主题树里。随手记下的想法（收下时写的那句、论文页上记的、手机上说的）就是一段讨论的开头；在任意一条消息上"从这里分叉"，新分支挂在下面，带着从根到分叉点的上下文（agent 也拿到这条路径）。讨论页左边是大纲（顺序稳定；折叠、放大、过滤、拖拽；`j k h l` 导航，`Tab` / `⇧Tab` 调整层级，`e` 改名，`b` 分叉），右边是**河流**：从根到当前这段讨论读作一条主流，上游消息直接铺开，哪条消息分过叉、分出了哪几支，就在那条消息下面列成卡片，点一张河流就改道过去；也可以切到**地图**——整棵树的可缩放缓拖画布，拖一个节点到另一个上面就改了挂载，虚线边表示从某条消息分叉。讨论里引用的论文自动成为反向链接，论文的"记录"页能看到哪些讨论引用了它。agent 会给讨论起标题、把明显接着上一段的讨论挂过去；你改过的标题和位置，agent 不再动（`librarian/discuss.md`）。
+- **讨论**：以你和 agent 的对话为核心组成一棵树，论文则以论文为核心归在主题树里。随手记下的想法（收下时写的那句、论文页上记的、手机上说的）就是一段讨论的开头；在任意一条消息上"从这里分叉"，新分支挂在下面，带着从根到分叉点的上下文（agent 也拿到这条路径）。讨论页左边是大纲（顺序稳定；折叠、放大、过滤、拖拽；`j k h l` 导航，`Tab` / `⇧Tab` 调整层级，`e` 改名，`b` 分叉），右边是**河流**：从根到当前这段讨论读作一条主流，上游消息直接铺开，哪条消息分过叉、分出了哪几支，就在那条消息下面列成卡片，点一张河流就改道过去；也可以切到**地图**：agent 在后台把能收成问题或结论的讨论整理成节点（一段讨论可以不上图，几段可以合成一句），边上写明关系；点节点回到原来的讨论。你改过的句子、藏起来的节点，agent 不再动。讨论里引用的论文自动成为反向链接，论文的"记录"页能看到哪些讨论引用了它。agent 会给讨论起标题、把明显接着上一段的讨论挂过去；你改过的标题和位置，agent 不再动（`librarian/discuss.md`）。
 - **研究**：每个主题下有"论文 / 研究"两个标签。多段讨论、论文汇聚成一个研究，围绕**三要素**（研究问题、研究方法、验证方案）展开。讨论、讨论消息、论文卡片上都能一键"加入研究"；素材双向关联，点一下能跳回当时的讨论（定位并高亮那条消息）或论文。研究分"构思中"和"已确立"：agent 只能提交修改稿（`librarian/research.md`），由你采用、继续在讨论里调整或放弃；**只有你能确认确立**，且要求三要素齐全。
 
 ## 快速开始
@@ -71,6 +71,26 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 没连接 agent 时，Web 界面照样可以收下内容、确认是哪篇论文、阅读 PDF、调整主题、记想法（开一段讨论，等连上 agent 再接着聊）；快读卡、深读报告和讨论里的回答需要连接 agent。
 
+## 多人共用一台服务器（团队版）
+
+数据和网页服务放在一台云服务器上，每人只用浏览器；agent 仍在每个人自己的 Mac 上跑，用自己的 Cursor key，只能通过服务器的接口按本人权限读写。每人一个独立的论文库（服务器上各自一个目录，互相看不到）；想和别人一起做的研究，复制进一个**共享空间**再邀请成员。
+
+- **角色**：所有者（邀请、改角色、确立研究、删研究、改模型和 Overleaf）、编辑、只读。
+- **共享空间的 agent**：用空间里指定的一位成员（默认是创建者）的 key 和 Mac 跑；所有者可以在设置里换人。
+- **TCodex**：也在成员自己的 Mac 上跑。装了 `tcodex` 的 Mac 接入时会顺便装上本机 TCodex，它向服务器领取这个人（和由 ta 负责 agent 的共享空间）的 TCodex 任务、在本机运行并把回答传回；这台 Mac 在线时模型列表里才有 TCodex 的模型。搜索框的 AI 推荐、起标题这些一次性的快速调用不走 TCodex，要用就配"快速搜索接口"。
+- **服务器上不跑的**：iCloud 收件箱、多台 Mac 同步与交接；Overleaf 只能在网页上推拉，agent 改不了服务器上的本地副本。
+
+**搭服务器**（Ubuntu 24.04，域名的 A 记录已指向它，只开 22/80/443 端口）：
+
+```sh
+git clone <仓库地址> ~/paper2brain && cd ~/paper2brain
+sudo ops/server.sh p2b.example.com    # 依赖、Chromium、systemd 服务 paper2brain、Caddy（自动 HTTPS）；最后打印第一个账号的邀请链接
+```
+
+数据在 `/var/lib/paper2brain`（`hub.sqlite` 是账号和成员，`libs/<库 id>/` 是各个论文库，每个库每天自己备份到 `backups/`）。再要邀请新账号：`sudo -u <运行用户> env P2B_ROOT=/var/lib/paper2brain ./p2b admin invite --url https://p2b.example.com`；已有账号的人也可以在共享空间里直接生成邀请链接，对方用它就会顺便建好账号。
+
+**每个人的 Mac**：打开邀请链接、写名字；在网页左下角"Agent"设置里点"生成本机 agent 的口令"，照着显示的命令在终端里运行。成员的 Mac 用的是单独的仓库 [paper2brain-client](https://github.com/jetteezhou/paper2brain-client)（`setup.sh <服务器地址> <口令>`：问一次 Cursor API key 和快速搜索接口，登记到服务器上这个人的论文库，把 worker 和 TCodex 装成开机自启）。它只有转发 `./p2b` 和运行 TCodex 的少量代码，基本不变；agent 的工作规范 `librarian/` 每个任务开始时用 `./p2b guide` 从服务器取，所以服务代码和规范怎么改，成员都不用更新客户端。换设备用登录名和密码登录。
+
 ## 连接 Cursor agent
 
 1. 安装 Cursor CLI 并登录：`curl https://cursor.com/install -fsS | bash && agent login`
@@ -108,12 +128,13 @@ tail -f /tmp/paper2brain.log /tmp/paper2brain-worker.log           # 日志；�
 
 ```
 paper2brain/   代码：store（唯一碰 SQLite）、rules（写入校验）、sources（抓取）、pipeline（规则预处理）、
-               structure（插图与目录）、cursor_api（agent）、server（Web API）、cli（./p2b）、inbox（iCloud 收件箱）
+               structure（插图与目录）、cursor_api（agent）、server（Web API）、cli（./p2b）、inbox（iCloud 收件箱）、
+               accounts（团队版的账号、库与成员）
 librarian/     agent 工作规范
 web/           Web 界面：Preact + htm + signals（web/vendor），ES 模块直接加载，无构建步骤；
                app/main.js 外壳与路由，discuss.js 讨论工作台，papers.js 收件箱与论文，reader.js 阅读器，research.js 研究
 shortcuts/     iPhone 快捷指令搭建说明
-ops/           worker 启动脚本、launchd 配置
+ops/           worker 启动脚本、launchd 配置；团队版的 server.sh（Linux 服务器）、systemd 和 Caddy 配置
 tests/         写入规则与存储测试（临时数据库）
 ```
 
