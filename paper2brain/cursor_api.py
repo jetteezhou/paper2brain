@@ -99,11 +99,11 @@ MODULES = {
     "discuss": "讨论：论文、主题、论文库、划词、找论文",
     "capture": "收下：整理收下的内容、写快读卡",
     "deepread": "深读报告",
-    "distill": "给讨论起标题",
+    "distill": "给讨论起标题、整理讨论地图",
     "search": "快速搜索：没配下面的搜索接口时，搜索框第一条的 AI 推荐用的模型（只能用 TCodex 模型；默认 deepseek-v4.1-flash）",
 }
 KIND_MODULE = {"draft": "research", "writing": "research", "plan": "research", "related": "research", "codemap": "research", "experiment": "research",
-               "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill"}
+               "figures": "research", "diagram": "diagram", "motivation": "diagram", "find": "discuss", "chat": "discuss", "capture": "capture", "card": "capture", "deepread": "deepread", "distill": "distill", "map": "distill"}
 
 
 def model_for(module):
@@ -213,6 +213,8 @@ def _bind(kind, ref, agent_id):
         store.set_thread_agent(store.thread_for(f"find:{ref}")["id"], agent_id)
     if kind == "distill":
         store.kv_set(DISTILL_AGENT, agent_id)
+    if kind == "map":
+        store.kv_set(MAP_AGENT, agent_id)
 
 
 def start_async(kind, ref, text, images=(), name=None, agent_id=None, prepare=None, module=None, model=None):
@@ -1208,6 +1210,49 @@ def distill_pending():
 
 _distill_lock = threading.Lock()
 
+MAP_AGENT, MAP_TRIED = "map_agent", "map_tried"
+
+
+def map_pending():
+    """Fold newly titled discussions into the idea map, six at a time. Each signature (last message time and
+    count) is tried at most twice. No fast-API shortcut: the agent has to read the threads and run ./p2b map put.
+    On the shared server a space is walked one member at a time, so one person's batch cannot read another's.
+    ponytail: `edges` only touches the pairs it names, so a batch cannot wipe cross edges it never read."""
+    if store.multi() and not store.viewer():
+        owners = [u for u in store.thread_owners() if u]
+        if owners:
+            for uid in owners:
+                with store.viewing({"id": uid}):
+                    _map_pending_batch()
+            return
+    _map_pending_batch()
+
+
+def _map_pending_batch():
+    who = (store.viewer() or {}).get("id")
+    if not status()["enabled"] or any(r["kind"] == "map" and (r.get("user_id") or None) == who for r in store.unfinished_runs()):
+        return
+    tried = json.loads(store.kv_get(MAP_TRIED) or "{}")
+    due = []
+    for row in store.pending_map(6):
+        sig = f"{row['last_at']}:{row['n']}"
+        rec = tried.get(row["id"]) or {}
+        n = rec.get("n", 0) if rec.get("sig") == sig else 0
+        if n < 2:
+            due.append((row["id"], sig, n))
+    if not due:
+        return
+    agent_key = MAP_AGENT if not who else f"{MAP_AGENT}:{who}"
+    last = store.last_run("map")
+    if last and last["status"] == "ERROR" and (last.get("user_id") or None) == who and "agent_busy" not in (last["error"] or ""):
+        store.kv_set(agent_key, "")
+    for tid, sig, n in due:
+        tried[tid] = {"sig": sig, "n": n + 1}
+    store.kv_set(MAP_TRIED, json.dumps(tried))
+    ids = " ".join(tid for tid, _, _ in due)
+    text = f"先读 librarian/README.md 和 librarian/discuss.md，按「整理地图」一节处理这些讨论：{ids}"
+    start_async("map", "threads", text, name="整理讨论地图", agent_id=store.kv_get(agent_key) or None)
+
 
 def _scope_label(scope):
     kind, _, ref = scope.partition(":")
@@ -1318,6 +1363,21 @@ def structure_experiment(eid):
         f"研究有预期图表时，再按“填预期图表”一节用 ./p2b figures-plan fill {e['research_id']} 把这条实验的结果填进对应格子。"
     )
     return start_async("experiment", eid, text, name=f"整理实验：{(e['title'] or e['raw'])[:40]}")
+
+
+def lookup_methods(rid, gaps):
+    """The user saved a main-result figure that names methods the setup does not have. Open a new experiment
+    discussion and send the agent to find each one (library, then the web) per librarian/experiment.md."""
+    lines = [f"- 图表「{g['title']}」（id {g['id'] or '无'}）：{'、'.join(g['names'])}。"
+             f"要保存的行：{'、'.join(g['rows'])}。列：{'、'.join(g['series'])}。" for g in gaps]
+    text = ("我保存主结果图表时，下面这些方法还不在实验设置的对比方法或对照里，所以这张图没有保存。\n"
+            + "\n".join(lines) + "\n请按 librarian/experiment.md 的「图表里的新方法」处理。")
+    scope = f"experiment:{rid}"
+    tid = store.new_thread(scope)
+    names = "、".join(dict.fromkeys(n for g in gaps for n in g["names"]))
+    store.set_thread_title(tid, f"找图表里的方法：{names}"[:80], "agent")
+    discuss(scope, text, tid)
+    return tid
 
 
 def draft_figures(rid, instruction=None):

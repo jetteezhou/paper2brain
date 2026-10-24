@@ -609,6 +609,19 @@ def threads_recent(q, body):
     return store.recent_threads()
 
 
+@route("GET", "/api/map")
+def map_get(q, body):
+    return store.get_map()
+
+
+@route("POST", "/api/map/nodes/([^/]+)")
+def map_node_edit(q, body, nid):
+    if "text" not in body and "hidden" not in body:
+        raise rules.Rejected("没有要改的")
+    store.set_map_node(nid, body["text"] if "text" in body else None, bool(body["hidden"]) if "hidden" in body else None)
+    return store.get_map()
+
+
 @route("GET", "/api/messages/([^/]+)")
 def message_get(q, body, mid):
     return store.message(mid)
@@ -898,7 +911,22 @@ def figures_update(q, body, rid):
     """The user's own edit: the figures, and optionally the setup and which experiment result fills which cell."""
     cur = store.get_figures(rid)
     design = rules.validate_setup(body["setup"], store.paper_ids()) if body.get("setup") else None
-    figures = rules.validate_figures(body.get("figures", cur["figures"]), _context(rid), design or cur["design"])
+    draft, setup = body.get("figures", cur["figures"]), design or cur["design"]
+    try:
+        figures = rules.validate_figures(draft, _context(rid), setup)
+    except rules.Rejected as err:
+        gaps = rules.unknown_main_methods(draft, setup)
+        lines = [ln[2:] for ln in str(err).splitlines() if ln.startswith("- ")]
+        # Only this failure: the user named methods the setup does not have. Ask the agent to find them
+        # instead of leaving the save as a dead end. Any other problem is still reported as-is.
+        if gaps and lines and all("不在 setup.baselines / controls 里" in ln for ln in lines) and cursor_api.status()["enabled"]:
+            try:
+                tid = cursor_api.lookup_methods(rid, gaps)
+            except cursor_api.AgentError:
+                raise err
+            names = list(dict.fromkeys(n for g in gaps for n in g["names"]))
+            return {"ok": False, "lookup": True, "thread_id": tid, "methods": names}
+        raise
     cells = rules.validate_cells(body["cells"], figures, store.get_research(rid)["experiments"]) if "cells" in body else None
     store.update_figures(rid, figures, "user", body.get("base_rev"), design)
     if cells:
@@ -1310,7 +1338,7 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
 
-AGENT_JOBS = (cursor_api.distill_pending, cursor_api.name_pending, cursor_api.deepread_pending, cursor_api.card_pending)
+AGENT_JOBS = (cursor_api.distill_pending, cursor_api.map_pending, cursor_api.name_pending, cursor_api.deepread_pending, cursor_api.card_pending)
 
 
 def _run(jobs):

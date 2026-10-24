@@ -42,6 +42,8 @@ paper2brain 发给你的任务都以"先读 librarian/""你是 paper2brain"或"�
 ./p2b thread show <id> [<id> ...]    # 一段讨论的消息、上级和下级
 ./p2b thread title <id> --text "..." # 给讨论起标题（见 librarian/discuss.md）
 ./p2b thread move <id> --parent <上级 id|root>
+./p2b map show                         # 讨论地图：问题、结论、关系（见 librarian/discuss.md）
+./p2b map put --file /tmp/map.json     # 提交地图。没写上的节点和跨线都保留；drop_edges 删点名的跨线
 ./p2b note add --text "..." [--paper <arxiv:id>] [--topic "VLA"]
 ./p2b research list [--topic "VLA"]
 ./p2b research show <研究 id>

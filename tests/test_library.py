@@ -88,6 +88,22 @@ class Rules(unittest.TestCase):
         with self.assertRaisesRegex(rules.Rejected, "第 1 节第 4 段：在依据的那句话后面写"):
             rules.validate_report({"sections": [{**ok, "points": ok["points"] + [{"text": "d[2]", "citations": cite("laundry folding")}]}]}, PAGES)
 
+    def test_map_sentences_and_relations(self):
+        q = {"id": "q", "group": "g", "kind": "question", "text": "原因是什么？", "sources": ["t1"]}
+        with self.assertRaisesRegex(rules.Rejected, "问句"):
+            rules.validate_map({"nodes": [{**q, "text": "原因是什么"}]})
+        with self.assertRaisesRegex(rules.Rejected, "判断句"):
+            rules.validate_map({"nodes": [{**q, "kind": "conclusion", "text": "是预训练吗？"}]})
+        with self.assertRaisesRegex(rules.Rejected, "回答"):
+            rules.validate_map({"nodes": [q, {"id": "c", "group": "g", "kind": "question", "text": "C2R 为何单独高？", "parent": "q", "rel": "回答", "sources": ["t2"]}]})
+        with self.assertRaisesRegex(rules.Rejected, "部分"):
+            rules.validate_map({"nodes": [{"id": "c", "group": "g", "kind": "question", "text": "C2R 为何单独高？", "parent": "q", "rel": "收窄", "partial": True, "sources": ["t2"]}]})
+        out = rules.validate_map({"nodes": [
+            {"id": "b", "group": "g", "kind": "conclusion", "text": "要拉长历史", "sources": ["t1"]},
+            {"id": "a", "group": "g", "kind": "conclusion", "text": "一次噪声就够", "sources": ["t2"]},
+        ], "edges": [{"src": "b", "dst": "a", "rel": "对照"}]})
+        self.assertEqual((out["edges"][0]["src"], out["edges"][0]["dst"], out["edges"] is not None), ("a", "b", True))
+
 
 class Store(unittest.TestCase):
     def setUp(self):
@@ -482,6 +498,41 @@ class Store(unittest.TestCase):
         self.assertEqual((fg["design"]["questions"][1], fg["figures"][0]["question"], [c["row"] for c in fg["cells"]]), ("Q two", 2, ["Object"]))
         with self.assertRaisesRegex(rules.Rejected, "rows"):
             server.figures_update({}, {"figures": [{**f0, "rows": []}], "base_rev": 3}, rid)
+
+    def test_saving_a_chart_with_an_unknown_method_asks_the_agent_to_find_it(self):
+        from unittest import mock
+
+        from paper2brain import cursor_api, server
+
+        known = {"arxiv:2410.24164", "arxiv:2607.26789"}
+        for pid in known:
+            store.upsert_paper(pid, pid)
+        setup = {"questions": ["Does it work?"], "method": "ours", "benchmarks": [{"name": "Spatial"}],
+                 "baselines": [{"name": "pi0", "paper": "arxiv:2410.24164"}, {"name": "CheckVLA", "paper": "2607.26789"}],
+                 "metrics": [{"name": "SR", "better": "higher"}]}
+        design = rules.validate_setup(setup, known)
+        fig = {"title": "主结果", "kind": "bar", "section": "main", "question": 1, "caption": "Success rate.", "metric": "SR",
+               "rows": ["Spatial"], "series": ["ours", "pi0", "CheckVLA"]}
+        rid = store.add_research("lookup", "user")
+        store.propose_figures(rid, rules.validate_figures([fig], "", design), None, "agent", 0, design)
+        store.accept_figures(rid, 0)
+        f0 = store.get_figures(rid)["figures"][0]
+        named = {**f0, "series": ["ours", "pi0", "LingBot-VA"]}
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": False}):
+            with self.assertRaisesRegex(rules.Rejected, "LingBot-VA"):
+                server.figures_update({}, {"figures": [named], "base_rev": 1}, rid)
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "discuss", return_value="run") as asked:
+            got = server.figures_update({}, {"figures": [named], "base_rev": 1}, rid)
+        self.assertEqual((got["lookup"], got["methods"], asked.call_args.args[0]), (True, ["LingBot-VA"], f"experiment:{rid}"))
+        self.assertIn("LingBot-VA", asked.call_args.args[1])
+        self.assertEqual(store.thread_for(thread_id=got["thread_id"])["scope"], f"experiment:{rid}")
+        self.assertNotIn("LingBot-VA", store.get_figures(rid)["figures"][0]["series"])
+        with mock.patch.object(cursor_api, "status", return_value={"enabled": True}), \
+                mock.patch.object(cursor_api, "discuss", return_value="run") as asked:
+            with self.assertRaisesRegex(rules.Rejected, "caption"):
+                server.figures_update({}, {"figures": [{**named, "caption": ""}], "base_rev": 1}, rid)
+        asked.assert_not_called()
 
     def test_agent_cannot_overwrite_user_edited_experiment(self):
         rid = store.add_research("exp", "user")
@@ -1009,6 +1060,63 @@ class Store(unittest.TestCase):
         tree = {t["path"]: [c["name"] for c in t["children"]] for t in store.topic_tree()}
         self.assertEqual(tree["VLA"], ["tokenizer", "推理加速", "实时推理"])
         self.assertIn("V-JEPA", tree["WAM"])
+
+    def test_idea_map_keeps_user_words_and_rereads_new_messages(self):
+        with scratch_home():
+            a = store.new_thread("library", text="PatchWAM 为什么大涨")
+            b = store.new_thread("library", text="C2C 和 C2R 不是一个原因")
+            chore = store.new_thread("library", text="再找一遍代码")
+            store.set_thread_title(a, "PatchWAM 相对 FastWAM 大涨的原因", "agent")
+            store.set_thread_title(b, "C2C 与 C2R 不是同一个原因", "agent")
+            self.assertEqual({t["id"] for t in store.pending_map()}, {a, b})
+            why = {"id": "why", "group": "pw", "kind": "question", "text": "PatchWAM 相对 FastWAM 大涨的原因是什么？", "sources": [a]}
+            split = {"id": "split", "group": "pw", "kind": "conclusion", "text": "C2C 和 C2R 的涨幅不是同一个原因", "parent": "why", "rel": "回答", "partial": True, "sources": [b]}
+            store.put_map({"groups": [{"id": "pw", "name": "PatchWAM 的机制"}], "nodes": [why, split], "seen": [a, b, chore]})
+            got = {n["id"]: n for n in store.get_map()["nodes"]}
+            self.assertTrue(got["split"]["partial"] and got["split"]["sources"][0]["title"].startswith("C2C"))
+            self.assertEqual(store.pending_map(), [])
+            store.set_map_node("why", text="PatchWAM 大涨究竟是什么原因？")
+            with self.assertRaisesRegex(rules.Rejected, "手动改过"):
+                store.put_map({"nodes": [{**why, "text": "agent 改掉的问句？"}, split]})
+            self.assertEqual(got_text := next(n["text"] for n in store.get_map()["nodes"] if n["id"] == "why"), "PatchWAM 大涨究竟是什么原因？")
+            with self.assertRaisesRegex(rules.Rejected, "不能去掉"):
+                store.put_map({"drop": ["why"]})
+            with self.assertRaisesRegex(rules.Rejected, "同一分组"):
+                store.put_map({"groups": [{"id": "other", "name": "别处"}], "nodes": [{**split, "group": "other"}]})
+            store.put_map({"nodes": [{"id": "other", "group": "pw", "kind": "conclusion", "text": "涨幅来自动作写成 patch", "sources": [b]}],
+                           "edges": [{"src": "split", "dst": "other", "rel": "对照"}]})
+            store.put_map({"seen": [a]})
+            store.put_map({"edges": []})
+            self.assertEqual(store.get_map()["edges"], [{"src": "other", "dst": "split", "rel": "对照"}])
+            third = {"id": "third", "group": "pw", "kind": "conclusion", "text": "涨幅来自视频没去噪完", "sources": [b]}
+            store.put_map({"nodes": [third], "edges": [{"src": "third", "dst": "split", "rel": "支撑"}]})
+            self.assertEqual({(e["src"], e["dst"], e["rel"]) for e in store.get_map()["edges"]},
+                             {("other", "split", "对照"), ("third", "split", "支撑")})
+            store.put_map({"edges": [{"src": "third", "dst": "split", "rel": "对照"}]})
+            self.assertEqual({(e["src"], e["dst"], e["rel"]) for e in store.get_map()["edges"]},
+                             {("other", "split", "对照"), ("split", "third", "对照")})
+            store.put_map({"drop_edges": [{"src": "split", "dst": "third", "rel": "对照"}]})
+            self.assertEqual(store.get_map()["edges"], [{"src": "other", "dst": "split", "rel": "对照"}])
+            with self.assertRaisesRegex(rules.Rejected, "不在地图上"):
+                store.put_map({"drop_edges": [{"src": "split", "dst": "third", "rel": "对照"}]})
+            store.add_message(a, "user", "再问一句")
+            self.assertEqual([t["id"] for t in store.pending_map()], [a])
+            kept = "PatchWAM 大涨究竟是什么原因？"
+            with self.assertRaisesRegex(rules.Rejected, "环"):
+                store.put_map({"nodes": [
+                    {**why, "text": kept, "parent": "split", "rel": "引出"},
+                    {**split, "parent": "why"},
+                ]})
+            self.assertIsNone(next(n["parent"] for n in store.get_map()["nodes"] if n["id"] == "why"))
+            store.put_map({"drop": ["other"]})
+            self.assertEqual(store.get_map()["edges"], [])
+            store.set_map_node("split", hidden=True)
+            store.put_map({"seen": [b]})
+            self.assertTrue(next(n["hidden"] for n in store.get_map()["nodes"] if n["id"] == "split"))
+            with self.assertRaisesRegex(rules.Rejected, "藏起"):
+                store.put_map({"nodes": [{**split, "text": "另一句已经定下的结论"}]})
+            with self.assertRaisesRegex(rules.Rejected, "不存在"):
+                store.put_map({"nodes": [{"id": "x", "group": "pw", "kind": "conclusion", "text": "库里没有这段讨论", "sources": ["missing-thread"]}]})
 
 
 class Server(unittest.TestCase):
